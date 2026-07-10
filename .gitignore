@@ -1,0 +1,85 @@
+# ---------------------------------------------------------
+# Python
+# ---------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---------------------------------------------------------
+# Python environments
+# ---------------------------------------------------------
+.venv/
+venv/
+env/
+
+# ---------------------------------------------------------
+# Jupyter
+# ---------------------------------------------------------
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# ---------------------------------------------------------
+# Environment variables and credentials
+# ---------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+credentials.json
+secrets.yaml
+
+# ---------------------------------------------------------
+# IDE and operating system
+# ---------------------------------------------------------
+.vscode/
+.cursor/
+.DS_Store
+Thumbs.db
+
+# ---------------------------------------------------------
+# Restricted challenge data
+# ---------------------------------------------------------
+data/raw/*
+data/interim/*
+data/processed/*
+data/external/*
+
+!data/raw/.gitkeep
+!data/interim/.gitkeep
+!data/processed/.gitkeep
+!data/README.md
+
+# Synthetic examples may be committed
+!data/synthetic/
+!data/synthetic/**
+
+# ---------------------------------------------------------
+# Generated experiment artifacts
+# ---------------------------------------------------------
+runs/*
+!runs/.gitkeep
+
+logs/
+checkpoints/
+tmp/
+
+# ---------------------------------------------------------
+# Private or unsanitized outputs
+# ---------------------------------------------------------
+results/private/*
+reports/private/
+
+# ---------------------------------------------------------
+# Solver-generated files
+# ---------------------------------------------------------
+*.lp
+*.mps
+*.sol
+*.log

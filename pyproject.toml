@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wiser-dom"
+version = "0.1.0"
+authors = [
+    { name = "Andrei Pomorov", email = "apomorov@usf.edu" },
+    { name = "Sanjith Jothi Bala" },
+    { name = "Arunaday Gupta" }
+]
+description = "Hybrid classical and quantum solver for Distributed Order Management"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+classical = [
+    "ortools",
+]
+
+quantum = [
+    "pennylane"
+]
+
+notebook = [
+    "jupyterlab",
+    "ipykernel",
+    "matplotlib",
+]
+
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
