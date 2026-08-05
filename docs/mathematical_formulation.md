@@ -62,9 +62,7 @@ Let $F_o^{\mathrm{def}}$ be the default candidate's protected-ATP fill preview.
 The minimum non-default fill is
 
 $$
-L_o^{\mathrm{div}}=
-\min\left\{Q_o,
-F_o^{\mathrm{def}}+
+L_o^{\mathrm{div}}=\min\left\{Q_o, F_o^{\mathrm{def}}+
 \max\left(\left\lceil\delta_oQ_o\right\rceil,B_o\right)
 \right\},
 $$
