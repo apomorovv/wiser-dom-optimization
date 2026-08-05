@@ -65,6 +65,7 @@ $$
 L_o^{\mathrm{div}}=\min\left\{Q_o, F_o^{\mathrm{def}}+ \max\left(\bigl\lceil\delta_o \cdot Q_o\bigr\rceil,B_o\right) \right\}
 $$
 
+
 where the POC uses $\delta_o=0.05$ and $B_o=100$ cases. Thus diversion must
 improve by both five percentage points and 100 cases, unless demand itself caps the
 requirement.
