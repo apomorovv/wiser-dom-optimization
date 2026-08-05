@@ -186,9 +186,11 @@ def write_planner_artifacts(
     lines.extend(
         [
             "",
-            "Every recommendation passed assignment, demand, eligibility, inventory, "
-            "capacity, and minimum-divert checks. Review the detailed CSV before release; "
-            "it contains order and DC identifiers.",
+            (
+                "Every recommendation passed assignment, demand, eligibility, inventory, "
+                "capacity, and minimum-divert checks. Review the detailed CSV before release; "
+                "it contains order and DC identifiers."
+            ),
             "",
         ]
     )

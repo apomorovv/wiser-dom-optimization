@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
-
 from .objective import evaluate_solution
 from .schemas import ProblemData, Solution
 from .validation import validate_solution

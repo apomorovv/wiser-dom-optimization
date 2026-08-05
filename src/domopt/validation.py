@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
-
 import numpy as np
 import pandas as pd
 
 from .resources import solution_capacity_usage
 from .rules import minimum_divert_fulfillment
 from .schemas import ProblemData, Solution, ValidationResult
-
 
 _TOL = 1e-8
 

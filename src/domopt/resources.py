@@ -7,13 +7,12 @@ validator from silently using different definitions of dock, pallet, or case pic
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from math import floor
-from typing import Mapping
 
 import pandas as pd
 
 from .schemas import ProblemData, Solution
-
 
 SUPPORTED_CAPACITY_RESOURCES = {
     "dock",
@@ -33,10 +32,10 @@ def cases_per_pallet(line: Mapping[str, object] | pd.Series) -> int | None:
     return parsed if parsed > 0 else None
 
 
-def split_pick_quantities(quantity: int | float, per_pallet: int) -> tuple[int, int]:
+def split_pick_quantities(quantity: float, per_pallet: int) -> tuple[int, int]:
     """Return ``(full_pallets, loose_cases)`` for an integer case quantity."""
 
-    cases = int(round(float(quantity)))
+    cases = round(float(quantity))
     if cases < 0 or per_pallet <= 0:
         raise ValueError(
             "Pick decomposition requires nonnegative cases and a positive pallet size"
@@ -58,12 +57,12 @@ def candidate_fixed_consumption(
 
 def line_variable_consumption(
     line: Mapping[str, object] | pd.Series,
-    quantity: int | float,
+    quantity: float,
     resource: str,
     *,
     split_picks: bool,
 ) -> float:
-    cases = int(round(float(quantity)))
+    cases = round(float(quantity))
     if resource == "throughput_cases":
         return float(cases)
     if resource in {"case_pick", "pallet_pick"}:
@@ -139,7 +138,7 @@ def solution_capacity_usage(
 
     lines = problem.order_lines.set_index(["order_id", "sku_id"], drop=False)
     for row in solution.fulfillment.itertuples(index=False):
-        quantity = int(round(float(row.fulfilled_cases)))
+        quantity = round(float(row.fulfilled_cases))
         if quantity <= 0 or pd.isna(row.selected_dc) or pd.isna(row.selected_pgi_date):
             continue
         key = (str(row.order_id), str(row.sku_id))

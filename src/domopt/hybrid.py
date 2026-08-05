@@ -119,7 +119,7 @@ def residualize_problem(
         residual = float(row.cumulative_available_cases) - inventory_usage.get(key, 0.0)
         if residual < -1e-8:
             raise ValueError(f"Frozen incumbent exceeds inventory at {key}")
-        residual_inventory.append(max(0, int(round(residual))))
+        residual_inventory.append(max(0, round(residual)))
     inventory["cumulative_available_cases"] = residual_inventory
 
     capacity_usage = solution_capacity_usage(problem, frozen)

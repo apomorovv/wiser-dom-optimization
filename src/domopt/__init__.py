@@ -1,5 +1,7 @@
 """WISER–Nestlé Distributed Order Management optimization package."""
 
+from .hybrid import HybridConfig, solve_hybrid
+from .planner import build_planner_table, write_planner_artifacts
 from .schemas import (
     ASSUMPTION_VERSION,
     SCHEMA_VERSION,
@@ -8,17 +10,15 @@ from .schemas import (
     Solution,
     ValidationResult,
 )
-from .hybrid import HybridConfig, solve_hybrid
-from .planner import build_planner_table, write_planner_artifacts
 
 __all__ = [
     "ASSUMPTION_VERSION",
     "SCHEMA_VERSION",
+    "HybridConfig",
     "ObjectiveBreakdown",
     "ProblemData",
     "Solution",
     "ValidationResult",
-    "HybridConfig",
     "build_planner_table",
     "solve_hybrid",
     "write_planner_artifacts",

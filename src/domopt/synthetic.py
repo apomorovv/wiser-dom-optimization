@@ -101,7 +101,7 @@ def make_synthetic_problem(
     for dc_id in dcs:
         for sku_id in skus:
             network_share = demand_by_sku[sku_id] / dc_count
-            available = max(1, int(round(network_share * rng.uniform(0.65, 1.10))))
+            available = max(1, round(network_share * rng.uniform(0.65, 1.10)))
             inventory_rows.append(
                 {
                     "dc_id": dc_id,

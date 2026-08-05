@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -30,7 +31,7 @@ class _RowBuilder:
     row_count: int = 0
 
     @classmethod
-    def create(cls) -> "_RowBuilder":
+    def create(cls) -> _RowBuilder:
         return cls([], [], [], [], [])
 
     def add(self, coefficients: Mapping[int, float], lb: float, ub: float) -> None:
@@ -425,7 +426,7 @@ def solve_classical(
         selected_dc: str | None = None
         selected_date: pd.Timestamp | None = None
         if candidate_id is not None:
-            fulfilled = int(round(values[f_index[(int(line_id), candidate_id)]]))
+            fulfilled = round(values[f_index[(int(line_id), candidate_id)]])
             candidate = candidate_lookup.loc[candidate_id]
             if isinstance(candidate, pd.DataFrame):
                 candidate = candidate.iloc[0]

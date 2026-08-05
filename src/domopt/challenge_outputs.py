@@ -124,13 +124,11 @@ def summarize_challenge_outputs(
     total_ordered = float(ordered.sum())
     total_fulfilled = float(fulfilled.sum())
     result: dict[str, Any] = {
-        "order_rows": int(len(orders)),
-        "sku_rows": int(len(skus)),
+        "order_rows": len(orders),
+        "sku_rows": len(skus),
         "unique_orders": int(orders[order_key].nunique()),
         "unique_loads": int(orders["LoadNumber"].nunique()),
-        "distribution_center_count": int(
-            len(set(orders["DefaultDC"]) | set(orders["RecommendedDC"]))
-        ),
+        "distribution_center_count": len(set(orders["DefaultDC"]) | set(orders["RecommendedDC"])),
         "diverted_orders": int(diverted.sum()),
         "default_orders": int((~diverted).sum()),
         "requested_cases": total_ordered,

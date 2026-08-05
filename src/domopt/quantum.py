@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from itertools import product
 from math import exp
-from typing import Literal, Mapping
+from typing import Literal
 
 import numpy as np
 import pandas as pd
