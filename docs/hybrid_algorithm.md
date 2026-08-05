@@ -14,9 +14,9 @@ The implementation separates two jobs:
 
 QUBO means *quadratic unconstrained binary optimization*: minimize
 
-\[
+$$
 E(y)=c+y^\mathsf{T}Qy,\qquad y\in\{0,1\}^n.
-\]
+$$
 
 MILP means *mixed-integer linear program*: a model with linear constraints and a
 mixture of integer and continuous variables. Here all case and assignment variables
@@ -24,21 +24,21 @@ are integer.
 
 ## 2. Acceptance invariant
 
-Let \(S^k\) be the feasible incumbent after iteration \(k\), and let \(J(S)\) be
+Let $S^k$ be the feasible incumbent after iteration $k$, and let $J(S)$ be
 the independently recomputed business objective. The solver accepts a proposal
-\(\widehat S\) only when
+$\widehat S$ only when
 
-\[
+$$
 \widehat S\text{ is feasible}
 \quad\land\quad
 J(\widehat S)>J(S^k).
-\]
+$$
 
-Otherwise \(S^{k+1}=S^k\). Therefore
+Otherwise $S^{k+1}=S^k$. Therefore
 
-\[
+$$
 J(S^{k+1})\ge J(S^k)
-\]
+$$
 
 at every iteration. Sampling quality affects search efficiency, not returned-solution
 correctness or monotonicity.
@@ -62,31 +62,38 @@ choices.
 ### Step 3: conflict-aware neighborhood
 
 Large-neighborhood search (LNS) changes a subset of orders while freezing the rest.
-Orders become neighbors when their candidates can consume a common inventory bucket
-or DC/date capacity. The selection priority uses:
+Assignment groups become neighbors when their candidate plans can consume a common
+inventory bucket or DC/date capacity. Every neighborhood contains whole groups, so a
+source load is never cut in half. The conflict strategy prioritizes:
 
 - current unfulfilled cases;
 - number of resource-conflicting neighbors;
 - number of eligible assignment choices; and
 - a deterministic identifier tie-break.
 
+The batching ablation replaces this rule with seeded random group selection while
+holding all other settings constant.
+
 The neighborhood stops at both `neighborhood_orders` and `max_qubo_variables`.
-Candidate-column reduction retains the incumbent candidate and the best isolated
-alternatives up to `max_candidates_per_order`, always with an unassigned plan. Thus
-both unusually wide orders and the full order population remain bounded.
+Candidate-column reduction retains the incumbent option and the best isolated
+alternatives up to `max_candidates_per_order`, always with an unassigned plan. A
+separate Pareto pass removes an alternate only when another group option has no worse
+estimated fill/value/cost/lead time and is strictly better in at least one dimension;
+the default is always retained. Thus both unusually wide groups and the full order
+population remain bounded.
 
 ### Step 4: exact residualization
 
 Consumption from frozen orders is subtracted from every inventory checkpoint and
-capacity bucket. If \(A\) is the active order set and \(\bar A\) the frozen set,
+capacity bucket. If $A$ is the active order set and $\bar A$ the frozen set,
 the local inventory limit is
 
-\[
+$$
 \widetilde I_{dst}
 =I_{dst}
 -\sum_{\substack{o\in\bar A,\,\tau\le t}}
 f_{osd\tau}^{\mathrm{inc}}.
-\]
+$$
 
 The same subtraction is applied to exact-date dock, throughput, pick, weight, and
 volume resources. This prevents the local solver from reusing stock or capacity
@@ -94,55 +101,56 @@ already committed outside the neighborhood.
 
 ### Step 5: assignment-plan QUBO
 
-For active order \(o\), the QUBO contains one binary variable \(y_{ok}\) for each
-previewed candidate plan \(k\), plus an explicit unassigned plan. A plan contains a
-candidate DC/date, preview fulfillment, isolated business value \(w_{ok}\), and a
-resource-usage signature.
+For active order $o$, the QUBO contains one binary variable $y_{ok}$ for each
+previewed candidate plan $k$, plus an explicit unassigned plan. Orders in the same
+assignment group share the same option during sample repair and recourse. A plan
+contains a candidate DC/date, preview fulfillment, isolated business value
+$w_{ok}$, and a resource-usage signature.
 
 Exactly one outcome per order is encouraged by
 
-\[
+$$
 P_{\mathrm{one}}
 \left(1-\sum_{k\in\mathcal K_o}y_{ok}\right)^2.
-\]
+$$
 
-The plan value is encoded as \(-w_{ok}y_{ok}\), because the QUBO is minimized.
-The penalty \(P_{\mathrm{one}}\) is calibrated above the largest plan benefit plus
+The plan value is encoded as $-w_{ok}y_{ok}$, because the QUBO is minimized.
+The penalty $P_{\mathrm{one}}$ is calibrated above the largest plan benefit plus
 incident resource penalties.
 
-For resource bucket \(r\), let \(a_{okr}\) be plan usage and \(R_r\) its residual
+For resource bucket $r$, let $a_{okr}$ be plan usage and $R_r$ its residual
 limit. A quadratic surrogate adds a loss-weighted penalty when two plans have a
 direct overload or contribute to higher-order contention. Higher-order pressure is
 
-\[
+$$
 \rho_r=
 \max\left(0,
 \frac{\sum_o\max_{k\in\mathcal K_o}a_{okr}-R_r}
 {\sum_o\max_{k\in\mathcal K_o}a_{okr}}
 \right).
-\]
+$$
 
-For plans \((o,k)\) and \((o',k')\), \(o\ne o'\), the surrogate resource amount is
+For plans $(o,k)$ and $(o',k')$, $o\ne o'$, the surrogate resource amount is
 
-\[
+$$
 h_{ok,o'k',r}
 =\max\left\{
 0,
 a_{okr}+a_{o'k'r}-R_r,
 \rho_r\min(a_{okr},a_{o'k'r})
 \right\}.
-\]
+$$
 
 It is multiplied by a conservative marginal business-loss estimate and added as a
 quadratic coefficient. The complete local energy is
 
-\[
+$$
 E(y)=
 -\sum_{o,k}\widetilde w_{ok}y_{ok}
 +P_{\mathrm{one}}\sum_o
 \left(1-\sum_k y_{ok}\right)^2
 +\sum_{(ok,o'k')}P_{ok,o'k'}y_{ok}y_{o'k'}.
-\]
+$$
 
 This is a ranking surrogate, not a proof of capacity feasibility. Aggregate resource
 constraints can require higher-order terms or slack encodings that would enlarge the
@@ -167,8 +175,9 @@ constraint information. Remote calls therefore require `allow_remote=True`.
 ### Step 7: repair and exact recourse
 
 Raw samples may violate one-hot structure. Deterministic repair keeps the selected
-highest-value plan or, if none is selected, chooses the highest-value plan. The
-unperturbed QUBO ranks unique repaired assignments.
+highest-value plan or, if none is selected, chooses the highest-value plan. It then
+projects all members of an assignment group onto one common option. The unperturbed
+QUBO ranks unique repaired assignments.
 
 For each of the best `top_k_recourse` assignments, the local MILP fixes assignment
 variables and reoptimizes all fulfillment quantities under residual inventory and
@@ -180,7 +189,8 @@ checks:
 - candidate eligibility and date consistency;
 - every projected-ATP inventory checkpoint;
 - enabled dock, throughput, pick, weight, and volume limits; and
-- minimum alternate-fill improvement.
+- the five-percentage-point and 100-case alternate-fill improvement; and
+- assignment-group cohesion.
 
 Only an improving feasible result replaces the incumbent.
 
@@ -199,16 +209,16 @@ all preprocessing, queue, sampling, repair, and recourse time.
 
 ## 5. Scaling
 
-Let \(B\) be active orders and \(K_o\) candidate plans for order \(o\). The local
+Let $B$ be active orders and $K_o$ candidate plans for order $o$. The local
 logical-variable count is
 
-\[
+$$
 n_{\mathrm{QUBO}}=\sum_{o\in B}(|K_o|+1),
-\]
+$$
 
-where one is the unassigned plan and \(|K_o|\) is capped before QUBO construction.
+where one is the unassigned plan and $|K_o|$ is capped before QUBO construction.
 Dense pair construction is
-\(O(n_{\mathrm{QUBO}}^2)\), although zero couplings are omitted by remote adapters.
+$O(n_{\mathrm{QUBO}}^2)$, although zero couplings are omitted by remote adapters.
 The outer conflict graph can be built once and updated incrementally in a production
 implementation. `max_qubo_variables` makes hardware demand independent of the total
 number of orders.
@@ -234,8 +244,9 @@ usable problem size on a QPU.
 `qubo_noise_relative_sigma` applies reproducible symmetric Gaussian perturbations to
 QUBO coefficients. This is a coefficient-sensitivity test, not a complete physical
 noise model. Samples are still ranked against the original QUBO and evaluated by
-exact business recourse. Report performance over multiple seeds and noise levels;
-do not infer hardware robustness from one simulated perturbation.
+exact business recourse. Report performance over multiple seeds and noise levels.
+The full profile uses four seeds and three relative-noise levels; do not infer
+hardware robustness from a local coefficient perturbation.
 
 ## 7. Limitations
 

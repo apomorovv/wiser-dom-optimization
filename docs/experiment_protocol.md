@@ -1,251 +1,164 @@
 # Experiment protocol
 
-This protocol ensures fair and reproducible comparison of baseline, classical, quantum-inspired, and quantum methods.
+The notebook and `src/domopt/experiments.py` implement one fair, aggregate-only
+comparison protocol for the real challenge subsets and an independent synthetic
+control.
 
-## 1. Immutable experiment definition
+## 1. Immutable comparison definition
 
-An experiment is defined by
+An experiment is identified by:
 
-\[
-E=(\text{dataset},\text{schema version},\text{assumption version},\text{candidate set},\text{objective convention},\text{method configuration},\text{seed},\text{git commit}).
-\]
+$$
+E=(\text{bundle hash},\text{schema},\text{assumptions},\text{candidate set},
+\text{objective},\text{method config},\text{seed},\text{commit}).
+$$
 
-Changing any component creates a new experiment.
+Changing any element creates a different experiment. Methods compared within one row
+group receive identical canonical data, candidates, objective calculation, and
+validator.
 
-## 2. Common evaluation
+## 2. Methods
 
-Every method receives the same canonical tables and candidate set. Every result is evaluated by:
+| Method | Role |
+|---|---|
+| `default` | Deterministic default-DC policy baseline. |
+| `greedy` | Fast sequential reassignment baseline using current residual resources. |
+| `classical` | Exact or bounded SciPy/HiGHS MILP reference. |
+| `hybrid` | Bounded QUBO assignment search plus exact MILP recourse. |
 
-- `src/domopt/validation.py`;
-- `src/domopt/objective.py`;
-- `src/domopt/metrics.py`.
+Simulated annealing is quantum-inspired, not quantum hardware. The optional D-Wave
+backend is excluded until restricted-data approval is obtained.
 
-Do not copy a method-specific objective directly into a final comparison table.
+## 3. Common metrics
 
-## 3. Required methods
+Every result records feasibility, objective, fulfilled value, penalty cost, shipping
+cost, case fill, value fill, reassigned orders, runtime, and—when available—MILP
+optimality gap. Hybrid rows also record starting objective, improvement, accepted
+moves, recourse calls, and maximum local QUBO width.
 
-The minimum comparison contains:
+$$
+J=\text{fulfilled value}-\text{thresholded penalty}-\text{shipping cost},
+$$
 
-1. `default`: deterministic default-DC baseline;
-2. `greedy`: deterministic sequential reassignment baseline;
-3. `classical`: exact or bounded classical optimizer;
-4. `hybrid`: bounded QUBO candidate generation plus exact classical recourse.
+$$
+\operatorname{caseFill}=\frac{\sum_{o,s}f_{os}}{\sum_{o,s}Q_{os}}.
+$$
 
-For a quantum claim, run the same hybrid configuration with a remote QPU backend and
-at least one tuned local sampler. `simulated_annealing` is quantum-inspired, not a
-quantum-hardware result.
+Solver-native objective and QUBO energy are never copied into the comparison table.
+The independent evaluator recomputes all three objective components.
 
-## 4. Required metrics
+## 4. Full experiment grid
 
-### Objective
+### Core solver comparison
 
-\[
-\text{Objective}=\text{FulfilledValue}-\text{PenaltyCost}-\text{ShippingCost}.
-\]
+Run default, greedy, exact MILP, and hybrid on the same deterministic high-shortage
+real-data subset. Exact MILP uses a 60-second limit and 1% requested relative gap;
+the achieved gap is reported.
 
-Report all components separately.
+### Size scaling
 
-### Case fill rate
+Run greedy and hybrid at requested subset sizes 8, 20, and 50. Run exact MILP at 8
+and 20. Whole assignment groups are expanded, so actual order count can be larger
+than the requested seed count. Report runtime, objective, fill, candidate rows, MILP
+gap, and local QUBO width.
 
-\[
-\operatorname{CFR}
-=
-\frac{\sum_{o,s}F_{os}}{\sum_{o,s}Q_{os}},
-\]
+### Penalty-weight sensitivity
 
-where \(F_{os}\) is final fulfilled quantity.
+Multiply variable, fixed, per-cut-SKU, minimum, and maximum penalties by 0.5, 1.0,
+and 2.0. Compare greedy and hybrid only within the same scale; raw objectives across
+different scales do not represent the same economics.
 
-### Value fill rate
+### Candidate-count sensitivity
 
-\[
-\operatorname{VFR}
-=
-\frac{\sum_{o,s}v_{os}F_{os}}{\sum_{o,s}v_{os}Q_{os}}.
-\]
+Retain at most 1, 2, 4, or 6 group options, always preserving the default. Compare
+greedy and hybrid to quantify search breadth, runtime, and quality.
 
-### Reassigned orders
+### Inventory shocks
 
-\[
-N_{\mathrm{divert}}
-=
-\sum_o\mathbf 1[d_o^{\mathrm{selected}}\ne d_o^{\mathrm{def}}\land z_o=0].
-\]
+Apply deterministic 0%, 10%, and 25% reductions to every protected-ATP value and
+compare default, greedy, and hybrid. This is a stress scenario, not a forecast.
 
-### Feasibility
+### Seed and coefficient-noise sensitivity
 
-A result is feasible only when every validation category has zero violations.
+Run hybrid at seeds 3, 11, 29, and 47 with relative Gaussian QUBO coefficient noise
+0%, 1%, and 5%. Samples are ranked against the original QUBO and pass exact recourse.
+This tests local ranking sensitivity; it is not a model of physical QPU noise.
 
-### Classical optimality gap
+### Pareto-pruning ablation
 
-For maximization with incumbent \(P\) and valid upper bound \(B\ge P\):
+Run the same base population with and without Pareto pruning. Pruning is useful only
+when it reduces candidate count or runtime without reducing validated objective.
 
-\[
-\operatorname{gap}
-=
-\frac{B-P}{\max(1,|P|)}.
-\]
+### Random-versus-conflict batching
 
-Store the solver-native definition too when it differs.
+Hold all hybrid settings fixed and compare seeded random whole-group neighborhoods
+with shared-resource conflict neighborhoods.
 
-### Hybrid sample metrics
+### Additional sampler ablation
 
-Report:
+Compare random sampling with simulated annealing on the same QUBO workflow. Exact
+recourse and acceptance rules remain identical.
 
-- number of raw samples;
-- one-outcome-per-order rate;
-- sampler calls and actual QPU calls;
-- raw one-hot rate;
-- unique repaired assignments;
-- exact-recourse attempts and successful solves;
-- maximum logical QUBO variables and pair couplings;
-- accepted improving moves; and
-- initial, final, and improved objective.
+### Additional synthetic coordination control
 
-QUBO feasibility is not global DOM feasibility. Report full feasibility only after
-exact recourse and independent validation.
+Use an independently generated eight-order seed-2 instance to test whether the hybrid
+can revisit a coupled decision that greedy handles myopically. Compare greedy,
+zero-gap exact MILP, and hybrid. This control demonstrates algorithmic behavior only;
+it cannot establish real-data or quantum advantage.
 
-## 5. Determinism and tie-breaking
+## 5. Smoke profile
 
-Default and greedy methods must be deterministic under a fixed order. Unless an experiment explicitly changes it, break ties by:
+The smoke profile shortens the grid for development:
 
-1. larger incremental objective;
-2. larger case-fill increase;
-3. lower shipping cost;
-4. default DC before alternate DC;
-5. lexicographically smaller `candidate_id`.
+- sizes 4 and 8;
+- penalty scales 0.75 and 1.25;
+- candidate limits 1 and 3;
+- inventory shocks 0% and 20%;
+- seeds 3 and 11;
+- coefficient noise 0% and 2%; and
+- one hybrid iteration with at most 24 QUBO variables.
 
-Record all stochastic seeds. Do not present one stochastic run as representative.
+The full profile uses four hybrid iterations and at most 40 local QUBO variables.
 
-## 6. Tiny-instance gate
+## 6. Reproducibility and tie-breaking
 
-Before real-data or quantum experiments:
+Default and greedy methods are deterministic. Ties are resolved by incremental
+objective, fill increase, lower shipping cost, default before alternate, then
+candidate identifier. Every stochastic sampler records its seed. The bundle hash,
+configuration, assumption version, and method are included in local run metadata.
+
+Before experiments, the known two-order test must reproduce the exact objective 126:
 
 ```bash
-pytest -q tests/test_objective.py
-pytest -q tests/test_validation.py
 pytest -q tests/test_tiny_optimum.py
 ```
 
-must pass. The tiny exact run must reproduce
+## 7. Execution
 
-\[
-O_1\rightarrow D_2,\qquad O_2\rightarrow D_1,
-\]
-
-with objective \(126\).
-
-## 7. Scaling protocol
-
-Vary:
-
-- \(|\mathcal O|\): orders;
-- \(|\mathcal S|\): SKUs;
-- average candidates per order;
-- \(|\mathcal D|\): DCs;
-- \(|\mathcal T|\): dates;
-- scarcity;
-- candidate-conflict density.
-
-Report variables, constraints, QUBO variables and couplings, runtime, memory when
-available, best objective, feasibility, and gap or distance from optimum. Keep the
-QUBO cap fixed in at least one experiment to demonstrate bounded hardware demand as
-the global order count grows.
-
-## 8. Sensitivity protocol
-
-At minimum vary:
-
-- penalty multiplier;
-- shipping-cost multiplier;
-- minimum divert improvement;
-- inventory protection;
-- candidate-pruning threshold;
-- classical time limit;
-- QUBO penalty strengths;
-- quantum depth, shots, optimizer, and seed.
-
-For the implemented annealing path, replace circuit-only settings with reads,
-sweeps/anneal schedule, chain strength and embedding statistics when applicable.
-Run coefficient-noise levels over multiple seeds; coefficient perturbation is a
-sensitivity proxy, not a complete hardware-noise model.
-
-Use one-factor-at-a-time plots for the primary sensitivity study.
-
-## 9. Run-directory contract
-
-Each run should contain:
-
-```text
-config.json
-input_fingerprint.json
-assignments.csv
-fulfillment.csv
-metrics.json
-validation.json
-solver_metadata.json
+```bash
+python scripts/run_challenge_study.py \
+  --bundle-dir /approved/path/to/challenge-files \
+  --profile full \
+  --output runs/challenge-study/aggregate_results.csv
 ```
 
-Optional method-specific files include:
+Or run `notebooks/nestle_challenge_experiments.ipynb` and set `BUNDLE_DIR` in its
+configuration cell.
 
-```text
-solver_model.lp
-solver_statistics.json
-raw_samples.csv
-repaired_samples.csv
-qubo.json
-planner_recommendations.csv
-planner_view.md
-stdout.log
-```
+## 8. Interpretation rules
 
-The pipeline guarantees the seven core files. A shell or job scheduler captures
-`stdout.log`. The hybrid command also writes the planner artifacts.
+- Never rank an infeasible row as a business solution.
+- Compare methods only on the same instance and economic scale.
+- A zero MILP gap is a proof; a nonzero gap is not.
+- Hybrid improvement is relative to its configured feasible incumbent.
+- Zero accepted hybrid moves is a valid negative result.
+- Coefficient noise is not physical quantum noise.
+- Physical qubits are not interchangeable with logical QUBO variables.
+- One stochastic seed is not evidence of robustness.
 
-## 10. Registry
+## 9. Public output contract
 
-Append one row per method to `experiments/registry.csv` with:
+The aggregate CSV must not contain order, SKU, DC, candidate, customer, ZIP, or lane
+identifiers. `write_experiment_results` and the copilot both reject identifier-like
+columns. Row-level assignments and fulfillment stay in ignored local run directories.
 
-```text
-experiment_id
-run_id
-timestamp_utc
-dataset_id
-schema_version
-assumption_version
-method
-seed
-git_commit
-config_path
-run_path
-feasible
-objective_value
-case_fill_rate
-value_fill_rate
-shipping_cost
-penalty_cost
-reassigned_orders
-runtime_seconds
-optimality_gap
-notes
-```
-
-Do not edit reported values by hand. Corrections require a new run.
-
-## 11. Fair sampler comparison
-
-Hold constant:
-
-- canonical dataset and candidate columns;
-- active neighborhood and QUBO coefficients;
-- incumbent warm start;
-- repair and top-K recourse policy;
-- independent validation and objective calculation; and
-- total wall-clock accounting boundary.
-
-Report preprocessing, queue, embedding, sample, repair, and recourse time separately
-when the backend exposes them. Compare quality at equal time and time at equal
-quality. Exact enumeration is a correctness oracle only for very small QUBOs.
-
-## 12. Public reporting
-
-Public artifacts must use synthetic or approved anonymized identifiers and aggregate results. Follow `docs/privacy.md`.

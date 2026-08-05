@@ -110,10 +110,13 @@ def normalize_problem_data(problem: ProblemData) -> ProblemData:
     _require_columns(capacities, CAPACITY_COLUMNS, "capacities")
     _require_columns(calendar, CALENDAR_COLUMNS, "calendar")
 
-    _as_string(orders, ["order_id", "default_dc"])
+    _as_string(orders, ["order_id", "default_dc", "assignment_group"])
     _as_string(lines, ["order_id", "sku_id"])
     _as_string(inventory, ["dc_id", "sku_id"])
-    _as_string(candidates, ["candidate_id", "order_id", "dc_id"])
+    _as_string(
+        candidates,
+        ["candidate_id", "order_id", "dc_id", "group_option_id"],
+    )
     if not capacities.empty:
         _as_string(capacities, ["dc_id", "resource", "unit"])
     if not calendar.empty:
@@ -125,10 +128,17 @@ def normalize_problem_data(problem: ProblemData) -> ProblemData:
     _as_date(capacities, ["date"])
     _as_date(calendar, ["date"])
 
-    _as_numeric(orders, ["default_fillable_cases"], integer=True)
+    _as_numeric(orders, ["default_fillable_cases", "priority"], integer=True)
     _as_numeric(
         orders,
-        ["min_divert_improvement_fraction"],
+        [
+            "min_divert_improvement_fraction",
+            "penalty_threshold_fraction",
+            "penalty_fixed",
+            "penalty_per_cut_sku",
+            "penalty_minimum",
+            "penalty_maximum",
+        ],
         nonnegative=True,
     )
     _as_numeric(lines, ["demand_cases", "cases_per_pallet"], integer=True)
@@ -285,6 +295,36 @@ def validate_problem_data(problem: ProblemData) -> None:
         if orders["default_fillable_cases"].isna().any():
             raise DataValidationError(
                 "orders.default_fillable_cases contains missing values"
+            )
+
+    if str(problem.metadata.get("penalty_mode", "linear_unmet")) == "thresholded_cut":
+        required_penalty_columns = {
+            "penalty_threshold_fraction",
+            "penalty_fixed",
+            "penalty_per_cut_sku",
+            "penalty_minimum",
+            "penalty_maximum",
+        }
+        missing_penalty = required_penalty_columns - set(orders.columns)
+        if missing_penalty:
+            raise DataValidationError(
+                "thresholded_cut penalty mode requires order columns: "
+                f"{sorted(missing_penalty)}"
+            )
+        thresholds = orders["penalty_threshold_fraction"].astype(float)
+        if ((thresholds < 0) | (thresholds > 1)).any():
+            raise DataValidationError(
+                "penalty_threshold_fraction must be between zero and one"
+            )
+
+    if bool(problem.metadata.get("enforce_assignment_group", False)):
+        if "assignment_group" not in orders.columns:
+            raise DataValidationError(
+                "Group cohesion requires orders.assignment_group"
+            )
+        if "group_option_id" not in candidates.columns:
+            raise DataValidationError(
+                "Group cohesion requires candidates.group_option_id"
             )
 
 

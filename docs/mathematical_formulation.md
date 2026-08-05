@@ -1,280 +1,270 @@
 # Mathematical formulation
 
-## 1. Scope and notation
+## 1. Scope
 
-The deterministic model assigns each focus order to at most one distribution center
-(DC) and planned-goods-issue (PGI) date. It may partially fulfill the selected order,
-subject to shared inventory and operational capacity.
+The deterministic model assigns each focus order to one eligible distribution-center
+(DC) and planned-goods-issue (PGI) option, or explicitly leaves it unassigned. An
+assigned order may be partially fulfilled, but its SKU lines cannot split across DCs.
+Orders belonging to the same source load choose one common DC/PGI option.
 
 | Symbol | Meaning |
 |---|---|
-| \(\mathcal O\) | focus orders, index \(o\) |
-| \(\mathcal S\) | stock-keeping units (SKUs), index \(s\) |
-| \(\mathcal D\) | distribution centers, index \(d\) |
-| \(\mathcal T\) | ordered inventory/capacity dates, index \(t\) |
-| \(\mathcal R\) | enabled capacity resources, index \(r\) |
-| \(\mathcal S_o\) | SKUs requested by order \(o\) |
-| \(\mathcal C_o\) | eligible DC/date candidates for order \(o\) |
+| $\mathcal O$ | focus orders, index $o$ |
+| $\mathcal S_o$ | SKUs in order $o$, index $s$ |
+| $\mathcal C_o$ | eligible assignment columns for order $o$, index $c$ |
+| $d(c),t(c)$ | DC and PGI date of candidate $c$ |
+| $\mathcal G$ | assignment groups or loads, index $g$ |
+| $\mathcal K_g$ | common DC/PGI options exposed to every member of group $g$ |
 
-Candidate preprocessing creates
-
-\[
-\mathcal C\subseteq\mathcal O\times\mathcal D\times\mathcal T.
-\]
-
-Closed dates, prohibited sources, impossible lead times, and other hard eligibility
-failures are absent from \(\mathcal C\).
+Candidate preprocessing removes invalid lanes, missing alternative forecasts, closed
+dates, late options, and exhausted alternate dock capacity. The no-assignment outcome
+is created by the model and is not a fake candidate row.
 
 ## 2. Parameters
 
 ### Demand and economics
 
-\[
-Q_{os}\in\mathbb Z_{\ge0}
-\]
+- $Q_{os}$: requested integer cases;
+- $v_{os}$: value per fulfilled case;
+- $\pi_{os}$: variable penalty coefficient per unfulfilled case;
+- $c_c$: total shipping cost charged when candidate $c$ is selected;
+- $\theta_o$: order fill threshold;
+- $F_o$: fixed active penalty;
+- $K_o$: active penalty per SKU with any cut;
+- $m_o,M_o$: optional positive minimum and maximum active penalty.
 
-is requested cases, \(v_{os}\ge0\) is value per fulfilled case, and
-\(\pi_{os}\ge0\) is penalty per unfulfilled case. The challenge clarification is
-implemented as
+The fill needed to avoid the order-level penalty is
 
-\[
-\pi_{os}=\text{price per case}_{os}\times\text{penalty rate}_{os}
-\]
+$$
+H_o=\min\left(Q_o,\left\lceil\theta_oQ_o\right\rceil\right),
+\qquad Q_o=\sum_{s\in\mathcal S_o}Q_{os}.
+$$
 
-when those two raw fields are available. Canonical data stores the computed
-`penalty_per_unfilled_case`.
+### Protected inventory
 
-\[
-c_{odt}\ge0
-\]
+$I_{dst}$ is protected projected available-to-promise (ATP) for DC $d$, SKU
+$s$, and checkpoint $t$. Under the POC adapter it is the minimum nonnegative
+source availability over the candidate PGI and the following five calendar days.
+Projected ATP may decline across dates.
 
-is the **total** shipping cost charged once if candidate \((o,d,t)\) is selected.
-It is not treated as an incremental lane-cost difference.
+### Resources
 
-The total cases in an order are
+$R^r_{dt}$ is an available amount of resource $r$ at a DC/date. Fixed
+candidate use is $\beta^r_c$, and case-dependent use is
+$\alpha^r_{osc}$. Supported resources are dock, throughput cases, full-pallet
+picks, loose-case picks, weight, and volume. In the supplied data only documented
+remaining dock capacity is a source-fact hard limit; pick/throughput limits are
+optional labeled scenarios.
 
-\[
-Q_o=\sum_{s\in\mathcal S_o}Q_{os}.
-\]
+### Minimum diversion improvement
 
-### Inventory
+Let $F_o^{\mathrm{def}}$ be the default candidate's protected-ATP fill preview.
+The minimum non-default fill is
 
-\[
-I_{dst}\in\mathbb Z_{\ge0}
-\]
+$$
+L_o^{\mathrm{div}}=
+\min\left\{Q_o,
+F_o^{\mathrm{def}}+
+\max\left(\left\lceil\delta_oQ_o\right\rceil,B_o\right)
+\right\},
+$$
 
-is protected projected available-to-promise (ATP) for DC \(d\), SKU \(s\), and
-checkpoint \(t\), after demand outside the focus-order population. Projected ATP may
-decrease over the horizon. A focus-order fulfillment at \(\tau\) consumes all later
-checkpoints \(t\ge\tau\); therefore the smallest future ATP protects later demand.
-
-The optional `cumulative_receipts` policy instead requires a nondecreasing series.
-The policy is declared once in metadata and is never inferred silently.
-
-### Capacity
-
-\[
-R^r_{dt}\ge0
-\]
-
-is the available amount of resource \(r\) at DC \(d\), date \(t\). Supported
-resources are `dock`, `throughput_cases`, `case_pick`, `pallet_pick`, `weight`, and
-`volume`. Variable use per fulfilled case is \(\alpha^r_{osdt}\), and fixed use when
-a candidate is activated is \(\beta^r_{odt}\). A dock candidate normally has
-\(\beta^{\mathrm{dock}}_{odt}=1\).
-
-### Minimum alternate fill
-
-Let \(d_o^{\mathrm{def}}\) be the default DC and
-\(F_o^{\mathrm{def}}\) the cases fillable under the documented default reference.
-The clarified five-percentage-point improvement is
-
-\[
-L_o^{\mathrm{div}}
-=\min\left\{
-Q_o,
-F_o^{\mathrm{def}}+\left\lceil0.05Q_o\right\rceil
-\right\}.
-\]
-
-An order-specific fraction \(\delta_o\) may replace 0.05, but the fraction always
-applies to total ordered cases, not to default fill.
+where the POC uses $\delta_o=0.05$ and $B_o=100$ cases. Thus diversion must
+improve by both five percentage points and 100 cases, unless demand itself caps the
+requirement.
 
 ## 3. Decision variables
 
-For eligible candidate \((o,d,t)\):
+For candidate $c\in\mathcal C_o$:
 
-\[
-x_{odt}\in\{0,1\}
-\]
+$$
+x_c\in\{0,1\}
+$$
 
-equals one when the candidate is selected. For every order:
+selects that order-DC-PGI assignment. For every order:
 
-\[
+$$
 z_o\in\{0,1\}
-\]
+$$
 
-equals one when no DC is assigned.
+selects the unassigned outcome. Fulfillment and unmet quantities are
 
-For every order line and eligible candidate:
+$$
+f_{osc}\in\mathbb Z_{\ge0},\qquad
+u_{os}\in\mathbb Z_{\ge0}.
+$$
 
-\[
-f_{osdt}\in\mathbb Z_{\ge0}
-\]
+When exact pick accounting is active, $p_{osc}$ and $k_{osc}$ are full pallets
+and loose cases. Thresholded penalty linearization adds:
 
-is fulfilled cases, while
-
-\[
-u_{os}\in\mathbb Z_{\ge0}
-\]
-
-is unfulfilled cases.
-
-If pallet/case-pick resources are enabled, \(p_{osdt}\) and \(k_{osdt}\) are full
-pallets and loose cases.
+- $a_o\in\{0,1\}$: penalty-active indicator;
+- $q_{os}$: unmet cases counted while active;
+- $h_{os}\in\{0,1\}$: SKU-cut indicator while active; and
+- continuous/binary auxiliaries for optional floor and cap.
 
 ## 4. Objective
 
-The common business objective is
+The independently recomputed business objective is
 
-\[
+$$
 \boxed{
 \max J=
-\sum_{o,s,(d,t)\in\mathcal C_o}v_{os}f_{osdt}
--\sum_{o,s}\pi_{os}u_{os}
--\sum_{o,d,t}c_{odt}x_{odt}
+\sum_{o,s,c\in\mathcal C_o}v_{os}f_{osc}
+-\sum_o P_o
+-\sum_c c_cx_c
 }.
-\]
+$$
 
-Every method is compared using this independently recomputed objective. Solver or
-QUBO energies are diagnostics, not substitute business metrics.
+For the POC thresholded penalty:
+
+$$
+a_o=\mathbf 1\left[
+\sum_{s,c}f_{osc}<H_o
+\right],
+$$
+
+$$
+R_o=a_oF_o+
+\sum_s\left(\pi_{os}q_{os}+K_oh_{os}\right),
+$$
+
+$$
+P_o=
+\begin{cases}
+0,&a_o=0,\\
+\min\left(\max(R_o,m_o),M_o\right),&a_o=1\text{ and }M_o>0,\\
+\max(R_o,m_o),&a_o=1\text{ and }M_o=0.
+\end{cases}
+$$
+
+The MILP uses standard big-M product, maximum, and minimum linearizations. Bounds
+come from each order's total demand and penalty parameters, avoiding an arbitrary
+global constant. Synthetic instances may instead use the simpler linear-unmet mode
+$P_o=\sum_s\pi_{os}u_{os}$.
 
 ## 5. Core constraints
 
 ### One outcome per order
 
-\[
+$$
 \boxed{
-\sum_{(d,t)\in\mathcal C_o}x_{odt}+z_o=1
+\sum_{c\in\mathcal C_o}x_c+z_o=1
 \qquad\forall o.
 }
-\]
-
-This enforces at most one DC/date while preserving feasibility through the explicit
-unassigned outcome.
+$$
 
 ### Demand balance
 
-\[
+$$
 \boxed{
-\sum_{(d,t)\in\mathcal C_o}f_{osdt}+u_{os}=Q_{os}
+\sum_{c\in\mathcal C_o}f_{osc}+u_{os}=Q_{os}
 \qquad\forall o,s\in\mathcal S_o.
 }
-\]
+$$
 
 ### Assignment linking
 
-\[
+$$
 \boxed{
-0\le f_{osdt}\le Q_{os}x_{odt}
-\qquad\forall o,s,d,t.
+0\le f_{osc}\le Q_{os}x_c
+\qquad\forall o,s,c\in\mathcal C_o.
 }
-\]
+$$
 
-Partial fulfillment is allowed, but SKU lines cannot split across DCs because only
-one candidate is selected for the order.
+### Assignment-group cohesion
+
+For group $g$, leader $\ell(g)$, member $o$, and shared option
+$k\in\mathcal K_g$:
+
+$$
+\boxed{x_{ok}=x_{\ell(g)k},\qquad z_o=z_{\ell(g)}.}
+$$
+
+Candidate generation first guarantees that every member exposes the same option set.
+Shipping and dock coefficients are nonzero only on the deterministic leader.
 
 ### Projected-ATP protection
 
-For each inventory checkpoint:
+For every DC-SKU checkpoint:
 
-\[
+$$
 \boxed{
-\sum_{\substack{o,\tau\le t:\\(o,d,\tau)\in\mathcal C_o}}
-f_{osd\tau}
+\sum_{\substack{o,c:\ d(c)=d,\ t(c)\le t}}
+f_{osc}
 \le I_{dst}
 \qquad\forall d,s,t.
 }
-\]
+$$
 
-No monotonicity of \(I_{dst}\) is required under the `projected_atp` policy.
+An earlier shipment consumes all later checkpoints. No monotonicity assumption is
+placed on projected ATP.
 
 ### Operational capacity
 
-\[
+$$
 \boxed{
-\sum_{o:(o,d,t)\in\mathcal C}
-\beta^r_{odt}x_{odt}
-+
-\sum_{o,s:(o,d,t)\in\mathcal C}
-\alpha^r_{osdt}f_{osdt}
+\sum_{c:\ d(c)=d,t(c)=t}\beta^r_cx_c
++\sum_{o,s,c:\ d(c)=d,t(c)=t}\alpha^r_{osc}f_{osc}
 \le R^r_{dt}
 \qquad\forall d,t,r.
 }
-\]
+$$
 
-Dock use is candidate-fixed. Throughput, weight, and volume are linear in fulfilled
-cases. Pick resources use the exact decomposition below.
+### Diversion threshold
 
-### Minimum divert improvement
+For a non-default candidate $c\in\mathcal C_o$:
 
-For each candidate whose DC differs from the order's default DC:
-
-\[
+$$
 \boxed{
-\sum_{s\in\mathcal S_o}f_{osdt}
-\ge L_o^{\mathrm{div}}x_{odt}.
+\sum_{s\in\mathcal S_o}f_{osc}
+\ge L_o^{\mathrm{div}}x_c.
 }
-\]
+$$
 
-This rule is enabled only when `default_fillable_cases` is supplied and metadata
-sets `enforce_min_divert_improvement` to true. Missing reference data causes a load
-error instead of silently disabling an asserted rule.
+### Exact pallet and loose-case accounting
 
-### Pallet and loose-case picks
+For $P_s$ cases per pallet:
 
-For cases per pallet \(P_s\in\mathbb Z_{>0}\):
+$$
+\boxed{f_{osc}=P_sp_{osc}+k_{osc}},
+\qquad
+\boxed{0\le k_{osc}\le(P_s-1)x_c}.
+$$
 
-\[
-\boxed{f_{osdt}=P_sp_{osdt}+k_{osdt}},
-\]
-
-\[
-\boxed{0\le k_{osdt}\le(P_s-1)x_{odt}}.
-\]
-
-Pallet-pick capacity consumes \(p\); case-pick capacity consumes \(k\). This exact
-linear representation avoids applying floor or modulo after optimization.
+Full-pallet capacity consumes $p$; loose-case capacity consumes $k$.
 
 ## 6. Classical methods
 
-The default baseline restricts assignment to the default DC and allocates shared
-resources in deterministic order. The greedy baseline evaluates candidate previews
-against current residual resources and commits the best incremental feasible choice.
+The **default baseline** restricts each decision unit to its default option and
+allocates shared resources deterministically. The **greedy baseline** previews
+eligible options against current residual resources, commits the best incremental
+objective, and updates resources before the next unit. The **exact MILP** is submitted
+through SciPy's `milp` interface to HiGHS and returns an incumbent, upper bound,
+optimality gap, model size, node count, and runtime.
 
-The exact model is solved by SciPy's `milp` interface to HiGHS. It reports incumbent,
-dual bound, native optimality gap, variable count, constraint count, and runtime.
-When assignment variables are fixed, the same model is an exact fulfillment-recourse
-problem for the hybrid solver.
+A zero gap proves optimality. A time-limited solve remains useful when it returns a
+feasible incumbent and valid bound.
 
-## 7. Relationship to the local QUBO
+## 7. Hybrid relationship
 
-The QUBO variable \(y_{ok}\) selects one previewed assignment plan \(k\) for active
-order \(o\). One-hot and pairwise resource-contention penalties rank combinations.
-It does **not** replace the inventory or capacity equations above. After sampling:
+The hybrid QUBO selects previewed assignment plans for a bounded active neighborhood.
+Its quadratic resource terms are a ranking surrogate, not the final feasibility
+model. Every repaired sample is fixed in this exact MILP, which reoptimizes quantities
+against residual global resources. The merged solution is accepted only after the
+independent validator and objective evaluator pass.
 
-1. one-hot structure is repaired deterministically;
-2. selected assignments are fixed in the local MILP;
-3. all fulfillment quantities are reoptimized;
-4. the result is merged with frozen orders; and
-5. the complete solution is independently validated.
+## 8. Independent validation
 
-See [hybrid algorithm](hybrid_algorithm.md) for the QUBO equations and acceptance
-invariant.
+`validation.py` does not trust solver constraints. It recomputes:
 
-## 8. Feasibility and reporting
+- one outcome per order;
+- demand identity and integer/nonnegative quantities;
+- assignment-group cohesion;
+- candidate eligibility and selected date/DC consistency;
+- every protected-ATP checkpoint;
+- every enabled capacity;
+- minimum diversion fill; and
+- the complete business objective.
 
-`validation.py` is independent of solver constraints and recomputes assignment,
-demand, eligibility, inventory, capacity, and alternate-fill rules from output
-tables. `objective.py` independently recomputes fulfilled value, penalty cost, and
-shipping cost. A solution is reportable only when validation returns no violations.
+Only validator-passed solutions enter comparisons or the planner copilot.
+

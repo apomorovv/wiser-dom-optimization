@@ -1,127 +1,130 @@
 # Modeling assumptions
 
-Assumption version `v1` records every choice that changes feasibility, objective,
-or comparability. A changed rule requires a new version, tests, and rerun.
+Assumption version `v2` records every choice that changes feasibility, objective, or
+comparability. A changed rule requires a new version, tests, and rerun.
 
 ## Active assumptions
 
-### A1. Focus orders are preselected
+### A1. Focus orders and load expansion
 
-The optimization population is an input. `focus_orders.py` may identify it, but the
-MILP does not decide whether an order belongs to the population.
+The POC focus flag is `IsInvAvail = N`. When any order on a load is a focus order,
+the complete load is included so routing cohesion remains enforceable.
 
-### A2. One DC/date or unassigned
+### A2. One group option, one DC/date per order
 
-An order selects exactly one eligible DC/PGI candidate or an explicit unassigned
-outcome. Lines cannot split across DCs. Partial fulfillment at the selected DC is
-allowed.
+Each order selects one eligible candidate or is unassigned. Lines may be partially
+filled at the selected DC but cannot split across DCs. Orders sharing
+`assignment_group` select the same `group_option_id`.
 
-### A3. Cases are integer
+### A3. Integer case conversion
 
-Demand, fulfillment, unfulfilled demand, inventory, and loose-case picks are
-nonnegative integer cases. Monetary terms use one declared currency or synthetic
-scale.
+Demand and fulfillment are integer cases. Source planning units are divided by
+positive planning-units-per-case; pallet planning-unit rows are multiplied by
+cases-per-pallet. Any non-integral result outside tolerance stops the adapter.
 
-### A4. Shipping cost is total
+### A4. Shipping and dock are load-level fixed terms
 
-`shipping_cost` is the full candidate cost charged once when selected. It is not an
-incremental difference from the default lane. Source data must be converted before
-loading if it uses another convention.
+Source `Shipping_Cost` is total option cost. Shipping and incremental dock use are
+charged once to a deterministic group leader. Default loads consume zero incremental
+dock because they are already planned; alternate loads consume one unit.
 
-### A5. Unmet penalty is linear
+### A5. Thresholded cut penalty
 
-Penalty cost is unfulfilled cases multiplied by price per case and penalty rate. The
-canonical table stores the resulting nonnegative `penalty_per_unfilled_case`.
+An order penalty is zero when integer fill reaches
+$\lceil\theta_oQ_o\rceil$. Below that threshold, penalty equals variable unmet
+cost plus fixed cost plus per-cut-SKU cost, then applies an optional minimum and
+maximum. The linear unmet model remains available for synthetic data.
 
-### A6. Inventory is protected projected ATP
+### A6. Five-day protected projected ATP
 
-Projected available-to-promise may increase or decrease. A fulfillment at an early
-PGI date consumes every later checkpoint, protecting the lowest future amount. The
-alternative `cumulative_receipts` metadata policy requires nondecreasing inventory.
+For a candidate PGI, usable inventory is the minimum nonnegative
+`Available_inventory` over PGI through PGI plus five calendar days. It may decrease
+across checkpoints. Earlier fulfillment consumes every later protected checkpoint.
 
-### A7. Eligibility is hard preprocessing
+### A7. Alternative forecast eligibility is hard
 
-Closed dates, late arrivals, forecast restrictions, prohibited sources, and other
-confirmed routing rules remove candidates. The validator rejects a selected row that
-is not in the eligible candidate table.
+Every SKU in an assignment group must be present in an alternate DC's
+inventory/forecast table. Absence at the default DC means zero default fill, not a
+missing default candidate.
 
-### A8. Unmet demand is allowed and penalized
+### A8. Lead time and working days
 
-Every requested case is either fulfilled or unfulfilled. An unassigned order has
-zero fulfillment and incurs its full unmet-demand penalty.
+Lead time is `ceil(distance / 500)` calendar days. Alternative PGI is requested
+delivery date minus lead time, moved backward over weekends and configured holidays.
 
-### A9. Minimum divert improvement is five percentage points
+### A9. Diversion must improve by both thresholds
 
-If enabled, a non-default assignment must fill at least
+A non-default option must improve default protected-ATP fill by at least five
+percentage points of total demand and at least 100 cases, capped at demand:
 
-\[
-\min\{Q_o,F_o^{\mathrm{def}}+\lceil0.05Q_o\rceil\}
-\]
+$$
+\min\{Q_o,F_o^{\mathrm{def}}+\max(\lceil0.05Q_o\rceil,100)\}.
+$$
 
-cases. The five percent is based on total ordered cases, not default fill. The
-reference `default_fillable_cases` is required when enforcement is enabled.
+### A10. Documented dock limit is hard; throughput is scenario-only
 
-### A10. Operational capacity has verified units
+`Dock_Remaining` is enforced. The supplied throughput table reports observed
+utilization rather than a maximum, so it is not treated as a real constraint.
+Analyses may create explicitly labeled case/pallet headroom scenarios.
 
-Enabled resource names are `dock`, `throughput_cases`, `case_pick`, `pallet_pick`,
-`weight`, and `volume`. Dock use is fixed per candidate. Throughput is fulfilled
-cases. Weight and volume use per-case coefficients. With `pallet_case` pick mode,
-full pallets consume pallet-pick capacity and only the remainder consumes case-pick
-capacity.
+### A11. Pareto pruning preserves default options
 
-### A11. Independent validation is authoritative
+An alternate option is removed only when another group option has no worse estimated
+fill and fulfilled value, no higher shipping cost and lead time, and is strictly
+better in at least one dimension. The default option is always retained.
 
-A recommendation is reportable only after independent feasibility and objective
-recomputation. QUBO energy and solver-native objective values are diagnostics.
+### A12. Independent validation is authoritative
 
-### A12. Hybrid search cannot degrade the incumbent
+Solver-native objective and QUBO energy are diagnostics. A recommendation is
+reportable only after independent demand, assignment, group, eligibility, inventory,
+capacity, diversion, and objective recomputation.
 
-The local MILP enforces exact residual resources and the global validator checks the
-merged result. A move is accepted only for a strict, feasible objective improvement.
+### A13. Hybrid search cannot degrade the incumbent
 
-### A13. Remote quantum execution is opt-in
+Exact local recourse and global validation precede acceptance. Only a strict feasible
+improvement replaces the incumbent.
 
-Local samplers are the default. Sending QUBO coefficients to a remote service
-requires explicit approval and `allow_remote=true`. Remote sampling does not bypass
-classical repair, recourse, or validation.
+### A14. Remote quantum execution is opt-in
 
-## Unresolved or dataset-dependent rules
+Local exact, random, and simulated-annealing samplers are the default. Remote QPU or
+managed-hybrid execution requires explicit approval and `allow_remote=true`.
 
-### U1. Load grouping
+## Remaining decisions for production deployment
 
-Orders sharing a load may require joint routing, mutual exclusion, or only reporting.
-No such relationship is imposed until the business rule is confirmed. Candidate
-`dock_units` can represent a verified load-level consumption without guessing.
+### U1. Complete enterprise working-day calendar
 
-### U2. Customer-specific partial fulfillment
+Only weekends and explicitly supplied holidays are known. Production must provide
+the authoritative plant calendar and exception policy.
 
-The current model permits partial fulfillment for every order. If some customer or
-SKU classes require all-or-nothing service, preprocessing must add a documented
-class and the MILP must add the corresponding equality constraints.
+### U2. Throughput maximum or remaining-capacity equation
 
-### U3. Protection-horizon construction
+Observed utilization is readable, but no source maximum is documented. Nestlé must
+confirm whether another denominator, shift plan, or remaining-capacity table exists.
 
-The solver enforces supplied projected ATP exactly, but upstream logic that combines
-receipts, outgoing plans, reservations, and the five-day protection horizon belongs
-to source-data preparation and must be confirmed for the original input pack.
+### U3. Customer-specific all-or-nothing service
 
-### U4. Commercial scale and rounding
+The challenge permits partial fulfillment. If particular customer classes require
+all-or-nothing service, the source must identify them and the MILP must add the
+corresponding equality constraints.
 
-Currency, exchange-rate date, price basis, tax/fuel components, and penalty-rate
-rounding must be declared in `metadata.json` for a real run.
+### U4. Commercial scale and approval boundary
 
-### U5. Service-date policy
+The source currency/scale, cost components, and acceptable public aggregates must be
+confirmed before a business deployment or external QPU experiment.
 
-The candidate table may include PGI, arrival, and requested delivery dates. Exact
-working-day calendars and exception policy must be supplied by the data owner.
+### U5. Physical QPU benchmark
+
+The repository provides adapters but has not sent the restricted QUBO to hardware.
+Any claim needs organizer approval, matched timing, embedding statistics, repeated
+trials, and uncertainty intervals.
 
 ## Change checklist
 
-When resolving an item, update:
+When resolving an assumption, update:
 
 1. this document and `ASSUMPTION_VERSION`;
-2. the canonical data dictionary;
-3. loader and validator logic;
-4. exact MILP and both baselines;
-5. local preview/recourse behavior; and
-6. at least one positive and one negative test.
+2. the POC mapping and canonical dictionary;
+3. loader, baseline, exact MILP, hybrid preview/recourse, and validator;
+4. at least one positive and one negative automated test; and
+5. every affected experiment and report.
+

@@ -8,6 +8,7 @@ from time import perf_counter
 import numpy as np
 import pandas as pd
 
+from .penalties import order_penalty
 from .resources import (
     candidate_fixed_consumption,
     split_pick_quantities,
@@ -85,8 +86,10 @@ def _order_lines(problem: ProblemData, order_id: str) -> pd.DataFrame:
     return problem.order_lines.loc[problem.order_lines["order_id"] == order_id].copy()
 
 
-def _unassigned_score(lines: pd.DataFrame) -> float:
-    return -float((lines["penalty_per_unfilled_case"] * lines["demand_cases"]).sum())
+def _unassigned_score(problem: ProblemData, order_id: str, lines: pd.DataFrame) -> float:
+    quantities = lines.copy()
+    quantities["unfulfilled_cases"] = quantities["demand_cases"]
+    return -order_penalty(problem, order_id, quantities)
 
 
 def _preview_candidate(
@@ -182,12 +185,13 @@ def _preview_candidate(
     merged = _order_lines(problem, order_id).copy()
     merged["fulfilled"] = merged["sku_id"].map(quantities).fillna(0).astype(int)
     merged["unfulfilled"] = merged["demand_cases"] - merged["fulfilled"]
+    penalty_quantities = merged.rename(columns={"unfulfilled": "unfulfilled_cases"})
     score = float(
         (merged["unit_value"] * merged["fulfilled"]).sum()
-        - (merged["penalty_per_unfilled_case"] * merged["unfulfilled"]).sum()
+        - order_penalty(problem, order_id, penalty_quantities)
         - float(candidate["shipping_cost"])
     )
-    unassigned = _unassigned_score(merged)
+    unassigned = _unassigned_score(problem, order_id, merged)
     if candidate_is_divert(problem, candidate):
         threshold = minimum_divert_fulfillment(problem, order_id)
         if threshold is not None and int(merged["fulfilled"].sum()) < threshold:

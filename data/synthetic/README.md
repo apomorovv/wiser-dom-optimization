@@ -11,7 +11,7 @@ python scripts/make_tiny_instance.py \
 
 ## Exact tiny-instance definition
 
-The instance has one PGI date \(t_1\), two orders, two SKUs, and two DCs.
+The instance has one PGI date $t_1$, two orders, two SKUs, and two DCs.
 
 ### Orders
 
@@ -31,7 +31,7 @@ All values are synthetic monetary units.
 | `O2` | `A` | 3 | 10 | 20 |
 | `O2` | `B` | 4 | 10 | 20 |
 
-### Cumulative inventory at \(t_1\)
+### Cumulative inventory at $t_1$
 
 | `dc_id` | `sku_id` | `date` | `cumulative_available_cases` |
 |---|---|---|---:|
@@ -55,25 +55,25 @@ Each order also has a no-assignment option with zero shipping cost and zero fulf
 
 The complete demands are
 
-\[
+$$
 Q_{O1,A}=4,\quad Q_{O1,B}=2,
-\]
+$$
 
-\[
+$$
 Q_{O2,A}=3,\quad Q_{O2,B}=4.
-\]
+$$
 
-DC \(D_2\) exactly matches order \(O_1\), while DC \(D_1\) exactly matches order \(O_2\). Therefore
+DC $D_2$ exactly matches order $O_1$, while DC $D_1$ exactly matches order $O_2$. Therefore
 
-\[
+$$
 O_1\rightarrow D_2,\qquad O_2\rightarrow D_1
-\]
+$$
 
-fulfills all \(13\) cases. Its objective is
+fulfills all $13$ cases. Its objective is
 
-\[
+$$
 (13)(10)-0-4=126.
-\]
+$$
 
 Expected summary:
 
@@ -105,10 +105,11 @@ metadata.json
 
 ## Required tests
 
-- `tests/test_objective.py`: verifies objective \(126\).
+- `tests/test_objective.py`: verifies objective $126$.
 - `tests/test_validation.py`: verifies feasibility.
 - `tests/test_tiny_optimum.py`: verifies the split assignment.
 - `tests/test_baselines.py`: verifies deterministic baseline behavior.
 - `tests/test_candidate_generation.py`: verifies all four assignment candidates.
+
 
 

@@ -1,111 +1,144 @@
-# Business and technical summary
+# WISER–Nestlé DOM optimizer: business and technical summary
 
-## The decision
+## Decision problem
 
-Distributed Order Management (DOM) decides how to fulfill customer orders across a
-network of distribution centers (DCs). An order normally has a default DC. If that
-DC lacks inventory, throughput, labor, dock, or pick capacity, a planner may divert
-the complete order to an eligible alternative DC. The choice changes customer fill,
-unmet-demand penalty, shipping cost, delivery timing, and the inventory left for
-other orders.
+Distributed Order Management (DOM) decides which distribution center (DC) should
+serve an order and when it should ship. The default DC may lack inventory or
+operational headroom, so a planner can divert the order to another eligible DC. A
+diversion may improve customer service and avoid shortage penalties, but it can also
+increase shipping cost, use scarce inventory needed by another order, or consume an
+alternate dock slot. The useful decision is therefore not “which DC looks best for
+this order?” It is “which compatible set of assignments produces the best validated
+network outcome?”
 
-This is a combinatorial optimization problem because orders compete for shared
-resources. A candidate that looks best for one order in isolation can consume the
-last stock or dock slot needed by several more valuable orders. With \(O\) orders
-and roughly \(K\) outcomes per order, even the assignment-only search space is
-approximately \(K^O\). SKU-level partial quantities and time-indexed resources add
-further integer decisions.
+DOM is combinatorial. If each of $O$ decision units has $K$ possible outcomes,
+the assignment space grows approximately as $K^O$. Each assignment also determines
+integer SKU fulfillment quantities. Orders interact through DC-SKU inventory and
+DC-date resources, while orders on the same source load must move together. A locally
+attractive choice can prevent a more valuable combination later.
 
-The business objective used consistently in this work is:
+## Supplied data and business rules
 
-\[
-\text{fulfilled value}-\text{unmet-demand penalty}-\text{total shipping cost}.
-\]
+All ten challenge files are readable and pass a format-specific fail-fast audit. The
+input includes 25,193 order-SKU rows, 377,504 inventory/forecast rows, 12,922 shipping
+lanes, 480 dock rows, 530 throughput-utilization rows, a worked workbook, and the
+source equations document. The two supplied recommendation outputs contain 1,109
+orders and 25,193 SKU rows. They reconcile to 2,554,440 requested and 2,413,937
+selected fulfilled cases, or 94.4997% case fill. Only privacy-safe aggregates are
+reported.
 
-Each order selects at most one eligible DC/date; an explicit unassigned outcome keeps
-the model feasible. Fulfilled plus unfulfilled cases equal demand. Shared projected
-available-to-promise inventory is protected at every future checkpoint. Optional
-dock, throughput, pallet-pick, case-pick, weight, and volume limits are enforced.
-For a diversion, fill must exceed documented default fill by at least five percentage
-points of total ordered cases. Partial fulfillment remains allowed at the one
-selected DC.
+The adapter derives cases from the source planning unit. It uses division by
+planning-units-per-case when that value is positive and converts pallet planning
+units using cases-per-pallet otherwise. This exactly reconciles source demand with
+the supplied output.
 
-## Why a hybrid method
+Inventory is protected available-to-promise (ATP): for a candidate ship date, usable
+inventory is the minimum nonnegative availability through the following five days.
+This protects future committed demand. Alternatives require every load SKU to be
+present at the candidate DC. Shipping lead is the ceiling of distance divided by 500
+miles per day; alternative PGI is rolled backward over weekends and configured
+holidays. `Dock_Remaining` is a hard incremental alternate-load limit. The supplied
+throughput table contains observed utilization, not a documented maximum, so it is
+used only in explicitly labeled headroom scenarios.
 
-A classical mixed-integer linear program (MILP) represents these hard rules exactly
-and supplies an optimality bound, but a large operational instance can become slow
-as candidate and resource coupling grows. A greedy heuristic is fast and transparent,
-but it can commit scarce resources too early. A single global quantum model would
-require binary encodings for assignments, quantities, and constraint slack, producing
-more logical variables, denser couplings, and delicate penalty scales than current
-hardware can reliably support.
+Orders sharing a load select one common DC/date. Shipping and alternate dock use are
+charged once per load through a deterministic leader. A diversion must improve the
+default protected-ATP fill by at least both five percentage points of total demand
+and 100 cases, capped at demand.
 
-The selected architecture uses each tool for the job it handles best:
+The order penalty is not a simple linear shortage cost. It activates only when fill
+falls below the order's threshold. When active, it includes variable unmet value,
+fixed cost, and cost per cut SKU, followed by optional minimum and maximum amounts.
+The implemented equation reproduces the supplied default penalty to floating-point
+tolerance.
 
-1. canonical preprocessing creates only eligible candidates;
-2. default and sequential greedy methods provide transparent feasible baselines;
-3. a conflict-aware large-neighborhood search selects a bounded set of orders;
-4. a warm-started QUBO proposes coordinated assignments in that neighborhood;
-5. exact MILP recourse rebuilds fulfillment under residual resources; and
-6. independent validation accepts only a strict feasible improvement.
+## Common optimization model
 
-QUBO is quadratic unconstrained binary optimization. It is suitable for simulated
-annealing and optional quantum annealing. The local model contains one variable per
-candidate plan plus an unassigned plan, a one-outcome-per-order penalty, and
-loss-weighted resource-contention terms. Its logical size is capped, so total order
-volume may grow without requiring a proportionally larger quantum subproblem.
+Every method maximizes the same independently recomputed objective:
 
-This design has a safety property: a noisy or weak sampler may fail to find an
-improvement, but it cannot make the returned solution worse. The incumbent remains
-feasible, exact recourse checks sampled assignments, and the validator rejects any
-violation. Remote quantum execution is also privacy-gated; local simulated annealing
-is the default.
+$$
+\text{fulfilled value}-\text{thresholded penalty}-\text{shipping cost}.
+$$
 
-## Evaluation
+The deterministic mixed-integer linear program (MILP) selects one eligible DC/PGI
+candidate or an unassigned outcome for each order. Partial fulfillment is allowed at
+the selected DC, but SKU lines cannot split across DCs. Constraints enforce demand
+balance, load cohesion, projected ATP at every checkpoint, dock and enabled scenario
+resources, exact full-pallet/loose-case accounting, and the diversion-uplift rule.
+SciPy submits the model to the HiGHS solver, which returns a feasible incumbent,
+mathematical bound, gap, model size, and runtime.
 
-Every method receives the same canonical tables and candidate set. A separate
-objective evaluator reports objective value, fulfilled value, penalty cost, shipping
-cost, case fill, value fill, reassigned orders, runtime, and—when available—MILP
-optimality gap. A separate validator checks assignment, demand, eligibility,
-inventory, capacity, and alternate-fill rules. Infeasible samples are never ranked as
-business solutions.
+Two transparent baselines use the same rules. The **default baseline** keeps each
+load at its eligible default option and allocates shared resources deterministically.
+The **greedy baseline** considers alternatives sequentially, commits the best current
+incremental objective, and immediately updates residual inventory and capacity. It is
+fast and explainable but cannot undo an early myopic decision.
 
-The exact two-order test has a known optimum of 126 synthetic units:
-`O1` diverts to `D2`, while `O2` remains at `D1`. The classical MILP and bounded
-hybrid method reproduce that optimum, and the hybrid improves its default incumbent
-by 176 units. Automated tests cover baselines, the exact optimum, candidate filtering,
-projected ATP, the five-percent rule, pick decomposition, QUBO sampling and privacy,
-higher-order contention, planner explanation, and independent validation.
+## Why the hybrid split is appropriate
 
-The provided recommendation outputs were also audited without exposing identifiers.
-They contain 1,109 orders and 25,193 order-SKU rows; the two levels reconcile with no
-quantity mismatch. The incumbent selected three diversions and fulfilled 2,413,937
-of 2,554,440 requested cases, a 94.4997% case fill rate. Commercial metrics were not
-emitted.
+A monolithic QUBO containing every assignment, quantity, inventory slack, capacity
+slack, and thresholded-penalty auxiliary would be too wide and penalty-sensitive for
+current quantum hardware. This solver instead uses quantum or quantum-inspired search
+only for a bounded assignment neighborhood.
 
-The remaining uploaded input names are AppleDouble metadata sidecars rather than the
-underlying CSV, workbook, or Word payloads. They do not contain the alternative-DC
-inventory, capacity, eligibility, and cost universe needed to reoptimize. Therefore
-no real-data improvement is claimed from this upload. The repository supplies a
-strict canonical loader and processing contract; the original payloads must be
-re-exported before the final private comparison.
+The hybrid starts from a feasible default or greedy incumbent. It selects complete
+load groups that contend for shared resources, creates a small one-hot QUBO over
+candidate plans, and samples combinations using exact enumeration, a random control,
+simulated annealing, or an optional approved D-Wave backend. Sample repair restores
+one common option per load. Exact local MILP recourse then chooses SKU quantities
+using resources left after frozen orders. The complete solution is independently
+validated and accepted only when it is a strict objective improvement.
+
+This gives the invariant
+
+$$
+J(S^{k+1})\ge J(S^k).
+$$
+
+Sampling quality affects search efficiency, not the correctness or minimum quality
+of the returned recommendation. The QUBO width is capped, so global order count can
+grow without requiring a proportionally larger quantum subproblem.
+
+## Evaluation and evidence
+
+The runnable notebook implements the challenge comparison plus size scaling,
+penalty-weight sensitivity, candidate-count sensitivity, inventory shocks, four-seed
+coefficient-noise tests, Pareto-pruning ablation, random-versus-conflict batching, and
+random-versus-annealing sampling. An independent synthetic coordination control tests
+whether the hybrid can revisit a greedy trap.
+
+The complete smoke profile produced 37 aggregate runs; every row was feasible and no
+hybrid result regressed its own default incumbent. On the real four-decision-unit
+comparison, the exact MILP proved a zero gap. Setting the default objective to index
+100, greedy, exact MILP, and hybrid each reached 136.5; hybrid used a nine-variable
+local QUBO and one accepted move. This does not show a quantum advantage: greedy also
+reached the exact solution and the sampler was classical.
+
+On the nine-order scaling subset created by whole-load expansion, greedy and exact
+MILP agreed while the one-iteration smoke hybrid improved its default start but did
+not catch them. This is useful negative evidence: the acceptance design remained
+safe while the search budget was insufficient. In the Pareto ablation, candidate
+rows fell from 12 to 6 with unchanged validated objective. The synthetic control
+improved greedy by 23 synthetic units but remained 249.4 units below the exact
+optimum, again showing limited search value rather than dominance.
 
 ## Trade-offs and recommendation
 
-The exact MILP is the quality reference on tractable subsets. Greedy is the rapid
-fallback. The hybrid is most useful when the global MILP is time-limited but small,
-high-conflict reassignment neighborhoods can still be solved repeatedly. Simulated
-annealing establishes a strong local control; exact QUBO enumeration verifies very
-small neighborhoods; a D-Wave run is optional after data approval.
+The exact MILP is the quality reference on tractable subsets because a zero gap is a
+proof. Greedy is the operational low-latency fallback. The hybrid is appropriate when
+the global MILP is time-limited and planners want repeated, coordinated searches of
+the most resource-coupled neighborhoods with a safe incumbent.
 
-Current quantum hardware introduces embedding, coefficient-range, noise, queue, and
+Current noisy quantum hardware adds embedding, coefficient-range, queue, chain, and
 latency costs. Physical qubits are not equivalent to dense logical variables. A fair
-claim therefore requires multiple seeds, tuned classical competitors, equal QUBOs,
-end-to-end time, exact post-processing, and results that scale beyond enumeration.
-This implementation makes that comparison reproducible but deliberately makes no
-quantum-advantage claim.
+hardware study must keep the QUBO, warm start, repair, recourse, validator, seeds, and
+wall-clock boundary identical across samplers, and must report embedding and
+uncertainty. No QPU run or quantum advantage is claimed here.
 
-For deployment, use the hybrid result only after its validator passes and a planner
-reviews the generated explanation of fill uplift, penalty avoided, shipping change,
-net objective change, and delivery date. Keep the default incumbent available as a
-safe rollback.
+The recommended deployment sequence is: retain the exact and greedy classical
+controls; run the full aggregate experiment profile inside the approved environment;
+review planner explanations for every recommended diversion; confirm the enterprise
+holiday calendar and throughput-limit semantics; and only then consider an approved
+QPU comparison. The aggregate-only copilot is useful for exploring evidence, but it
+is decision support—not an autonomous routing agent.
+

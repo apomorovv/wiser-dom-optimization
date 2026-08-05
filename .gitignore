@@ -76,6 +76,8 @@ tmp/
 # ---------------------------------------------------------
 results/private/*
 reports/private/
+reports/*.pptx.inspect.ndjson
+reports/*/slide-*.png
 
 # ---------------------------------------------------------
 # Solver-generated files

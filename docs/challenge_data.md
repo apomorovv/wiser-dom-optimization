@@ -1,96 +1,155 @@
-# Challenge data status and processing
+# Challenge data inventory and status
 
-## What was received
+## Readability gate
 
-The uploaded pack contains two usable recommendation outputs and the five-page WISER
-challenge brief:
+All ten files in the supplied proof-of-concept bundle are readable. The adapter calls
+`audit_poc_bundle` before parsing business data and raises `PocDataError` immediately
+if any required artifact is missing, empty, malformed, or unreadable.
 
-- order-level recommendations: 1,109 rows and 64 columns;
-- order-SKU recommendations: 25,193 rows and 32 columns; and
-- the WISER–Nestlé DOM challenge PDF.
+The gate performs the appropriate structural check for each format:
 
-The files named as raw order, shipping-cost, throughput, dock, capacity-planning,
-workbook, equations, and DOM data are only 170–326 byte AppleDouble metadata
-sidecars. AppleDouble files normally accompany a real file copied from macOS and do
-not contain its tabular/document payload. Their small metadata forks cannot be used
-to recover the original tables.
+- CSV: parse the header and at least one data row;
+- XLSX: open the OOXML workbook and inspect worksheets;
+- DOCX: validate the ZIP package and `word/document.xml` member; and
+- PDF: open every page and extract text.
 
-## Privacy-preserving incumbent audit
+## Supplied files
 
-`scripts/audit_challenge_outputs.py` validates key uniqueness, order/SKU coverage,
-numeric quantities, and order-to-SKU rollups. It returns aggregates only.
+| File | Rows/pages | Role in the workflow |
+|---|---:|---|
+| `input_order data.csv` | 25,193 rows, 39 columns | Order-SKU demand, default source/date, customer priority, economics, unit conversion, and penalty parameters. |
+| `input_capacity_planning.csv` | 377,504 rows, 23 columns | Daily inventory/forecast by DC and SKU; used to construct protected ATP. |
+| `input_shipping_cost_data.csv` | 12,922 rows, 7 columns | Plant-to-destination-ZIP lanes, distance, and total shipping cost. |
+| `input_dock_capacity.csv` | 480 rows, 13 columns | Date-specific `Dock_Remaining`; used as incremental alternate-load capacity. |
+| `input_throughput_capacity.csv` | 530 rows, 7 columns | Observed case-pick, pallet-pick, and order utilization; not a documented maximum. |
+| `DOM Equations.docx` | Valid OOXML, 110 equation objects | Authoritative business equations and rule definitions. |
+| `Example.xlsx` | 561 rows, 64 columns | Worked POC calculations used as an interpretation and reconciliation aid. |
+| `Output_order_level_data(3).csv` | 1,109 rows, 64 columns | Supplied order-level recommendation output used only for audit. |
+| `output_order_sku_level_data(3).csv` | 25,193 rows, 32 columns | Supplied SKU-level recommendation output used only for audit. |
+| `Nestle - WISER Quantum Challenge [SHARED](2).pdf` | 5 pages | Tasks, judging criteria, privacy rules, and submission requirements. |
 
-| Audit measure | Result |
+An all-null trailing column in the order input is ignored. Identifiers are loaded as
+strings so leading zeros and exact joins are preserved.
+
+## Privacy-safe source audit
+
+| Measure | Verified value |
 |---|---:|
-| Unique orders | 1,109 |
+| Orders in supplied recommendation output | 1,109 |
 | Order-SKU rows | 25,193 |
-| Unique loads | 615 |
-| DC labels across default/recommended fields | 8 |
-| Default orders | 1,106 |
+| Named loads | 614 |
+| Assignment groups after missing-load singleton handling | 631 |
 | Diverted orders | 3 |
 | Requested cases | 2,554,440 |
 | Selected fulfilled cases | 2,413,937 |
-| Case fill rate | 94.4996555% |
-| Order/SKU quantity mismatches | 0 |
+| Selected case fill | 94.4996555% |
+| Order/SKU key coverage | complete |
+| Maximum default-penalty reproduction error | less than $4.5\times10^{-7}$ |
 
-Commercial totals are excluded unless an authorized private analyst explicitly
-passes `--include-commercial-metrics`. The command never returns order, load, SKU,
-or DC identifiers.
+Raw identifiers, DC details, and commercial totals are not emitted.
 
-## Why outputs are not enough to reoptimize
+## What each source contributes
 
-An incumbent output can show what was recommended, but not the full opportunity set.
-Counterfactual optimization needs, for every focus order and alternative DC/date:
+### Order-SKU data
 
-- SKU demand and economic coefficients;
-- eligibility and lead-time/calendar status;
-- protected inventory at every relevant checkpoint;
-- shipping cost;
-- dock, throughput, pick, weight, and volume capacity; and
-- default fill used by the five-percentage-point rule.
+`input_order data.csv` is the main fact table. One row is one order-SKU line. The
+adapter derives integer case demand as follows:
 
-The two outputs do not establish unused alternatives or their residual resources.
-Inferring those values would create a plausible-looking but unsupported result.
+$$
+Q_{os}=
+\begin{cases}
+\operatorname{round}(\text{OrderedQty converted}/\text{planning units per case}),
+&\text{when units per case}>0,\\
+\operatorname{round}(\text{OrderedQty converted}\times\text{cases per pallet}),
+&\text{otherwise.}
+\end{cases}
+$$
 
-## Required re-export
+The second branch is required for the rows represented in pallet planning units. The
+calculation reconciles exactly with the supplied output case quantities.
 
-Re-upload or export the original payload files, not filenames beginning with `._` and
-not Finder metadata. A safe check is that CSVs contain readable header rows, the
-workbook opens as an `.xlsx` ZIP container, and the equations document opens as a
-Word document. Keep original operational files outside git.
+The same table supplies order-level fill thresholds, fixed penalty, penalty per cut
+SKU, optional minimum and maximum penalty, top-customer flag, priority, default DC,
+default PGI, requested delivery date, load number, destination ZIP, SKU value,
+weight, volume, and cases per pallet.
 
-Transform the approved source into this canonical directory:
+### Inventory and forecast
 
-```text
-processed-instance/
-  orders.csv
-  order_lines.csv
-  inventory.csv
-  candidates.csv
-  capacities.csv
-  calendar.csv
-  metadata.json
+`Available_inventory` equals `OpeningStock - Total_Reserved_Qty` in the provided
+table. Negative values are clipped to zero. For candidate PGI $t$, the adapter
+uses the minimum available inventory over $t$ through $t+5$ calendar days:
+
+$$
+I_{dst}=\max\left(0,\left\lfloor
+\min_{\tau\in[t,t+5]}\text{AvailableInventory}_{ds\tau}
+\right\rfloor\right).
+$$
+
+This protects already-planned future consumption. An alternative candidate is
+eligible only when every SKU in its assignment group exists in the alternative DC's
+inventory/forecast table. A missing default SKU is interpreted as zero fill, which
+keeps the default comparison available without inventing inventory.
+
+### Shipping and dates
+
+Candidate lane lead time is:
+
+$$
+\operatorname{leadDays}=\left\lceil\frac{\operatorname{distance}}{500}\right\rceil.
+$$
+
+Alternative PGI is requested delivery date minus lead time, rolled backward over
+weekends and any configured holidays. The shipping value is treated as total cost
+for the selected load option, not an incremental difference.
+
+### Dock and throughput
+
+`Dock_Remaining` is clipped at zero. A default load consumes zero *incremental* dock
+capacity because it is already booked; an alternate load consumes one unit. Cost and
+dock use are attached to one deterministic group leader, preventing double counting
+across orders on the same load.
+
+The throughput file contains observed `util_case_picks`, `util_pallets`, and
+`order_count`. Because no maximum or remaining-capacity equation is documented, the
+real adapter does not treat these observations as hard capacity. An analyst may set
+`throughput_headroom_fraction` to create an explicitly labeled scenario.
+
+### Supplied outputs
+
+The two output CSVs are audit benchmarks. They establish reconciliation targets for
+case quantities and penalties, but they are not training labels and do not constrain
+the optimizer to reproduce the supplied recommendation.
+
+## Canonical instance produced
+
+With the default focus/load settings and before Pareto pruning, the readable bundle
+produces:
+
+| Canonical object | Aggregate size |
+|---|---:|
+| Focus orders after whole-load expansion | 750 |
+| Focus order-SKU lines | 20,869 |
+| Assignment groups | 372 |
+| Candidate rows | 2,182 |
+| Candidate rows after Pareto pruning | 1,307 |
+| Protected-ATP rows | 47,075 |
+| Dock-capacity rows | 50 |
+
+The exact numbers are generated by code and may change only when the source bundle,
+assumption version, or candidate rules change.
+
+## Run the gate and adapter
+
+```python
+from domopt.poc import PocConfig, audit_poc_bundle, load_poc_problem
+
+audit = audit_poc_bundle("/approved/path/to/challenge-files")
+problem = load_poc_problem(
+    "/approved/path/to/challenge-files",
+    config=PocConfig(pareto_prune=False),
+)
 ```
 
-The exact field contract is in [data dictionary](data_dictionary.md). Run
-`load_problem_data` before any solver; it rejects duplicate keys, textual null IDs,
-invalid dates/numbers, missing references, incorrect default flags, unsupported
-inventory policy, and incomplete minimum-divert inputs.
+See [POC source mapping](poc_data_mapping.md) for field-level transformations and
+[canonical data dictionary](data_dictionary.md) for the solver contract.
 
-## Source-to-canonical mapping checklist
-
-| Business concept | Canonical destination | Required transformation |
-|---|---|---|
-| Sales document/group | `orders.order_id` | preserve as string; anonymize only in approved copy |
-| Material | `order_lines.sku_id` | preserve leading zeros as string |
-| Ordered cases | `order_lines.demand_cases` | integer cases |
-| Price and penalty rate | `penalty_per_unfilled_case` | multiply on one declared monetary scale |
-| Default source | `orders.default_dc` | preserve as string |
-| Candidate source/date | `candidates.dc_id`, `pgi_date` | retain only eligible combinations |
-| Lane cost | `candidates.shipping_cost` | total cost for selected candidate |
-| Projected inventory | `inventory.cumulative_available_cases` | protected ATP by DC/SKU/checkpoint |
-| Default fill | `orders.default_fillable_cases` | same policy used for 5% comparison |
-| Dock/throughput/picks | `capacities` | normalize resource name, date, unit, limit |
-
-Any source ambiguity must be resolved in metadata or assumptions before a real
-result is reported.

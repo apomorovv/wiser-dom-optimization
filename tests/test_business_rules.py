@@ -4,6 +4,7 @@ import pytest
 from domopt.classical import ClassicalSolverError, solve_classical
 from domopt.data import make_tiny_problem_data, normalize_problem_data
 from domopt.resources import solution_capacity_usage
+from domopt.rules import minimum_divert_fulfillment
 from domopt.schemas import ProblemData
 
 
@@ -33,6 +34,60 @@ def test_five_percent_rule_rejects_insufficient_alternate_fill() -> None:
     with pytest.raises(ClassicalSolverError):
         solve_classical(
             problem,
+            fixed_assignments={"O1": "O1_D1_T1", "O2": "O2_D2_T1"},
+        )
+
+
+def test_diversion_rule_uses_hundred_case_floor() -> None:
+    problem = make_tiny_problem_data()
+    orders = problem.orders.iloc[[0]].copy()
+    orders["default_fillable_cases"] = 100
+    lines = problem.order_lines.loc[problem.order_lines["order_id"] == "O1"].copy()
+    lines.loc[lines.index[0], "demand_cases"] = 498
+    lines.loc[lines.index[1], "demand_cases"] = 2
+    large = ProblemData(
+        orders=orders,
+        order_lines=lines,
+        inventory=problem.inventory,
+        candidates=problem.candidates.loc[
+            problem.candidates["order_id"] == "O1"
+        ].copy(),
+        capacities=problem.capacities,
+        calendar=problem.calendar,
+        metadata={
+            **problem.metadata,
+            "min_divert_improvement_cases": 100,
+        },
+    )
+
+    assert minimum_divert_fulfillment(large, "O1") == 200
+
+
+def test_exact_model_enforces_assignment_group_cohesion() -> None:
+    problem = make_tiny_problem_data()
+    orders = problem.orders.copy()
+    orders["assignment_group"] = "G1"
+    candidates = problem.candidates.copy()
+    candidates["group_option_id"] = candidates["dc_id"] + "::T1"
+    grouped = normalize_problem_data(
+        ProblemData(
+            orders=orders,
+            order_lines=problem.order_lines,
+            inventory=problem.inventory,
+            candidates=candidates,
+            capacities=problem.capacities,
+            calendar=problem.calendar,
+            metadata={
+                **problem.metadata,
+                "enforce_assignment_group": True,
+                "enforce_min_divert_improvement": False,
+            },
+        )
+    )
+
+    with pytest.raises(ClassicalSolverError):
+        solve_classical(
+            grouped,
             fixed_assignments={"O1": "O1_D1_T1", "O2": "O2_D2_T1"},
         )
 

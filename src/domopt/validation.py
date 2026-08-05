@@ -161,6 +161,35 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
             "selected_pgi_date": selected_date,
         }
 
+    if bool(problem.metadata.get("enforce_assignment_group", False)):
+        if "assignment_group" not in problem.orders.columns:
+            schema_violations.append(
+                "group cohesion requires orders.assignment_group"
+            )
+        else:
+            for group_id, group in problem.orders.groupby(
+                "assignment_group", sort=False
+            ):
+                members = [
+                    assignment_lookup.get(str(order_id))
+                    for order_id in group["order_id"]
+                ]
+                members = [member for member in members if member is not None]
+                if len(members) <= 1:
+                    continue
+                outcomes = {
+                    (
+                        bool(member["is_unassigned"]),
+                        member["selected_dc"],
+                        member["selected_pgi_date"],
+                    )
+                    for member in members
+                }
+                if len(outcomes) > 1:
+                    assignment_violations.append(
+                        f"assignment group {group_id!r} is split across outcomes"
+                    )
+
     if fulfillment.duplicated(["order_id", "sku_id"]).any():
         demand_violations.append("duplicate fulfillment rows for an order–SKU pair")
 

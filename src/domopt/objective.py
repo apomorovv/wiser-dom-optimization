@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .penalties import total_penalty
 from .schemas import ObjectiveBreakdown, ProblemData, Solution
 
 
@@ -62,12 +63,7 @@ def evaluate_solution(problem: ProblemData, solution: Solution) -> ObjectiveBrea
     fulfilled_value = float(
         (merged["unit_value"].astype(float) * merged["fulfilled_cases"].astype(float)).sum()
     )
-    penalty_cost = float(
-        (
-            merged["penalty_per_unfilled_case"].astype(float)
-            * merged["unfulfilled_cases"].astype(float)
-        ).sum()
-    )
+    penalty_cost = total_penalty(problem, merged)
 
     assignments = solution.assignments.copy()
     required_assignments = {"order_id", "candidate_id", "is_unassigned"}

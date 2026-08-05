@@ -12,6 +12,12 @@ import pandas as pd
 from scipy.optimize import Bounds, LinearConstraint, milp
 from scipy.sparse import coo_matrix
 
+from .penalties import (
+    THRESHOLDED_CUT,
+    order_penalty_parameters,
+    penalty_activation_fill_cases,
+    penalty_mode,
+)
 from .resources import candidate_fixed_consumption, uses_split_pick_accounting
 from .rules import candidate_is_divert, minimum_divert_fulfillment
 from .schemas import ProblemData, Solution
@@ -147,6 +153,38 @@ def solve_classical(
             k_index[key] = next_index
             next_index += 1
 
+    thresholded_penalties = penalty_mode(problem) == THRESHOLDED_CUT
+    penalty_active_index: dict[str, int] = {}
+    penalty_raw_index: dict[str, int] = {}
+    penalty_floor_value_index: dict[str, int] = {}
+    penalty_value_index: dict[str, int] = {}
+    penalty_floor_binary_index: dict[str, int] = {}
+    penalty_cap_binary_index: dict[str, int] = {}
+    penalty_unmet_product_index: dict[int, int] = {}
+    penalty_cut_sku_index: dict[int, int] = {}
+    if thresholded_penalties:
+        for order_id in orders["order_id"].astype(str):
+            penalty_active_index[order_id] = next_index
+            next_index += 1
+            penalty_raw_index[order_id] = next_index
+            next_index += 1
+            penalty_floor_value_index[order_id] = next_index
+            next_index += 1
+            penalty_value_index[order_id] = next_index
+            next_index += 1
+            parameters = order_penalty_parameters(problem, order_id)
+            if parameters["minimum"] > 0:
+                penalty_floor_binary_index[order_id] = next_index
+                next_index += 1
+            if parameters["maximum"] > 0:
+                penalty_cap_binary_index[order_id] = next_index
+                next_index += 1
+        for line_id in lines.index:
+            penalty_unmet_product_index[int(line_id)] = next_index
+            next_index += 1
+            penalty_cut_sku_index[int(line_id)] = next_index
+            next_index += 1
+
     n_variables = next_index
     objective = np.zeros(n_variables, dtype=float)
     lower_bounds = np.zeros(n_variables, dtype=float)
@@ -171,8 +209,55 @@ def solve_classical(
                 per_pallet = int(line["cases_per_pallet"])
                 upper_bounds[p_index[key]] = demand // per_pallet
                 upper_bounds[k_index[key]] = per_pallet - 1
-        objective[u_index[int(line_id)]] = float(line["penalty_per_unfilled_case"])
+        if not thresholded_penalties:
+            objective[u_index[int(line_id)]] = float(
+                line["penalty_per_unfilled_case"]
+            )
         upper_bounds[u_index[int(line_id)]] = demand
+
+    if thresholded_penalties:
+        line_groups = {
+            str(order_id): group for order_id, group in lines.groupby("order_id", sort=False)
+        }
+        for order_id in orders["order_id"].astype(str):
+            parameters = order_penalty_parameters(problem, order_id)
+            group = line_groups[order_id]
+            raw_upper = float(
+                (
+                    group["penalty_per_unfilled_case"].astype(float)
+                    * group["demand_cases"].astype(float)
+                ).sum()
+                + parameters["fixed"]
+                + parameters["per_cut_sku"] * len(group)
+            )
+            floor_upper = max(raw_upper, parameters["minimum"])
+            final_upper = (
+                min(floor_upper, parameters["maximum"])
+                if parameters["maximum"] > 0
+                else floor_upper
+            )
+            active = penalty_active_index[order_id]
+            raw = penalty_raw_index[order_id]
+            floor_value = penalty_floor_value_index[order_id]
+            value = penalty_value_index[order_id]
+            upper_bounds[active] = 1.0
+            upper_bounds[raw] = raw_upper
+            upper_bounds[floor_value] = floor_upper
+            upper_bounds[value] = final_upper
+            integrality[raw] = 0
+            integrality[floor_value] = 0
+            integrality[value] = 0
+            objective[value] = 1.0
+            if order_id in penalty_floor_binary_index:
+                upper_bounds[penalty_floor_binary_index[order_id]] = 1.0
+            if order_id in penalty_cap_binary_index:
+                upper_bounds[penalty_cap_binary_index[order_id]] = 1.0
+        for line_id, line in lines.iterrows():
+            product = penalty_unmet_product_index[int(line_id)]
+            cut = penalty_cut_sku_index[int(line_id)]
+            upper_bounds[product] = int(line["demand_cases"])
+            upper_bounds[cut] = 1.0
+            integrality[product] = 0
 
     constraints = _RowBuilder.create()
 
@@ -182,6 +267,52 @@ def solve_classical(
         for candidate in candidates_by_order.get(order_id, []):
             coefficients[x_index[str(candidate["candidate_id"])]] = 1.0
         constraints.add(coefficients, 1.0, 1.0)
+
+    # Optional load/assignment-group cohesion. Every member must choose the same
+    # DC/date option (or all be unassigned); cost and dock usage can be placed on
+    # one deterministic group leader by the data adapter.
+    if bool(problem.metadata.get("enforce_assignment_group", False)):
+        required_group_columns = {"assignment_group"}
+        required_candidate_columns = {"group_option_id"}
+        if not required_group_columns <= set(orders.columns):
+            raise ClassicalSolverError(
+                "Group cohesion requires orders.assignment_group"
+            )
+        if not required_candidate_columns <= set(candidates.columns):
+            raise ClassicalSolverError(
+                "Group cohesion requires candidates.group_option_id"
+            )
+        for _, group_orders in orders.groupby("assignment_group", sort=False):
+            members = group_orders["order_id"].astype(str).tolist()
+            if len(members) <= 1:
+                continue
+            leader = members[0]
+            leader_options = {
+                str(row["group_option_id"]): str(row["candidate_id"])
+                for row in candidates_by_order.get(leader, [])
+            }
+            for member in members[1:]:
+                member_options = {
+                    str(row["group_option_id"]): str(row["candidate_id"])
+                    for row in candidates_by_order.get(member, [])
+                }
+                if set(member_options) != set(leader_options):
+                    raise ClassicalSolverError(
+                        "All orders in an assignment group must expose identical "
+                        f"group_option_id values; mismatch in group {group_orders.iloc[0]['assignment_group']!r}"
+                    )
+                constraints.add(
+                    {z_index[member]: 1.0, z_index[leader]: -1.0}, 0.0, 0.0
+                )
+                for option_id, leader_candidate in leader_options.items():
+                    constraints.add(
+                        {
+                            x_index[member_options[option_id]]: 1.0,
+                            x_index[leader_candidate]: -1.0,
+                        },
+                        0.0,
+                        0.0,
+                    )
 
     # Fix assignment decisions for classical recourse when requested.
     candidate_lookup = candidates.set_index("candidate_id", drop=False)
@@ -238,6 +369,130 @@ def solve_classical(
                     0.0,
                 )
         constraints.add(balance, float(demand), float(demand))
+
+    # POC penalty: activate below the order fill threshold, charge cut cases and
+    # cut SKUs, then apply the supplied floor and optional cap exactly.
+    if thresholded_penalties:
+        for order_id, group in lines.groupby("order_id", sort=False):
+            order_id = str(order_id)
+            parameters = order_penalty_parameters(problem, order_id)
+            active = penalty_active_index[order_id]
+            total_demand = int(group["demand_cases"].sum())
+            required_fill = penalty_activation_fill_cases(problem, order_id)
+            if required_fill <= 0:
+                constraints.add({active: 1.0}, 0.0, 0.0)
+            else:
+                trigger_unmet = total_demand - required_fill + 1
+                activation = {active: -float(total_demand)}
+                for line_id in group.index:
+                    activation[u_index[int(line_id)]] = 1.0
+                constraints.add(activation, -np.inf, float(trigger_unmet - 1))
+                constraints.add(
+                    activation,
+                    float(trigger_unmet - total_demand),
+                    np.inf,
+                )
+
+            raw_equation = {
+                penalty_raw_index[order_id]: 1.0,
+                active: -parameters["fixed"],
+            }
+            for line_id, line in group.iterrows():
+                demand = int(line["demand_cases"])
+                unmet = u_index[int(line_id)]
+                product = penalty_unmet_product_index[int(line_id)]
+                cut = penalty_cut_sku_index[int(line_id)]
+                constraints.add({product: 1.0, unmet: -1.0}, -np.inf, 0.0)
+                constraints.add(
+                    {product: 1.0, active: -float(demand)}, -np.inf, 0.0
+                )
+                constraints.add(
+                    {product: 1.0, unmet: -1.0, active: -float(demand)},
+                    -float(demand),
+                    np.inf,
+                )
+                constraints.add({cut: 1.0, active: -1.0}, -np.inf, 0.0)
+                constraints.add(
+                    {unmet: 1.0, cut: -float(demand), active: float(demand)},
+                    -np.inf,
+                    float(demand),
+                )
+                raw_equation[product] = -float(line["penalty_per_unfilled_case"])
+                raw_equation[cut] = -parameters["per_cut_sku"]
+            constraints.add(raw_equation, 0.0, 0.0)
+
+            raw = penalty_raw_index[order_id]
+            floor_value = penalty_floor_value_index[order_id]
+            value = penalty_value_index[order_id]
+            raw_upper = float(upper_bounds[raw])
+            big_m = max(
+                1.0,
+                raw_upper,
+                parameters["minimum"],
+                parameters["maximum"],
+            ) + 1.0
+
+            if parameters["minimum"] > 0:
+                floor_binary = penalty_floor_binary_index[order_id]
+                constraints.add({floor_value: 1.0, raw: -1.0}, 0.0, np.inf)
+                constraints.add(
+                    {floor_value: 1.0, active: -parameters["minimum"]},
+                    0.0,
+                    np.inf,
+                )
+                constraints.add(
+                    {floor_value: 1.0, raw: -1.0, floor_binary: -big_m},
+                    -np.inf,
+                    0.0,
+                )
+                constraints.add(
+                    {
+                        floor_value: 1.0,
+                        active: -parameters["minimum"],
+                        floor_binary: big_m,
+                    },
+                    -np.inf,
+                    big_m,
+                )
+            else:
+                constraints.add({floor_value: 1.0, raw: -1.0}, 0.0, 0.0)
+
+            if parameters["maximum"] > 0:
+                cap_binary = penalty_cap_binary_index[order_id]
+                maximum = parameters["maximum"]
+                constraints.add({cap_binary: 1.0, active: -1.0}, -np.inf, 0.0)
+                constraints.add(
+                    {floor_value: 1.0, cap_binary: -big_m},
+                    -np.inf,
+                    maximum,
+                )
+                constraints.add(
+                    {floor_value: 1.0, cap_binary: -big_m},
+                    maximum - big_m,
+                    np.inf,
+                )
+                constraints.add(
+                    {value: 1.0, floor_value: -1.0, cap_binary: -big_m},
+                    -big_m,
+                    0.0,
+                )
+                constraints.add(
+                    {value: 1.0, floor_value: -1.0, cap_binary: big_m},
+                    0.0,
+                    big_m,
+                )
+                constraints.add(
+                    {value: 1.0, active: -maximum, cap_binary: big_m},
+                    -np.inf,
+                    big_m,
+                )
+                constraints.add(
+                    {value: 1.0, active: -maximum, cap_binary: -big_m},
+                    -big_m,
+                    np.inf,
+                )
+            else:
+                constraints.add({value: 1.0, floor_value: -1.0}, 0.0, 0.0)
 
     # Projected-ATP protection. A fulfillment at tau consumes every checkpoint t >= tau.
     line_ids_by_sku: dict[str, list[int]] = {

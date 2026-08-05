@@ -11,7 +11,7 @@ This directory separates restricted source data, reproducible transformations, c
 
 ## Processing flow
 
-\[
+$$
 \text{raw}
 \rightarrow
 \text{normalized interim tables}
@@ -21,13 +21,14 @@ This directory separates restricted source data, reproducible transformations, c
 \text{feasible candidates}
 \rightarrow
 \text{processed solver tables}.
-\]
+$$
 
 Implementation mapping:
 
 | Stage | Module |
 |---|---|
-| Load and normalize | `src/domopt/data.py` |
+| Strict POC audit and source mapping | `src/domopt/poc.py` |
+| Load and normalize canonical objects | `src/domopt/data.py` |
 | Validate schemas | `src/domopt/schemas.py` |
 | Identify focus orders | `src/domopt/focus_orders.py` |
 | Generate candidates | `src/domopt/candidates.py` |
@@ -70,16 +71,20 @@ Every generated dataset should include:
 ```json
 {
   "dataset_id": "string",
-  "schema_version": "0.2.0",
+  "schema_version": "0.3.0",
   "created_utc": "ISO-8601 timestamp",
   "source_fingerprint": "hash or approved source version",
   "generator_commit": "git commit SHA",
-  "assumption_version": "v1",
+  "assumption_version": "v2",
   "currency": "declared currency or synthetic units",
   "quantity_unit": "cases",
   "inventory_policy": "projected_atp",
   "pick_capacity_mode": "auto",
-  "enforce_min_divert_improvement": false
+  "penalty_mode": "thresholded_cut",
+  "enforce_assignment_group": true,
+  "enforce_min_divert_improvement": true,
+  "min_divert_improvement_fraction": 0.05,
+  "min_divert_improvement_cases": 100
 }
 ```
 

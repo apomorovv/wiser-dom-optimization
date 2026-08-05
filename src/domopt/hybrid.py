@@ -26,6 +26,7 @@ from .baselines import (
 from .classical import ClassicalSolverError, solve_classical
 from .data import normalize_problem_data
 from .objective import evaluate_solution
+from .penalties import order_penalty
 from .quantum import sample_qubo
 from .qubo import build_candidate_qubo, perturb_qubo, qubo_energy
 from .repair import repair_one_hot
@@ -60,6 +61,7 @@ class HybridConfig:
     allow_remote: bool = False
     remote_time_limit_seconds: float | None = None
     qubo_noise_relative_sigma: float = 0.0
+    batch_strategy: str = "conflict"
 
     def validate(self) -> None:
         if self.iterations <= 0:
@@ -85,6 +87,8 @@ class HybridConfig:
             raise ValueError("qubo_noise_relative_sigma must be nonnegative")
         if self.initial_method not in {"default", "greedy"}:
             raise ValueError("initial_method must be 'default' or 'greedy'")
+        if self.batch_strategy not in {"conflict", "random"}:
+            raise ValueError("batch_strategy must be 'conflict' or 'random'")
 
 
 def _solution_for_orders(solution: Solution, order_ids: set[str], method: str) -> Solution:
@@ -160,10 +164,9 @@ def residualize_problem(
 def _unassigned_value(problem: ProblemData, order_id: str) -> float:
     lines = problem.order_lines.loc[
         problem.order_lines["order_id"].astype(str) == str(order_id)
-    ]
-    return -float(
-        (lines["penalty_per_unfilled_case"] * lines["demand_cases"]).sum()
-    )
+    ].copy()
+    lines["unfulfilled_cases"] = lines["demand_cases"]
+    return -order_penalty(problem, order_id, lines)
 
 
 def _plan_usage(
@@ -465,8 +468,24 @@ def _select_neighborhood(
     iteration: int,
 ) -> set[str]:
     signatures = _resource_signatures(problem)
+    if bool(problem.metadata.get("enforce_assignment_group", False)):
+        unit_for_order = problem.orders.set_index("order_id")[
+            "assignment_group"
+        ].astype(str).to_dict()
+    else:
+        unit_for_order = {
+            str(order_id): str(order_id)
+            for order_id in problem.orders["order_id"].astype(str)
+        }
+    members_by_unit: defaultdict[str, set[str]] = defaultdict(set)
+    unit_signatures: defaultdict[str, set[tuple[Any, ...]]] = defaultdict(set)
+    for order_id in problem.orders["order_id"].astype(str):
+        unit = unit_for_order[order_id]
+        members_by_unit[unit].add(order_id)
+        unit_signatures[unit].update(signatures.get(order_id, set()))
+
     inverted: defaultdict[tuple[Any, ...], set[str]] = defaultdict(set)
-    for order_id, keys in signatures.items():
+    for order_id, keys in unit_signatures.items():
         for key in keys:
             inverted[key].add(order_id)
     adjacency: defaultdict[str, set[str]] = defaultdict(set)
@@ -488,58 +507,87 @@ def _select_neighborhood(
         .nunique()
         .to_dict()
     )
+    unit_unfilled = {
+        unit: sum(float(unfilled.get(order_id, 0.0)) for order_id in members)
+        for unit, members in members_by_unit.items()
+    }
+    unit_variables = {
+        unit: sum(
+            min(
+                int(candidate_count.get(order_id, 0)),
+                config.max_candidates_per_order,
+            )
+            + 1
+            for order_id in members
+        )
+        for unit, members in members_by_unit.items()
+    }
     ranked = sorted(
-        problem.orders["order_id"].astype(str),
-        key=lambda order_id: (
-            -float(unfilled.get(order_id, 0.0)),
-            -len(adjacency.get(order_id, set())),
-            -int(candidate_count.get(order_id, 0)),
-            order_id,
+        members_by_unit,
+        key=lambda unit: (
+            -unit_unfilled.get(unit, 0.0),
+            -len(adjacency.get(unit, set())),
+            -len(members_by_unit[unit]),
+            unit,
         ),
     )
-    seed_order = ranked[iteration % len(ranked)]
-    queue: deque[str] = deque([seed_order])
-    selected: list[str] = []
+    if config.batch_strategy == "random":
+        generator = np.random.default_rng(config.seed + iteration)
+        ranked = [ranked[index] for index in generator.permutation(len(ranked))]
+        queue: deque[str] = deque(ranked)
+    else:
+        seed_order = ranked[iteration % len(ranked)]
+        queue = deque([seed_order])
+    selected_units: list[str] = []
     variable_count = 0
     visited: set[str] = set()
 
-    while queue and len(selected) < config.neighborhood_orders:
+    while queue and sum(len(members_by_unit[u]) for u in selected_units) < config.neighborhood_orders:
         order_id = queue.popleft()
         if order_id in visited:
             continue
         visited.add(order_id)
-        order_variables = min(
-            int(candidate_count.get(order_id, 0)),
-            config.max_candidates_per_order,
-        ) + 1
-        if selected and variable_count + order_variables > config.max_qubo_variables:
+        order_variables = unit_variables[order_id]
+        if variable_count + order_variables > config.max_qubo_variables:
             continue
-        selected.append(order_id)
+        if (
+            selected_units
+            and sum(len(members_by_unit[u]) for u in selected_units)
+            + len(members_by_unit[order_id])
+            > config.neighborhood_orders
+        ):
+            continue
+        selected_units.append(order_id)
         variable_count += order_variables
-        neighbors = sorted(
-            adjacency.get(order_id, set()),
-            key=lambda neighbor: (
-                -float(unfilled.get(neighbor, 0.0)),
-                -len(adjacency.get(neighbor, set())),
-                neighbor,
-            ),
-        )
-        queue.extend(neighbors)
+        if config.batch_strategy == "conflict":
+            neighbors = sorted(
+                adjacency.get(order_id, set()),
+                key=lambda neighbor: (
+                    -unit_unfilled.get(neighbor, 0.0),
+                    -len(adjacency.get(neighbor, set())),
+                    neighbor,
+                ),
+            )
+            queue.extend(neighbors)
 
     for order_id in ranked:
-        if len(selected) >= config.neighborhood_orders:
+        selected_count = sum(len(members_by_unit[u]) for u in selected_units)
+        if selected_count >= config.neighborhood_orders:
             break
-        if order_id in selected:
+        if order_id in selected_units:
             continue
-        order_variables = min(
-            int(candidate_count.get(order_id, 0)),
-            config.max_candidates_per_order,
-        ) + 1
-        if selected and variable_count + order_variables > config.max_qubo_variables:
+        order_variables = unit_variables[order_id]
+        if variable_count + order_variables > config.max_qubo_variables:
             continue
-        selected.append(order_id)
+        if selected_count + len(members_by_unit[order_id]) > config.neighborhood_orders:
+            continue
+        selected_units.append(order_id)
         variable_count += order_variables
-    return set(selected)
+    if not selected_units:
+        raise ValueError(
+            "No complete assignment group fits the configured neighborhood/QUBO limits"
+        )
+    return set().union(*(members_by_unit[unit] for unit in selected_units))
 
 
 def _merge_local_solution(
@@ -575,6 +623,7 @@ def _merge_local_solution(
 def _sample_to_fixed_assignments(
     repaired: dict[str, int],
     plans: pd.DataFrame,
+    problem: ProblemData,
 ) -> dict[str, str | None]:
     selected = {plan_id for plan_id, value in repaired.items() if int(value) == 1}
     fixed: dict[str, str | None] = {}
@@ -583,6 +632,41 @@ def _sample_to_fixed_assignments(
             fixed[str(row.order_id)] = (
                 None if pd.isna(row.candidate_id) else str(row.candidate_id)
             )
+    if not bool(problem.metadata.get("enforce_assignment_group", False)):
+        return fixed
+
+    order_group = problem.orders.set_index("order_id")["assignment_group"].astype(str)
+    candidate_options = problem.candidates.set_index("candidate_id")[
+        "group_option_id"
+    ].astype(str)
+    for _, members in order_group.groupby(order_group, sort=False):
+        member_ids = [str(order_id) for order_id in members.index if str(order_id) in fixed]
+        if len(member_ids) <= 1:
+            continue
+        selected_options = []
+        for order_id in member_ids:
+            candidate_id = fixed[order_id]
+            selected_options.append(
+                "__UNASSIGNED__"
+                if candidate_id is None
+                else str(candidate_options.loc[candidate_id])
+            )
+        chosen = min(
+            set(selected_options),
+            key=lambda option: (-selected_options.count(option), option),
+        )
+        for order_id in member_ids:
+            if chosen == "__UNASSIGNED__":
+                fixed[order_id] = None
+                continue
+            matches = problem.candidates.loc[
+                (problem.candidates["order_id"].astype(str) == order_id)
+                & (problem.candidates["group_option_id"].astype(str) == chosen),
+                "candidate_id",
+            ]
+            if len(matches) != 1:
+                return {}
+            fixed[order_id] = str(matches.iloc[0])
     return fixed
 
 
@@ -681,7 +765,7 @@ def solve_hybrid(
         best_iteration_value = incumbent_value
         attempted = 0
         for _, _, repaired in candidates[: settings.top_k_recourse]:
-            fixed = _sample_to_fixed_assignments(repaired, plans)
+            fixed = _sample_to_fixed_assignments(repaired, plans, local_problem)
             if set(fixed) != active_orders:
                 continue
             attempted += 1
@@ -757,6 +841,7 @@ def solve_hybrid(
             ),
             "remote_enabled": settings.allow_remote,
             "qubo_noise_relative_sigma": settings.qubo_noise_relative_sigma,
+            "batch_strategy": settings.batch_strategy,
             "history": history,
             "claim": "No quantum advantage is inferred from this run.",
         },

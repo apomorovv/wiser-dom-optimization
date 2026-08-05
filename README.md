@@ -1,60 +1,88 @@
 # WISER–Nestlé Distributed Order Management optimizer
 
-This repository implements a scalable, feasibility-preserving hybrid optimizer for
-the 2026 WISER Distributed Order Management (DOM) challenge. It combines a
-transparent classical incumbent, bounded assignment QUBOs, optional quantum
-sampling, and exact mixed-integer recourse.
+This repository is a complete, privacy-safe submission for the 2026 WISER–Nestlé
+Distributed Order Management (DOM) challenge. It reads the supplied proof-of-concept
+data, constructs a validated optimization instance, compares transparent classical
+baselines with an exact solver and a hybrid quantum-classical search, and produces a
+notebook, planner copilot, report, planner view, and seven-slide presentation.
 
-The important guarantee is simple: a sampled assignment is never treated as a
-business recommendation by itself. Exact recourse rebuilds fulfillment quantities,
-the independent validator checks every hard rule, and the move is accepted only if
-it is feasible and improves the incumbent. A weak or noisy sampler can waste time,
-but it cannot make the returned recommendation worse.
+The central safety rule is simple: a QUBO sample is only a proposal. Exact
+mixed-integer recourse rebuilds SKU quantities, an independent validator checks all
+hard constraints, and a move is accepted only when it is feasible and improves the
+current solution. A weak or noisy sampler can consume runtime, but it cannot worsen
+the returned incumbent.
 
-## Why this hybrid
+## What is implemented
 
-A monolithic QUBO for every order, SKU, DC, date, quantity, and resource would need
-many logical variables, large penalty coefficients, and substantial embedding
-overhead. Instead, this implementation uses quantum or quantum-inspired search only
-where it may add value: proposing a coordinated reassignment inside a small,
-resource-coupled neighborhood.
+- strict readability checks for all ten supplied challenge files;
+- a real-data adapter for orders, inventory, lanes, dock availability, throughput
+  observations, the equations document, workbook, and two reference outputs;
+- source-accurate case conversion and thresholded order-penalty logic;
+- load-cohesive candidate generation, five-day protected ATP, shipping lead times,
+  working-day PGI adjustment, forecast eligibility, and dock usage;
+- deterministic default and sequential-greedy baselines;
+- an exact SciPy/HiGHS mixed-integer linear program (MILP);
+- bounded large-neighborhood search with QUBO assignment proposals and exact MILP
+  fulfillment recourse;
+- exact enumeration, random sampling, simulated annealing, and optional D-Wave
+  backends behind an explicit privacy gate;
+- an independent objective evaluator and feasibility validator;
+- all requested experiments plus two additional solver controls;
+- a runnable Jupyter notebook and aggregate-only Streamlit planner copilot; and
+- submission-ready Markdown, PDF, and PowerPoint artifacts.
+
+No QPU experiment has been run and no quantum advantage is claimed.
+
+## Verified supplied-data audit
+
+The repository intentionally publishes only non-identifying aggregates.
+
+| Measure | Verified value |
+|---|---:|
+| Supplied artifacts opened | 10 of 10 |
+| Order-level output rows | 1,109 |
+| Order-SKU output rows | 25,193 |
+| Named loads | 614 |
+| Assignment groups after singleton handling | 631 |
+| Diverted orders in supplied output | 3 |
+| Requested cases | 2,554,440 |
+| Selected fulfilled cases | 2,413,937 |
+| Selected case fill | 94.4997% |
+
+The input order table contains 25,193 order-SKU rows. The capacity-planning table
+contains 377,504 DC-SKU-date rows, shipping contains 12,922 lanes, dock contains 480
+rows, and throughput contains 530 observed-utilization rows. The workbook is a
+561-row worked example and the Word document contains the source business equations.
+The output files are used only for reconciliation; they are never treated as labels
+for optimization.
+
+## Solver architecture
 
 ```mermaid
 flowchart TD
-    A["Canonical data and candidates"] --> B["Feasible classical incumbent"]
-    B --> C["Conflict-aware bounded neighborhood"]
-    C --> D["Warm-started assignment QUBO"]
-    D --> E["Local sampler or approved QPU"]
+    A["Readable challenge bundle"] --> B["Canonical orders, lines, candidates, resources"]
+    B --> C["Feasible default or greedy incumbent"]
+    C --> D["Conflict-aware bounded neighborhood"]
+    D --> E["QUBO assignment sampler"]
     E --> F["One-hot repair and exact MILP recourse"]
-    F --> G{"Feasible and better?"}
-    G -->|Yes| B
-    G -->|No| C
+    F --> G{"Validated strict improvement?"}
+    G -->|Yes| C
+    G -->|No| D
 ```
 
-The detailed global model remains a mixed-integer linear program (MILP). The local
-quadratic unconstrained binary optimization (QUBO) model represents one plan per
-active order and adds calibrated penalties for one-hot violations and shared-resource
-contention. Inventory, throughput, dock, pick, weight, volume, and the alternate-fill
-rule are enforced exactly during recourse.
+The exact model assigns each order to one eligible DC/PGI option or leaves it
+unassigned. Partial fulfillment is allowed at the selected DC, but an order cannot
+split across DCs. Orders sharing a source load move together. The objective is:
 
-## Included implementation
+$$
+\text{fulfilled value}-\text{thresholded unmet penalty}-\text{shipping cost}.
+$$
 
-- deterministic default-DC and sequential greedy baselines;
-- exact SciPy/HiGHS MILP with optional fixed-assignment recourse;
-- projected available-to-promise inventory that may decrease over the horizon;
-- exact pallet/loose-case decomposition and supported operational capacities;
-- the clarified divert rule: alternate fill must exceed default fill by at least
-  five percentage points of total ordered cases;
-- bounded large-neighborhood search with an incumbent warm start;
-- incumbent-preserving candidate-column reduction for unusually wide orders;
-- exact enumeration and reproducible simulated-annealing QUBO backends;
-- optional, privacy-gated D-Wave QPU and Leap hybrid adapters;
-- coefficient-noise sensitivity and synthetic scaling experiments;
-- independent feasibility, objective, audit, and planner-view outputs.
-
-No quantum advantage is claimed. The design creates a controlled place to test
-whether a quantum sampler improves candidate discovery under equal neighborhood,
-recourse, validation, seed, and runtime rules.
+Hard constraints cover demand balance, candidate eligibility, projected inventory,
+dock capacity, optional scenario capacity, the diversion-uplift rule, pallet/case
+accounting, and assignment-group cohesion. See the
+[mathematical formulation](docs/mathematical_formulation.md) and
+[source mapping](docs/poc_data_mapping.md).
 
 ## Installation
 
@@ -64,13 +92,64 @@ Python 3.10 or newer is required.
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,notebook,app]"
 ```
 
-Exact enumeration and simulated annealing are included in the base package. Install
-`.[qpu,dev]` only inside an approved environment configured for D-Wave access.
+Install `.[qpu]` only inside an approved environment configured for D-Wave access.
+The default workflow is entirely local.
 
-## Reproduce the tiny exact result
+## Run the challenge study
+
+Keep the supplied raw files outside Git. Point the command to a directory containing
+the exact filenames listed in [challenge data](docs/challenge_data.md).
+
+```bash
+python scripts/run_challenge_study.py \
+  --bundle-dir /approved/path/to/challenge-files \
+  --profile full \
+  --output runs/challenge-study/aggregate_results.csv
+```
+
+The command first opens every required file and stops on the first missing,
+unreadable, empty, or structurally invalid artifact. `--profile smoke` runs a short
+development grid; `--profile full` runs the submission grid.
+
+## Run the notebook
+
+```bash
+jupyter lab notebooks/nestle_challenge_experiments.ipynb
+```
+
+Set `BUNDLE_DIR` in the first configuration cell. The notebook performs:
+
+1. strict bundle and output reconciliation audits;
+2. default, greedy, exact MILP, and hybrid comparison;
+3. size scaling;
+4. penalty-weight sensitivity;
+5. candidate-count sensitivity;
+6. inventory shocks;
+7. sampler seed and local coefficient-noise sensitivity;
+8. Pareto-pruning ablation;
+9. random-versus-conflict batching ablation;
+10. random-versus-simulated-annealing sampler ablation; and
+11. a synthetic coordination control with a known exact reference.
+
+All persisted experiment rows are aggregate-only.
+
+## Run the planner copilot
+
+The copilot is useful because the experiment matrix is multi-dimensional and planners
+need explanations, not raw solver logs. It is deliberately rules-based: no external
+language model receives the data, and identifier-bearing uploads are rejected.
+
+```bash
+python -m streamlit run apps/planner_copilot.py
+```
+
+It explains solver comparisons, scaling, sensitivities, ablations, and the limits of
+the evidence. See [app instructions](apps/README.md).
+
+## Reproduce the known-optimum test
 
 ```bash
 python scripts/make_tiny_instance.py
@@ -83,73 +162,44 @@ python scripts/run_experiment.py \
 pytest
 ```
 
-The documented optimum is 126 synthetic units, with `O1` assigned to `D2` and
-`O2` assigned to `D1`. Every run writes the normalized configuration, input
-fingerprint, assignments, fulfillment, recomputed metrics, and validation report.
-Detailed solver/search history is stored separately in `solver_metadata.json`.
-The dedicated hybrid command also writes a one-page planner view:
+The tiny instance has a proven optimum of 126 synthetic units. The exact MILP and
+hybrid exact-QUBO configuration both reproduce it.
 
-```bash
-python scripts/run_hybrid.py --config configs/hybrid_tiny.yaml
-```
+## Repository map
 
-## Scaling and noise study
+| Path | Purpose |
+|---|---|
+| `src/domopt/poc.py` | strict real-data audit and source-to-canonical adapter |
+| `src/domopt/classical.py` | exact MILP and fixed-assignment recourse |
+| `src/domopt/hybrid.py` | conflict batching, QUBO search, repair, and acceptance |
+| `src/domopt/validation.py` | independent feasibility authority |
+| `src/domopt/experiments.py` | complete experiment matrix |
+| `notebooks/` | runnable challenge analysis |
+| `apps/` | aggregate-only planner copilot |
+| `docs/` | data, assumptions, formulation, algorithm, and requirement mapping |
+| `reports/` | submission sources and rendered deliverables |
+| `tests/` | unit, model, sampler, audit, privacy, and Markdown checks |
 
-```bash
-python scripts/run_scaling_study.py \
-  --sizes 20,50,100 \
-  --noise 0,0.01,0.05 \
-  --output results/scaling_synthetic.csv
-```
+## Submission artifacts
 
-This generates independent synthetic data; it does not copy operational values.
-For each size it compares the baselines, an exact MILP where configured, and the
-hybrid method under QUBO coefficient perturbations. Report logical QUBO variables,
-couplings, exact-recourse calls, feasibility, objective, and runtime—not physical
-qubit count alone.
+- [challenge requirement matrix](docs/challenge_requirements.md)
+- [two-page business and technical summary](reports/business_technical_summary.md)
+- [6–10 page technical report](reports/technical_report.md)
+- [one-page planner view](reports/planner_view.md)
+- [presentation source](reports/presentation.md)
+- `reports/wiser_dom_submission_deck.pptx`
 
-## Provided challenge files
+Rendered PDFs are generated from the Markdown sources and kept next to them.
 
-The two supplied recommendation CSVs are readable and reconcile exactly at order
-and SKU level. The aggregate-only audit found 1,109 orders, 25,193 order-SKU rows,
-615 loads, eight DC labels, three diversions, and a case fill rate of 94.4997%.
-Commercial totals and raw identifiers are deliberately omitted.
+## Privacy and interpretation
 
-```bash
-python scripts/audit_challenge_outputs.py \
-  /approved/path/Output_order_level_data.csv \
-  /approved/path/output_order_sku_level_data.csv
-```
+Raw operational rows, identifiers, exact DC-level resources, and commercial totals
+are excluded from Git. QUBO variable labels are integers for optional remote runs,
+but coefficients can still encode sensitive economics; remote execution therefore
+requires explicit approval. See [privacy policy](docs/privacy.md).
 
-The remaining uploaded “input” files are AppleDouble metadata sidecars, not the
-underlying CSV, workbook, or Word content. Therefore the incumbent outputs can be
-audited, but alternative-DC inventory, cost, eligibility, and capacity decisions
-cannot honestly be reconstructed from this upload. Re-export the original files
-without `._`/AppleDouble wrappers and map them to the canonical contract before a
-real-data optimization run. See [challenge data status](docs/challenge_data.md).
+The supplied throughput file reports observed utilization rather than a documented
+maximum. It is not enforced as a real hard limit. Experiments may add explicit
+scenario headroom, and those rows are labeled as scenarios. Likewise, local QUBO
+coefficient perturbation is a robustness test, not physical QPU noise.
 
-## Quantum execution and privacy
-
-Remote execution is disabled by default. Integer variable labels prevent raw order,
-SKU, or DC identifiers from becoming remote labels, but QUBO coefficients can still
-encode sensitive economics and constraints. Use `allow_remote: true` only after the
-data owner explicitly approves the destination and payload. The classical and local
-simulated-annealing workflows require no external solver service.
-
-## Documentation
-
-- [Hybrid algorithm and scaling](docs/hybrid_algorithm.md)
-- [Mathematical formulation](docs/mathematical_formulation.md)
-- [Research basis and solver choice](docs/research_basis.md)
-- [Canonical data dictionary](docs/data_dictionary.md)
-- [Challenge data status](docs/challenge_data.md)
-- [Assumptions](docs/assumptions.md)
-- [Experiment protocol](docs/experiment_protocol.md)
-- [Measured synthetic scaling/noise study](results/scaling_synthetic.md)
-- [Privacy policy](docs/privacy.md)
-- [Submission-ready report sources](reports/README.md)
-
-The implementation follows hybrid local-search and warm-start principles described
-by [Tomesh et al.](https://doi.org/10.22331/q-2022-08-22-781) and
-[Egger et al.](https://doi.org/10.22331/q-2021-06-17-479), while treating claims
-about present-day industrial quantum advantage conservatively.

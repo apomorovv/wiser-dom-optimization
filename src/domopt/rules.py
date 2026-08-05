@@ -46,7 +46,9 @@ def minimum_divert_fulfillment(problem: ProblemData, order_id: str) -> int | Non
         ].sum()
     )
     default_fill = int(order["default_fillable_cases"])
-    return min(demand, default_fill + ceil(fraction * demand - 1e-12))
+    minimum_cases = int(problem.metadata.get("min_divert_improvement_cases", 0))
+    improvement = max(ceil(fraction * demand - 1e-12), minimum_cases)
+    return min(demand, default_fill + improvement)
 
 
 def candidate_is_divert(problem: ProblemData, candidate: pd.Series) -> bool:
