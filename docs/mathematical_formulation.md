@@ -1,366 +1,239 @@
 # Mathematical formulation
 
-## 1. Scope
+## 1. Scope and notation
 
-We model a deterministic Distributed Order Management problem for a set of focus orders. Each order may be assigned to at most one feasible distribution center (DC) and planned-goods-issue (PGI) date. The selected DC may partially fulfill the order. Orders share inventory and may also share dock, throughput, case-pick, pallet-pick, weight, or volume capacity.
+The deterministic model assigns each focus order to at most one distribution center
+(DC) and planned-goods-issue (PGI) date. It may partially fulfill the selected order,
+subject to shared inventory and operational capacity.
 
-The primary formulation is a mixed-integer linear program (MILP). A reduced candidate-column model is derived for QUBO and quantum experiments.
+| Symbol | Meaning |
+|---|---|
+| \(\mathcal O\) | focus orders, index \(o\) |
+| \(\mathcal S\) | stock-keeping units (SKUs), index \(s\) |
+| \(\mathcal D\) | distribution centers, index \(d\) |
+| \(\mathcal T\) | ordered inventory/capacity dates, index \(t\) |
+| \(\mathcal R\) | enabled capacity resources, index \(r\) |
+| \(\mathcal S_o\) | SKUs requested by order \(o\) |
+| \(\mathcal C_o\) | eligible DC/date candidates for order \(o\) |
 
-## 2. Index sets
-
-\[
-\mathcal O
-\]
-
-set of focus orders, indexed by \(o\).
-
-\[
-\mathcal S
-\]
-
-set of SKUs, indexed by \(s\).
+Candidate preprocessing creates
 
 \[
-\mathcal D
+\mathcal C\subseteq\mathcal O\times\mathcal D\times\mathcal T.
 \]
 
-set of DCs, indexed by \(d\).
+Closed dates, prohibited sources, impossible lead times, and other hard eligibility
+failures are absent from \(\mathcal C\).
 
-\[
-\mathcal T
-\]
+## 2. Parameters
 
-ordered set of planning dates, indexed by \(t\).
-
-\[
-\mathcal R
-\]
-
-set of optional capacity-resource types, indexed by \(r\).
-
-For order \(o\), define
-
-\[
-\mathcal S_o=\{s\in\mathcal S:Q_{os}>0\},
-\]
-
-the SKUs requested by order \(o\).
-
-Let
-
-\[
-\mathcal C\subseteq\mathcal O\times\mathcal D\times\mathcal T
-\]
-
-be the set of feasible order–DC–PGI candidates after preprocessing.
-
-For one order,
-
-\[
-\mathcal C_o=\{(d,t)\in\mathcal D\times\mathcal T:(o,d,t)\in\mathcal C\}.
-\]
-
-The order-specific default DC is
-
-\[
-d_o^{\mathrm{def}}\in\mathcal D.
-\]
-
-## 3. Parameters
-
-### 3.1 Demand and economics
+### Demand and economics
 
 \[
 Q_{os}\in\mathbb Z_{\ge0}
 \]
 
-cases of SKU \(s\) requested by order \(o\). Set \(Q_{os}=0\) for \(s\notin\mathcal S_o\).
+is requested cases, \(v_{os}\ge0\) is value per fulfilled case, and
+\(\pi_{os}\ge0\) is penalty per unfulfilled case. The challenge clarification is
+implemented as
 
 \[
-v_{os}\in\mathbb R_{\ge0}
+\pi_{os}=\text{price per case}_{os}\times\text{penalty rate}_{os}
 \]
 
-business value per fulfilled case.
+when those two raw fields are available. Canonical data stores the computed
+`penalty_per_unfilled_case`.
 
 \[
-\pi_{os}\in\mathbb R_{\ge0}
+c_{odt}\ge0
 \]
 
-penalty per unfulfilled case.
+is the **total** shipping cost charged once if candidate \((o,d,t)\) is selected.
+It is not treated as an incremental lane-cost difference.
 
-\[
-c_{odt}\in\mathbb R_{\ge0}
-\]
-
-fixed shipping cost of assigning order \(o\) to DC \(d\) at PGI date \(t\).
-
-A dataset must use exactly one convention:
-
-- **total-cost convention**: \(c_{odt}\) is the full shipping cost; or
-- **incremental-cost convention**: \(c_{odt}\) is cost relative to the default assignment.
-
-Define total requested cases:
+The total cases in an order are
 
 \[
 Q_o=\sum_{s\in\mathcal S_o}Q_{os}.
 \]
 
-### 3.2 Inventory
+### Inventory
 
 \[
 I_{dst}\in\mathbb Z_{\ge0}
 \]
 
-cumulative available-to-promise cases of SKU \(s\) at DC \(d\) through date \(t\), after reservations outside the focus-order decision set.
+is protected projected available-to-promise (ATP) for DC \(d\), SKU \(s\), and
+checkpoint \(t\), after demand outside the focus-order population. Projected ATP may
+decrease over the horizon. A focus-order fulfillment at \(\tau\) consumes all later
+checkpoints \(t\ge\tau\); therefore the smallest future ATP protects later demand.
 
-For fixed \((d,s)\), \(I_{dst}\) is normally nondecreasing in \(t\).
+The optional `cumulative_receipts` policy instead requires a nondecreasing series.
+The policy is declared once in metadata and is never inferred silently.
 
-### 3.3 Optional operational capacities
-
-\[
-R^r_{dt}\in\mathbb R_{\ge0}
-\]
-
-available amount of resource \(r\) at DC \(d\) on date \(t\).
+### Capacity
 
 \[
-\alpha^r_{osdt}\in\mathbb R_{\ge0}
+R^r_{dt}\ge0
 \]
 
-variable consumption of resource \(r\) per fulfilled case of SKU \(s\) when order \(o\) uses candidate \((d,t)\).
+is the available amount of resource \(r\) at DC \(d\), date \(t\). Supported
+resources are `dock`, `throughput_cases`, `case_pick`, `pallet_pick`, `weight`, and
+`volume`. Variable use per fulfilled case is \(\alpha^r_{osdt}\), and fixed use when
+a candidate is activated is \(\beta^r_{odt}\). A dock candidate normally has
+\(\beta^{\mathrm{dock}}_{odt}=1\).
 
-\[
-\beta^r_{odt}\in\mathbb R_{\ge0}
-\]
+### Minimum alternate fill
 
-fixed consumption of resource \(r\) if candidate \((o,d,t)\) is activated.
-
-Examples:
-
-- dock appointment: \(\beta^{\mathrm{dock}}_{odt}=1\);
-- throughput in cases: \(\alpha^{\mathrm{throughput}}_{osdt}=1\);
-- weight: \(\alpha^{\mathrm{weight}}_{osdt}=w_s\);
-- volume: \(\alpha^{\mathrm{volume}}_{osdt}=\nu_s\).
-
-### 3.4 Optional minimum divert threshold
-
-\[
-F_o^{\mathrm{def}}\in\mathbb Z_{\ge0}
-\]
-
-reference cases fillable under the documented default policy.
-
-\[
-\delta_o\in[0,1]
-\]
-
-required minimum fill improvement as a fraction of total order demand.
-
-Define
+Let \(d_o^{\mathrm{def}}\) be the default DC and
+\(F_o^{\mathrm{def}}\) the cases fillable under the documented default reference.
+The clarified five-percentage-point improvement is
 
 \[
 L_o^{\mathrm{div}}
-=
-\min\left\{
+=\min\left\{
 Q_o,
-F_o^{\mathrm{def}}+\left\lceil\delta_oQ_o\right\rceil
+F_o^{\mathrm{def}}+\left\lceil0.05Q_o\right\rceil
 \right\}.
 \]
 
-This threshold is inactive in V0 until the interpretation of the historical improvement rule is confirmed.
+An order-specific fraction \(\delta_o\) may replace 0.05, but the fraction always
+applies to total ordered cases, not to default fill.
 
-## 4. Decision variables
+## 3. Decision variables
 
-### 4.1 Assignment
-
-For each \((o,d,t)\in\mathcal C\):
-
-\[
-x_{odt}\in\{0,1\},
-\]
-
-where \(x_{odt}=1\) means that order \(o\) is assigned to DC \(d\) with PGI date \(t\).
-
-For each \(o\in\mathcal O\):
+For eligible candidate \((o,d,t)\):
 
 \[
-z_o\in\{0,1\},
+x_{odt}\in\{0,1\}
 \]
 
-where \(z_o=1\) means that order \(o\) is not assigned to any DC.
-
-### 4.2 Fulfillment
-
-For each \(o\in\mathcal O\), \(s\in\mathcal S_o\), and \((d,t)\in\mathcal C_o\):
+equals one when the candidate is selected. For every order:
 
 \[
-f_{osdt}\in\mathbb Z_{\ge0},
+z_o\in\{0,1\}
 \]
 
-cases of SKU \(s\) fulfilled for order \(o\) from DC \(d\) on date \(t\).
+equals one when no DC is assigned.
 
-For each \(o\in\mathcal O\), \(s\in\mathcal S_o\):
+For every order line and eligible candidate:
 
 \[
-u_{os}\in\mathbb Z_{\ge0},
+f_{osdt}\in\mathbb Z_{\ge0}
 \]
 
-unfulfilled cases of SKU \(s\).
-
-## 5. Objective function
-
-Fulfilled value:
+is fulfilled cases, while
 
 \[
-V^{\mathrm{fill}}
-=
-\sum_{o\in\mathcal O}
-\sum_{s\in\mathcal S_o}
-\sum_{(d,t)\in\mathcal C_o}
-v_{os}f_{osdt}.
+u_{os}\in\mathbb Z_{\ge0}
 \]
 
-Unmet-demand penalty:
+is unfulfilled cases.
 
-\[
-C^{\mathrm{pen}}
-=
-\sum_{o\in\mathcal O}
-\sum_{s\in\mathcal S_o}
-\pi_{os}u_{os}.
-\]
+If pallet/case-pick resources are enabled, \(p_{osdt}\) and \(k_{osdt}\) are full
+pallets and loose cases.
 
-Shipping cost:
+## 4. Objective
 
-\[
-C^{\mathrm{ship}}
-=
-\sum_{(o,d,t)\in\mathcal C}
-c_{odt}x_{odt}.
-\]
-
-The V0 objective is
+The common business objective is
 
 \[
 \boxed{
-\max\quad
-V^{\mathrm{fill}}-C^{\mathrm{pen}}-C^{\mathrm{ship}}
-}
+\max J=
+\sum_{o,s,(d,t)\in\mathcal C_o}v_{os}f_{osdt}
+-\sum_{o,s}\pi_{os}u_{os}
+-\sum_{o,d,t}c_{odt}x_{odt}
+}.
 \]
 
-or, expanded,
+Every method is compared using this independently recomputed objective. Solver or
+QUBO energies are diagnostics, not substitute business metrics.
 
-\[
-\boxed{
-\max
-\left[
-\sum_o\sum_{s\in\mathcal S_o}\sum_{(d,t)\in\mathcal C_o}v_{os}f_{osdt}
--
-\sum_o\sum_{s\in\mathcal S_o}\pi_{os}u_{os}
--
-\sum_{(o,d,t)\in\mathcal C}c_{odt}x_{odt}
-\right].
-}
-\]
+## 5. Core constraints
 
-## 6. Core constraints
-
-### 6.1 Exactly one modeled outcome per order
+### One outcome per order
 
 \[
 \boxed{
 \sum_{(d,t)\in\mathcal C_o}x_{odt}+z_o=1
-\qquad\forall o\in\mathcal O.
+\qquad\forall o.
 }
 \]
 
-This enforces at most one DC/date assignment while keeping the model feasible through \(z_o\).
+This enforces at most one DC/date while preserving feasibility through the explicit
+unassigned outcome.
 
-### 6.2 Demand balance
+### Demand balance
 
 \[
 \boxed{
 \sum_{(d,t)\in\mathcal C_o}f_{osdt}+u_{os}=Q_{os}
-\qquad\forall o\in\mathcal O,\ s\in\mathcal S_o.
+\qquad\forall o,s\in\mathcal S_o.
 }
 \]
 
-Every requested case is either fulfilled or unfulfilled.
-
-### 6.3 Assignment–fulfillment linking
+### Assignment linking
 
 \[
 \boxed{
 0\le f_{osdt}\le Q_{os}x_{odt}
+\qquad\forall o,s,d,t.
 }
 \]
 
-for every valid \((o,s,d,t)\). If a candidate is not selected, it cannot fulfill a line.
+Partial fulfillment is allowed, but SKU lines cannot split across DCs because only
+one candidate is selected for the order.
 
-### 6.4 Cumulative inventory
+### Projected-ATP protection
 
-For every DC \(d\), SKU \(s\), and checkpoint \(t\):
+For each inventory checkpoint:
 
 \[
 \boxed{
-\sum_{\tau\in\mathcal T:\tau\le t}
-\sum_{\substack{o\in\mathcal O:\(o,d,\tau)\in\mathcal C}}
+\sum_{\substack{o,\tau\le t:\\(o,d,\tau)\in\mathcal C_o}}
 f_{osd\tau}
-\le
-I_{dst}.
+\le I_{dst}
+\qquad\forall d,s,t.
 }
 \]
 
-Only terms with \(s\in\mathcal S_o\) exist. This prevents multiple orders from consuming the same stock.
+No monotonicity of \(I_{dst}\) is required under the `projected_atp` policy.
 
-## 7. Optional constraints
-
-### 7.1 Generic DC/date capacity
-
-For each enabled resource \(r\), DC \(d\), and date \(t\):
+### Operational capacity
 
 \[
 \boxed{
-\sum_{o:(o,d,t)\in\mathcal C}\beta^r_{odt}x_{odt}
+\sum_{o:(o,d,t)\in\mathcal C}
+\beta^r_{odt}x_{odt}
 +
-\sum_{o:(o,d,t)\in\mathcal C}\sum_{s\in\mathcal S_o}\alpha^r_{osdt}f_{osdt}
-\le
-R^r_{dt}.
+\sum_{o,s:(o,d,t)\in\mathcal C}
+\alpha^r_{osdt}f_{osdt}
+\le R^r_{dt}
+\qquad\forall d,t,r.
 }
 \]
 
-### 7.2 Minimum fulfillment for a divert
+Dock use is candidate-fixed. Throughput, weight, and volume are linear in fulfilled
+cases. Pick resources use the exact decomposition below.
 
-For every non-default candidate \((o,d,t)\in\mathcal C\) with \(d\ne d_o^{\mathrm{def}}\):
+### Minimum divert improvement
+
+For each candidate whose DC differs from the order's default DC:
 
 \[
 \boxed{
 \sum_{s\in\mathcal S_o}f_{osdt}
-\ge
-L_o^{\mathrm{div}}x_{odt}.
+\ge L_o^{\mathrm{div}}x_{odt}.
 }
 \]
 
-### 7.3 Complete-order requirement
+This rule is enabled only when `default_fillable_cases` is supplied and metadata
+sets `enforce_min_divert_improvement` to true. Missing reference data causes a load
+error instead of silently disabling an asserted rule.
 
-If assignment requires complete fulfillment, replace partial linking by
+### Pallet and loose-case picks
 
-\[
-\boxed{
-f_{osdt}=Q_{os}x_{odt}}
-\]
-
-for every valid index. This is not active in V0.
-
-### 7.4 Pallet and case-pick decomposition
-
-Let
-
-\[
-P_s\in\mathbb Z_{>0}
-\]
-
-be cases per pallet. Introduce full pallets \(p_{osdt}\in\mathbb Z_{\ge0}\) and loose cases \(k_{osdt}\in\mathbb Z_{\ge0}\):
+For cases per pallet \(P_s\in\mathbb Z_{>0}\):
 
 \[
 \boxed{f_{osdt}=P_sp_{osdt}+k_{osdt}},
@@ -370,208 +243,38 @@ be cases per pallet. Introduce full pallets \(p_{osdt}\in\mathbb Z_{\ge0}\) and 
 \boxed{0\le k_{osdt}\le(P_s-1)x_{odt}}.
 \]
 
-This avoids nonlinear floor and modulo operators.
+Pallet-pick capacity consumes \(p\); case-pick capacity consumes \(k\). This exact
+linear representation avoids applying floor or modulo after optimization.
 
-### 7.5 Candidate eligibility
+## 6. Classical methods
 
-Hard feasibility is enforced by constructing \(\mathcal C\). If an audit indicator \(e_{odt}\in\{0,1\}\) is retained:
+The default baseline restricts assignment to the default DC and allocates shared
+resources in deterministic order. The greedy baseline evaluates candidate previews
+against current residual resources and commits the best incremental feasible choice.
 
-\[
-x_{odt}\le e_{odt}.
-\]
+The exact model is solved by SciPy's `milp` interface to HiGHS. It reports incumbent,
+dual bound, native optimality gap, variable count, constraint count, and runtime.
+When assignment variables are fixed, the same model is an exact fulfillment-recourse
+problem for the hybrid solver.
 
-## 8. Baseline definitions
+## 7. Relationship to the local QUBO
 
-### 8.1 Default baseline
+The QUBO variable \(y_{ok}\) selects one previewed assignment plan \(k\) for active
+order \(o\). One-hot and pairwise resource-contention penalties rank combinations.
+It does **not** replace the inventory or capacity equations above. After sampling:
 
-Fix all non-default assignments to zero:
+1. one-hot structure is repaired deterministically;
+2. selected assignments are fixed in the local MILP;
+3. all fulfillment quantities are reoptimized;
+4. the result is merged with frozen orders; and
+5. the complete solution is independently validated.
 
-\[
-x_{odt}=0
-\qquad\text{for }d\ne d_o^{\mathrm{def}}.
-\]
+See [hybrid algorithm](hybrid_algorithm.md) for the QUBO equations and acceptance
+invariant.
 
-Then allocate shared inventory using a documented deterministic order sequence. The baseline must satisfy the same demand and inventory rules.
+## 8. Feasibility and reporting
 
-### 8.2 Sequential greedy baseline
-
-At each iteration:
-
-1. compute feasible incremental choices using current residual resources;
-2. select one candidate by the documented score and tie-break rule;
-3. reduce residual inventory and capacity;
-4. continue until every order has a final outcome.
-
-The greedy method must not score all orders independently and then accept mutually conflicting choices.
-
-## 9. Candidate-column formulation
-
-For QUBO construction, precompute a finite set \(\mathcal K_o\) of fulfillment plans for each order, including a no-assignment plan.
-
-Plan \(k\in\mathcal K_o\) contains a DC \(d_{ok}\), PGI date \(t_{ok}\), fixed line quantities \(q_{osk}\), resource consumption, and shipping cost \(c_{ok}\).
-
-Its value is
-
-\[
-w_{ok}
-=
-\sum_{s\in\mathcal S_o}v_{os}q_{osk}
--
-\sum_{s\in\mathcal S_o}\pi_{os}(Q_{os}-q_{osk})
--
-c_{ok}.
-\]
-
-Define
-
-\[
-y_{ok}\in\{0,1\}.
-\]
-
-The restricted column model is
-
-\[
-\boxed{
-\max\sum_o\sum_{k\in\mathcal K_o}w_{ok}y_{ok}
-}
-\]
-
-subject to
-
-\[
-\boxed{
-\sum_{k\in\mathcal K_o}y_{ok}=1
-\qquad\forall o,
-}
-\]
-
-and cumulative inventory
-
-\[
-\boxed{
-\sum_o\sum_{k\in\mathcal K_o}a_{okdst}y_{ok}
-\le I_{dst}
-\qquad\forall d,s,t,
-}
-\]
-
-where \(a_{okdst}\) is cumulative inventory consumed by plan \(k\) through \(t\).
-
-Generic capacity constraints are
-
-\[
-\boxed{
-\sum_o\sum_{k\in\mathcal K_o}b^r_{okdt}y_{ok}
-\le R^r_{dt}.
-}
-\]
-
-The column model is exact only if \(\mathcal K_o\) contains all plans needed to represent an optimal MILP solution. Otherwise it is a restricted master problem.
-
-## 10. QUBO representation
-
-For minimization, begin with
-
-\[
-E(y)
-=
--\sum_{o,k}w_{ok}y_{ok}
-+
-\lambda_{\mathrm{one}}
-\sum_o\left(1-\sum_{k\in\mathcal K_o}y_{ok}\right)^2
-+
-E_{\mathrm{resource}}(y).
-\]
-
-Resource inequalities require one of:
-
-1. binary slack-variable encoding;
-2. conflict penalties when infeasibility is exactly pairwise;
-3. a constrained quadratic model;
-4. classical feasibility repair with explicit pre- and post-repair reporting.
-
-Pairwise conflicts are not generally sufficient for arbitrary multi-order inventory constraints.
-
-## 11. Model size
-
-The detailed MILP has
-
-\[
-|\mathcal C|
-\]
-
-binary assignment variables,
-
-\[
-|\mathcal O|
-\]
-
-binary no-assignment variables,
-
-\[
-\sum_o|\mathcal S_o||\mathcal C_o|
-\]
-
-integer fulfillment variables, and
-
-\[
-\sum_o|\mathcal S_o|
-\]
-
-integer unmet-demand variables.
-
-The candidate-column model has
-
-\[
-N_y=\sum_o|\mathcal K_o|
-\]
-
-logical binary variables before slack variables.
-
-## 12. Tiny-instance optimum
-
-For the standard synthetic instance,
-
-\[
-Q_{O1,A}=4,\quad Q_{O1,B}=2,
-\]
-
-\[
-Q_{O2,A}=3,\quad Q_{O2,B}=4.
-\]
-
-Inventory is
-
-\[
-I_{D1,A,t_1}=3,\quad I_{D1,B,t_1}=4,
-\]
-
-\[
-I_{D2,A,t_1}=4,\quad I_{D2,B,t_1}=2.
-\]
-
-All case values are \(10\), all unmet-case penalties are \(20\), and assigning \(O_1\) to \(D_2\) costs \(4\).
-
-The unique full-fulfillment assignment is
-
-\[
-x_{O1,D2,t_1}=1,
-\qquad
-x_{O2,D1,t_1}=1.
-\]
-
-It produces
-
-\[
-V^{\mathrm{fill}}=130,
-\qquad
-C^{\mathrm{pen}}=0,
-\qquad
-C^{\mathrm{ship}}=4,
-\]
-
-so
-
-\[
-\boxed{\text{Objective}=126.}
-\]
+`validation.py` is independent of solver constraints and recomputes assignment,
+demand, eligibility, inventory, capacity, and alternate-fill rules from output
+tables. `objective.py` independently recomputes fulfilled value, penalty cost, and
+shipping cost. A solution is reportable only when validation returns no violations.

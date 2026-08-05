@@ -29,7 +29,11 @@ The minimum comparison contains:
 1. `default`: deterministic default-DC baseline;
 2. `greedy`: deterministic sequential reassignment baseline;
 3. `classical`: exact or bounded classical optimizer;
-4. `quantum` or `quantum_inspired`: only after the first three pass validation.
+4. `hybrid`: bounded QUBO candidate generation plus exact classical recourse.
+
+For a quantum claim, run the same hybrid configuration with a remote QPU backend and
+at least one tuned local sampler. `simulated_annealing` is quantum-inspired, not a
+quantum-hardware result.
 
 ## 4. Required metrics
 
@@ -83,18 +87,22 @@ For maximization with incumbent \(P\) and valid upper bound \(B\ge P\):
 
 Store the solver-native definition too when it differs.
 
-### Quantum sample metrics
+### Hybrid sample metrics
 
 Report:
 
 - number of raw samples;
 - one-outcome-per-order rate;
-- feasible rate before repair;
-- feasible rate after repair;
-- best feasible objective;
-- mean feasible objective;
-- standard deviation across seeds;
-- repair improvement.
+- sampler calls and actual QPU calls;
+- raw one-hot rate;
+- unique repaired assignments;
+- exact-recourse attempts and successful solves;
+- maximum logical QUBO variables and pair couplings;
+- accepted improving moves; and
+- initial, final, and improved objective.
+
+QUBO feasibility is not global DOM feasibility. Report full feasibility only after
+exact recourse and independent validation.
 
 ## 5. Determinism and tie-breaking
 
@@ -138,7 +146,10 @@ Vary:
 - scarcity;
 - candidate-conflict density.
 
-Report variables, constraints, QUBO variables and couplings, runtime, memory when available, best objective, feasibility, and gap or distance from optimum.
+Report variables, constraints, QUBO variables and couplings, runtime, memory when
+available, best objective, feasibility, and gap or distance from optimum. Keep the
+QUBO cap fixed in at least one experiment to demonstrate bounded hardware demand as
+the global order count grows.
 
 ## 8. Sensitivity protocol
 
@@ -153,6 +164,11 @@ At minimum vary:
 - QUBO penalty strengths;
 - quantum depth, shots, optimizer, and seed.
 
+For the implemented annealing path, replace circuit-only settings with reads,
+sweeps/anneal schedule, chain strength and embedding statistics when applicable.
+Run coefficient-noise levels over multiple seeds; coefficient perturbation is a
+sensitivity proxy, not a complete hardware-noise model.
+
 Use one-factor-at-a-time plots for the primary sensitivity study.
 
 ## 9. Run-directory contract
@@ -166,7 +182,7 @@ assignments.csv
 fulfillment.csv
 metrics.json
 validation.json
-stdout.log
+solver_metadata.json
 ```
 
 Optional method-specific files include:
@@ -177,7 +193,13 @@ solver_statistics.json
 raw_samples.csv
 repaired_samples.csv
 qubo.json
+planner_recommendations.csv
+planner_view.md
+stdout.log
 ```
+
+The pipeline guarantees the seven core files. A shell or job scheduler captures
+`stdout.log`. The hybrid command also writes the planner artifacts.
 
 ## 10. Registry
 
@@ -209,6 +231,21 @@ notes
 
 Do not edit reported values by hand. Corrections require a new run.
 
-## 11. Public reporting
+## 11. Fair sampler comparison
+
+Hold constant:
+
+- canonical dataset and candidate columns;
+- active neighborhood and QUBO coefficients;
+- incumbent warm start;
+- repair and top-K recourse policy;
+- independent validation and objective calculation; and
+- total wall-clock accounting boundary.
+
+Report preprocessing, queue, embedding, sample, repair, and recourse time separately
+when the backend exposes them. Compare quality at equal time and time at equal
+quality. Exact enumeration is a correctness oracle only for very small QUBOs.
+
+## 12. Public reporting
 
 Public artifacts must use synthetic or approved anonymized identifiers and aggregate results. Follow `docs/privacy.md`.

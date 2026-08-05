@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -13,6 +14,7 @@ import pandas as pd
 
 from .baselines import solve_default_baseline, solve_greedy_baseline
 from .classical import solve_classical
+from .hybrid import HybridConfig, solve_hybrid
 from .metrics import compute_metrics
 from .schemas import ASSUMPTION_VERSION, SCHEMA_VERSION, ProblemData, Solution
 from .validation import validate_solution
@@ -105,6 +107,7 @@ def write_solution_artifacts(
     _csv_ready(solution.fulfillment).to_csv(path / "fulfillment.csv", index=False)
     _write_json(path / "validation.json", validation.to_dict())
     _write_json(path / "metrics.json", metrics)
+    _write_json(path / "solver_metadata.json", solution.metadata)
     _write_json(
         path / "config.json",
         {
@@ -175,27 +178,35 @@ def run_methods(
     seed: int = 0,
     time_limit_seconds: float = 60.0,
     registry_path: str | Path | None = None,
+    hybrid_config: HybridConfig | None = None,
 ) -> pd.DataFrame:
     """Run requested methods and return a comparable metrics table."""
 
     requested = [str(method).strip().lower() for method in methods]
-    unknown = sorted(set(requested) - {"default", "greedy", "classical"})
+    unknown = sorted(set(requested) - {"default", "greedy", "classical", "hybrid"})
     if unknown:
         raise ValueError(f"Unsupported methods in common pipeline: {unknown}")
 
     base = Path(output_dir)
     rows: list[dict[str, object]] = []
     for method in requested:
+        settings: HybridConfig | None = None
         if method == "default":
             solution = solve_default_baseline(problem)
         elif method == "greedy":
             solution = solve_greedy_baseline(problem)
-        else:
+        elif method == "classical":
             solution = solve_classical(
                 problem,
                 time_limit_seconds=time_limit_seconds,
                 seed=seed,
             )
+        else:
+            settings = hybrid_config or HybridConfig(
+                seed=seed,
+                recourse_time_limit_seconds=min(10.0, time_limit_seconds),
+            )
+            solution = solve_hybrid(problem, config=settings)
 
         run_path = base / method
         metrics = write_solution_artifacts(
@@ -204,7 +215,10 @@ def run_methods(
             run_path,
             experiment_id=experiment_id,
             seed=seed,
-            configuration={"time_limit_seconds": time_limit_seconds},
+            configuration={
+                "time_limit_seconds": time_limit_seconds,
+                "hybrid": None if settings is None else asdict(settings),
+            },
         )
         rows.append(metrics)
         if registry_path is not None:
@@ -222,4 +236,3 @@ def run_methods(
         base / "comparison.csv", index=False
     )
     return summary
-

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and sample a reduced fixed-plan QUBO.
+"""Build and sample a standalone reduced fixed-plan QUBO diagnostic.
 
 This script expects ``plans.csv`` in ``--data-dir`` with columns ``plan_id``,
 ``order_id``, and ``value``. An optional ``conflicts.csv`` may contain
@@ -24,11 +24,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--method", choices=["exact", "random"], default="exact")
+    parser.add_argument(
+        "--method",
+        choices=[
+            "exact",
+            "random",
+            "simulated_annealing",
+            "dwave-qpu",
+            "dwave-hybrid",
+        ],
+        default="exact",
+    )
     parser.add_argument("--one-hot-penalty", type=float, default=1000.0)
     parser.add_argument("--conflict-penalty", type=float, default=None)
     parser.add_argument("--num-samples", type=int, default=1000)
+    parser.add_argument("--sweeps", type=int, default=500)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Acknowledge approval to send QUBO coefficients to a remote service.",
+    )
+    parser.add_argument("--remote-time-limit-seconds", type=float)
     return parser
 
 
@@ -53,7 +70,10 @@ def main() -> int:
         model,
         method=args.method,
         num_samples=args.num_samples,
+        sweeps=args.sweeps,
         seed=args.seed,
+        allow_remote=args.allow_remote,
+        time_limit_seconds=args.remote_time_limit_seconds,
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

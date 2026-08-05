@@ -111,3 +111,4 @@ metadata.json
 - `tests/test_baselines.py`: verifies deterministic baseline behavior.
 - `tests/test_candidate_generation.py`: verifies all four assignment candidates.
 
+

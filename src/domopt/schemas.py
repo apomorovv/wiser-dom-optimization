@@ -9,8 +9,8 @@ from typing import Any
 import pandas as pd
 
 
-SCHEMA_VERSION = "0.1.0"
-ASSUMPTION_VERSION = "v0"
+SCHEMA_VERSION = "0.2.0"
+ASSUMPTION_VERSION = "v1"
 
 
 @dataclass(frozen=True)

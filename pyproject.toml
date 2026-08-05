@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wiser-dom"
-version = "0.1.0"
+version = "0.2.0"
 authors = [
     { name = "Andrei Pomorov", email = "apomorov@usf.edu" },
     { name = "Sanjith Jothi Bala" },
@@ -20,12 +20,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-classical = [
-    "ortools",
-]
-
-quantum = [
-    "pennylane"
+qpu = [
+    "dwave-system>=1.30",
 ]
 
 notebook = [

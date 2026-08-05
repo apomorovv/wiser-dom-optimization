@@ -8,6 +8,8 @@ from .schemas import (
     Solution,
     ValidationResult,
 )
+from .hybrid import HybridConfig, solve_hybrid
+from .planner import build_planner_table, write_planner_artifacts
 
 __all__ = [
     "ASSUMPTION_VERSION",
@@ -16,7 +18,10 @@ __all__ = [
     "ProblemData",
     "Solution",
     "ValidationResult",
+    "HybridConfig",
+    "build_planner_table",
+    "solve_hybrid",
+    "write_planner_artifacts",
 ]
 
-__version__ = "0.1.0"
-
+__version__ = "0.2.0"

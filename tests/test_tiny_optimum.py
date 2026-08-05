@@ -20,3 +20,4 @@ def test_classical_solver_finds_documented_tiny_optimum() -> None:
     assert objective.objective_value == pytest.approx(126.0)
     assert solution.metadata["optimality_gap"] == pytest.approx(0.0)
 
+

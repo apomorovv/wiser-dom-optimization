@@ -70,13 +70,16 @@ Every generated dataset should include:
 ```json
 {
   "dataset_id": "string",
-  "schema_version": "0.1.0",
+  "schema_version": "0.2.0",
   "created_utc": "ISO-8601 timestamp",
   "source_fingerprint": "hash or approved source version",
   "generator_commit": "git commit SHA",
-  "assumption_version": "v0",
+  "assumption_version": "v1",
   "currency": "declared currency or synthetic units",
-  "quantity_unit": "cases"
+  "quantity_unit": "cases",
+  "inventory_policy": "projected_atp",
+  "pick_capacity_mode": "auto",
+  "enforce_min_divert_improvement": false
 }
 ```
 

@@ -51,6 +51,22 @@ Renaming an identifier is insufficient when a row remains matchable by dates, qu
 
 Do not upload restricted data to public notebooks, external quantum platforms, third-party APIs, or unapproved clouds. Use synthetic data, approved aggregates, or an approved restricted environment.
 
+### Quantum-service gate
+
+The QPU adapters are disabled unless `allow_remote=true`. They replace order, SKU,
+DC, and candidate labels with local integer indices before transmission. That avoids
+literal identifiers in remote variable names, but it does not make the payload
+non-sensitive: objective and coupling coefficients can encode shipping economics,
+penalties, scarcity, and network structure.
+
+Before enabling a remote backend, record approval for the provider, region, account,
+retention policy, coefficient payload, and experiment window. Never include raw
+tables, source paths, decoded identifiers, or planner outputs in sampler labels,
+metadata, logs, or support requests.
+
+`simulated_annealing`, `exact`, and `random` execute locally and are the safe default
+for restricted inputs.
+
 ## Git checks
 
 Before every push:
@@ -71,6 +87,8 @@ If restricted data were committed, deleting them in a later commit is insufficie
 - [ ] No confidential DC inventory/capacity appears.
 - [ ] Logs do not reveal restricted paths.
 - [ ] External links have correct permissions.
+- [ ] Remote QUBO execution is disabled or explicitly approved.
+- [ ] Remote variable labels contain integers only.
 - [ ] Figures cannot be reverse-matched to records.
 - [ ] A second team member completed privacy review.
 

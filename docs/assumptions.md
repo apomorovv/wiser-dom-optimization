@@ -1,127 +1,127 @@
 # Modeling assumptions
 
-This document records assumptions used by the current implementation. Changing an assumption changes feasibility, objective values, or comparability and therefore requires a new assumption version.
+Assumption version `v1` records every choice that changes feasibility, objective,
+or comparability. A changed rule requires a new version, tests, and rerun.
 
-## Status labels
+## Active assumptions
 
-- **Active**: implemented and used in reported experiments.
-- **Planned**: accepted design, not yet implemented.
-- **Unresolved**: requires confirmation from the challenge data or organizers.
-- **Excluded from V0**: intentionally postponed.
+### A1. Focus orders are preselected
 
-## V0 active assumptions
+The optimization population is an input. `focus_orders.py` may identify it, but the
+MILP does not decide whether an order belongs to the population.
 
-### A1. Focus orders are the optimization population
+### A2. One DC/date or unassigned
 
-The optimizer receives a set \(\mathcal O\) of focus orders. Focus-order identification is handled by `src/domopt/focus_orders.py`, not by an optimization variable.
+An order selects exactly one eligible DC/PGI candidate or an explicit unassigned
+outcome. Lines cannot split across DCs. Partial fulfillment at the selected DC is
+allowed.
 
-### A2. One DC and one PGI date per assigned order
+### A3. Cases are integer
 
-An assigned order may use at most one candidate pair \((d,t)\). SKU lines cannot be split across different DCs. Partial fulfillment from the selected DC is allowed.
+Demand, fulfillment, unfulfilled demand, inventory, and loose-case picks are
+nonnegative integer cases. Monetary terms use one declared currency or synthetic
+scale.
 
-A no-assignment variable keeps every order feasible:
+### A4. Shipping cost is total
 
-\[
-\sum_{(d,t)\in\mathcal C_o}x_{odt}+z_o=1.
-\]
+`shipping_cost` is the full candidate cost charged once when selected. It is not an
+incremental difference from the default lane. Source data must be converted before
+loading if it uses another convention.
 
-### A3. Quantity unit is cases
+### A5. Unmet penalty is linear
 
-Demand, fulfillment, unmet demand, and inventory are nonnegative integer cases.
+Penalty cost is unfulfilled cases multiplied by price per case and penalty rate. The
+canonical table stores the resulting nonnegative `penalty_per_unfilled_case`.
 
-### A4. Monetary terms use one scale
+### A6. Inventory is protected projected ATP
 
-Unit value, unmet-demand penalty, and shipping cost must use one declared currency or synthetic monetary scale before optimization.
+Projected available-to-promise may increase or decrease. A fulfillment at an early
+PGI date consumes every later checkpoint, protecting the lowest future amount. The
+alternative `cumulative_receipts` metadata policy requires nondecreasing inventory.
 
-### A5. Shipping cost is fixed per selected candidate
+### A7. Eligibility is hard preprocessing
 
-For candidate \((o,d,t)\), \(c_{odt}\) is charged once when \(x_{odt}=1\). A dataset must use exactly one convention:
+Closed dates, late arrivals, forecast restrictions, prohibited sources, and other
+confirmed routing rules remove candidates. The validator rejects a selected row that
+is not in the eligible candidate table.
 
-- total shipping cost; or
-- incremental shipping cost relative to the default assignment.
+### A8. Unmet demand is allowed and penalized
 
-The conventions cannot be mixed.
+Every requested case is either fulfilled or unfulfilled. An unassigned order has
+zero fulfillment and incurs its full unmet-demand penalty.
 
-### A6. Inventory is cumulative available-to-promise
+### A9. Minimum divert improvement is five percentage points
 
-\(I_{dst}\) is cumulative cases of SKU \(s\) available at DC \(d\) through date \(t\), after reservations outside the modeled focus-order set.
-
-\[
-\sum_{\tau\le t}\sum_o f_{osd\tau}\le I_{dst}.
-\]
-
-Inventory consumed at an earlier PGI date therefore remains consumed in later cumulative constraints.
-
-### A7. Hard eligibility is preprocessing
-
-Calendar closure, lead-time feasibility, prohibited sources, SKU forecast eligibility, and other hard routing rules are applied by `src/domopt/candidates.py`. Ineligible candidates are absent from \(\mathcal C\).
-
-The validator still checks that every selected candidate belongs to the approved candidate table.
-
-### A8. Unmet demand is permitted and penalized
+If enabled, a non-default assignment must fill at least
 
 \[
-\sum_{(d,t)\in\mathcal C_o}f_{osdt}+u_{os}=Q_{os}.
+\min\{Q_o,F_o^{\mathrm{def}}+\lceil0.05Q_o\rceil\}
 \]
 
-If \(z_o=1\), linking constraints force all \(f_{osdt}=0\), so \(u_{os}=Q_{os}\).
+cases. The five percent is based on total ordered cases, not default fill. The
+reference `default_fillable_cases` is required when enforcement is enabled.
 
-### A9. V0 penalties are linear
+### A10. Operational capacity has verified units
 
-\[
-\max\left[
-\sum v_{os}f_{osdt}
--
-\sum \pi_{os}u_{os}
--
-\sum c_{odt}x_{odt}
-\right].
-\]
+Enabled resource names are `dock`, `throughput_cases`, `case_pick`, `pallet_pick`,
+`weight`, and `volume`. Dock use is fixed per candidate. Throughput is fulfilled
+cases. Weight and volume use per-case coefficients. With `pallet_case` pick mode,
+full pallets consume pallet-pick capacity and only the remainder consumes case-pick
+capacity.
 
-Threshold-triggered, piecewise, or customer-specific nonlinear penalties are excluded from V0.
+### A11. Independent validation is authoritative
 
-### A10. The independent validator is authoritative
+A recommendation is reportable only after independent feasibility and objective
+recomputation. QUBO energy and solver-native objective values are diagnostics.
 
-A result is reportable only after `src/domopt/validation.py` verifies it and `src/domopt/objective.py` independently recomputes every objective component. Solver-reported objective values are diagnostic only.
+### A12. Hybrid search cannot degrade the incumbent
 
-## Planned assumptions
+The local MILP enforces exact residual resources and the global validator checks the
+merged result. A move is accepted only for a strict, feasible objective improvement.
 
-### A11. Minimum divert improvement
+### A13. Remote quantum execution is opt-in
 
-A non-default candidate may be required to improve case fill relative to a documented default reference quantity \(F_o^{\mathrm{def}}\):
+Local samplers are the default. Sending QUBO coefficients to a remote service
+requires explicit approval and `allow_remote=true`. Remote sampling does not bypass
+classical repair, recourse, or validation.
 
-\[
-\sum_s f_{osdt}
-\ge
-\left(F_o^{\mathrm{def}}+\left\lceil\delta_oQ_o\right\rceil\right)x_{odt},
-\qquad d\ne d_o^{\mathrm{def}}.
-\]
+## Unresolved or dataset-dependent rules
 
-This is activated only after confirming whether “5% improvement” means percentage points, 5% of total demand, or a relative percentage increase.
+### U1. Load grouping
 
-### A12. Protected alternate-DC inventory
+Orders sharing a load may require joint routing, mutual exclusion, or only reporting.
+No such relationship is imposed until the business rule is confirmed. Candidate
+`dock_units` can represent a verified load-level consumption without guessing.
 
-Alternate-DC inventory may need to remain sufficient for default demand over a future protection horizon. This should be reflected in processed available-to-promise inventory, not by an informal penalty.
+### U2. Customer-specific partial fulfillment
 
-### A13. Dock, throughput, case-pick, and pallet-pick capacities
+The current model permits partial fulfillment for every order. If some customer or
+SKU classes require all-or-nothing service, preprocessing must add a documented
+class and the MILP must add the corresponding equality constraints.
 
-Optional resources use the generic capacity formulation in `docs/mathematical_formulation.md`. They are enabled only after units and time buckets are verified.
+### U3. Protection-horizon construction
 
-### A14. Load grouping
+The solver enforces supplied projected ATP exactly, but upstream logic that combines
+receipts, outgoing plans, reservations, and the five-day protection horizon belongs
+to source-data preparation and must be confirmed for the original input pack.
 
-Orders sharing a load number may require joint assignment or mutual exclusion. The exact rule is unresolved and must not be guessed.
+### U4. Commercial scale and rounding
 
-## Unresolved questions
+Currency, exchange-rate date, price basis, tax/fuel components, and penalty-rate
+rounding must be declared in `metadata.json` for a real run.
 
-1. Is shipping cost total or incremental relative to the default lane?
-2. Is order value measured per case, weight, volume, or another commercial unit?
-3. Is penalty linear per unmet case, percentage-based, or threshold-triggered?
-4. Is historical COF improvement based on case fill, revenue fill, or another metric?
-5. How are in-transit receipts and incoming load plans incorporated into available inventory?
-6. Is the inventory-protection horizon measured in calendar or working days?
-7. Does one assigned order always consume one dock appointment?
-8. What physical units define case-pick and pallet-pick capacity?
-9. Must equal load numbers stay together, or are duplicate load numbers forbidden?
-10. Is partial fulfillment operationally acceptable for every customer class?
+### U5. Service-date policy
 
-A resolved answer requires updates to this document, the data dictionary, tests, and the assumption version.
+The candidate table may include PGI, arrival, and requested delivery dates. Exact
+working-day calendars and exception policy must be supplied by the data owner.
+
+## Change checklist
+
+When resolving an item, update:
+
+1. this document and `ASSUMPTION_VERSION`;
+2. the canonical data dictionary;
+3. loader and validator logic;
+4. exact MILP and both baselines;
+5. local preview/recourse behavior; and
+6. at least one positive and one negative test.

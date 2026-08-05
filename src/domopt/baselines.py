@@ -9,6 +9,12 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from .resources import (
+    candidate_fixed_consumption,
+    split_pick_quantities,
+    uses_split_pick_accounting,
+)
+from .rules import candidate_is_divert, minimum_divert_fulfillment
 from .schemas import ProblemData, Solution
 
 
@@ -20,6 +26,7 @@ class _CandidatePlan:
     pgi_date: pd.Timestamp
     is_default: bool
     shipping_cost: float
+    dock_units: float
     quantities: dict[str, int]
     score: float
     incremental_score: float
@@ -94,7 +101,8 @@ def _preview_candidate(
     pgi_date = pd.Timestamp(candidate["pgi_date"])
     lines = _order_lines(problem, order_id)
 
-    if capacities.remaining(dc_id, pgi_date, "dock") < 1.0 - 1e-9:
+    dock_units = candidate_fixed_consumption(candidate, "dock")
+    if capacities.remaining(dc_id, pgi_date, "dock") < dock_units - 1e-9:
         return None
 
     # Allocate cases in descending marginal business value. This is a baseline,
@@ -109,8 +117,15 @@ def _preview_candidate(
 
     residual_resources = {
         resource: capacities.remaining(dc_id, pgi_date, resource)
-        for resource in ["throughput_cases", "case_pick", "weight", "volume"]
+        for resource in [
+            "throughput_cases",
+            "case_pick",
+            "pallet_pick",
+            "weight",
+            "volume",
+        ]
     }
+    split_picks = uses_split_pick_accounting(problem)
     quantities: dict[str, int] = {}
 
     for row in lines.itertuples(index=False):
@@ -119,9 +134,6 @@ def _preview_candidate(
 
         if np.isfinite(residual_resources["throughput_cases"]):
             maximum = min(maximum, int(np.floor(residual_resources["throughput_cases"])))
-        if np.isfinite(residual_resources["case_pick"]):
-            maximum = min(maximum, int(np.floor(residual_resources["case_pick"])))
-
         unit_weight = float(getattr(row, "unit_weight", 0.0) or 0.0)
         unit_volume = float(getattr(row, "unit_volume", 0.0) or 0.0)
         if unit_weight > 0 and np.isfinite(residual_resources["weight"]):
@@ -129,10 +141,40 @@ def _preview_candidate(
         if unit_volume > 0 and np.isfinite(residual_resources["volume"]):
             maximum = min(maximum, int(np.floor(residual_resources["volume"] / unit_volume)))
 
-        quantity = max(0, int(maximum))
+        if split_picks:
+            per_pallet_value = getattr(row, "cases_per_pallet", None)
+            if per_pallet_value is None or pd.isna(per_pallet_value):
+                raise ValueError(
+                    "Pallet/case-pick accounting requires cases_per_pallet"
+                )
+            per_pallet = int(per_pallet_value)
+            maximum_pallets = int(maximum) // per_pallet
+            if np.isfinite(residual_resources["pallet_pick"]):
+                maximum_pallets = min(
+                    maximum_pallets,
+                    int(np.floor(residual_resources["pallet_pick"])),
+                )
+            loose_limit = int(maximum) - maximum_pallets * per_pallet
+            if np.isfinite(residual_resources["case_pick"]):
+                loose_limit = min(
+                    loose_limit,
+                    int(np.floor(residual_resources["case_pick"])),
+                )
+            loose_limit = min(loose_limit, per_pallet - 1)
+            quantity = maximum_pallets * per_pallet + max(0, loose_limit)
+            residual_resources["pallet_pick"] -= maximum_pallets
+            residual_resources["case_pick"] -= max(0, loose_limit)
+        else:
+            if np.isfinite(residual_resources["case_pick"]):
+                maximum = min(
+                    maximum,
+                    int(np.floor(residual_resources["case_pick"])),
+                )
+            quantity = max(0, int(maximum))
+            residual_resources["case_pick"] -= quantity
+
         quantities[str(row.sku_id)] = quantity
         residual_resources["throughput_cases"] -= quantity
-        residual_resources["case_pick"] -= quantity
         if unit_weight > 0:
             residual_resources["weight"] -= quantity * unit_weight
         if unit_volume > 0:
@@ -147,6 +189,10 @@ def _preview_candidate(
         - float(candidate["shipping_cost"])
     )
     unassigned = _unassigned_score(merged)
+    if candidate_is_divert(problem, candidate):
+        threshold = minimum_divert_fulfillment(problem, order_id)
+        if threshold is not None and int(merged["fulfilled"].sum()) < threshold:
+            return None
     return _CandidatePlan(
         candidate_id=str(candidate["candidate_id"]),
         order_id=order_id,
@@ -154,6 +200,7 @@ def _preview_candidate(
         pgi_date=pgi_date,
         is_default=bool(candidate["is_default"]),
         shipping_cost=float(candidate["shipping_cost"]),
+        dock_units=dock_units,
         quantities=quantities,
         score=score,
         incremental_score=score - unassigned,
@@ -168,19 +215,30 @@ def _commit_plan(
 ) -> None:
     lines = _order_lines(problem, plan.order_id).set_index("sku_id")
     total_cases = 0
+    total_case_picks = 0
+    total_pallet_picks = 0
     total_weight = 0.0
     total_volume = 0.0
+    split_picks = uses_split_pick_accounting(problem)
     for sku_id, quantity in plan.quantities.items():
         inventory.consume(plan.dc_id, sku_id, plan.pgi_date, int(quantity))
         total_cases += int(quantity)
+        if split_picks:
+            per_pallet = int(lines.loc[sku_id, "cases_per_pallet"])
+            pallets, loose = split_pick_quantities(quantity, per_pallet)
+            total_pallet_picks += pallets
+            total_case_picks += loose
+        else:
+            total_case_picks += int(quantity)
         if "unit_weight" in lines.columns and not pd.isna(lines.loc[sku_id, "unit_weight"]):
             total_weight += int(quantity) * float(lines.loc[sku_id, "unit_weight"])
         if "unit_volume" in lines.columns and not pd.isna(lines.loc[sku_id, "unit_volume"]):
             total_volume += int(quantity) * float(lines.loc[sku_id, "unit_volume"])
 
-    capacities.consume(plan.dc_id, plan.pgi_date, "dock", 1.0)
+    capacities.consume(plan.dc_id, plan.pgi_date, "dock", plan.dock_units)
     capacities.consume(plan.dc_id, plan.pgi_date, "throughput_cases", total_cases)
-    capacities.consume(plan.dc_id, plan.pgi_date, "case_pick", total_cases)
+    capacities.consume(plan.dc_id, plan.pgi_date, "case_pick", total_case_picks)
+    capacities.consume(plan.dc_id, plan.pgi_date, "pallet_pick", total_pallet_picks)
     capacities.consume(plan.dc_id, plan.pgi_date, "weight", total_weight)
     capacities.consume(plan.dc_id, plan.pgi_date, "volume", total_volume)
 
@@ -329,4 +387,3 @@ def solve_greedy_baseline(problem: ProblemData) -> Solution:
 
 def run_baselines(problem: ProblemData) -> list[Solution]:
     return [solve_default_baseline(problem), solve_greedy_baseline(problem)]
-

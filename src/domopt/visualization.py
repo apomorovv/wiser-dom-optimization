@@ -29,3 +29,4 @@ def plot_method_objectives(metrics: pd.DataFrame, output_path: str | Path) -> Pa
     plt.close(figure)
     return path
 
+

@@ -8,7 +8,7 @@ From the repository root:
 
 ```bash
 conda activate wiser-dom
-python -m pip install -e .
+python -m pip install -e ".[dev]"
 pytest -q
 ```
 
@@ -20,9 +20,10 @@ python scripts/make_tiny_instance.py \
 
 python scripts/run_experiment.py \
   --data-dir data/synthetic/tiny \
-  --methods default greedy classical \
+  --methods default greedy classical hybrid \
+  --hybrid-config configs/hybrid_tiny.yaml \
   --output-dir runs/tiny/all_methods \
-  --experiment-id tiny-v0 \
+  --experiment-id tiny-v1 \
   --seed 7
 ```
 
@@ -44,9 +45,10 @@ tmux attach -t wiser-dom
 mkdir -p runs/example
 python scripts/run_experiment.py \
   --data-dir data/synthetic/tiny \
-  --methods default greedy classical \
+  --methods default greedy classical hybrid \
+  --hybrid-config configs/hybrid_tiny.yaml \
   --output-dir runs/example \
-  --experiment-id tiny-v0 \
+  --experiment-id tiny-v1 \
   --seed 7 \
   > runs/example/stdout.log 2>&1
 ```
@@ -67,16 +69,16 @@ cd /path/to/repository
 source /path/to/conda.sh
 conda activate wiser-dom
 
-python -m pip install -e .
+python -m pip install -e ".[dev]"
 pytest -q tests/test_tiny_optimum.py
 
 python scripts/run_experiment.py \
   --data-dir data/synthetic/tiny \
-  --methods default greedy classical \
+  --methods default greedy classical hybrid \
+  --hybrid-config configs/hybrid_tiny.yaml \
   --output-dir runs/tiny/all_methods \
-  --experiment-id tiny-v0 \
+  --experiment-id tiny-v1 \
   --seed 7
 ```
 
 Do not submit real-data jobs to an unapproved external platform.
-

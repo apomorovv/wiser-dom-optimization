@@ -6,7 +6,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import yaml
+
 from domopt.data import load_problem_data
+from domopt.hybrid import HybridConfig
 from domopt.pipeline import run_methods
 
 
@@ -16,13 +19,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--methods",
         nargs="+",
-        default=["default", "greedy", "classical"],
-        choices=["default", "greedy", "classical"],
+        default=["default", "greedy", "classical", "hybrid"],
+        choices=["default", "greedy", "classical", "hybrid"],
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--experiment-id", required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--time-limit-seconds", type=float, default=60.0)
+    parser.add_argument(
+        "--hybrid-config",
+        type=Path,
+        help="YAML file containing either HybridConfig fields or a 'hybrid' mapping.",
+    )
     parser.add_argument(
         "--registry",
         type=Path,
@@ -34,6 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     problem = load_problem_data(args.data_dir)
+    hybrid_config = None
+    if args.hybrid_config is not None:
+        payload = yaml.safe_load(
+            args.hybrid_config.read_text(encoding="utf-8")
+        ) or {}
+        hybrid_config = HybridConfig(**dict(payload.get("hybrid", payload)))
     summary = run_methods(
         problem,
         args.methods,
@@ -42,6 +56,7 @@ def main() -> int:
         seed=args.seed,
         time_limit_seconds=args.time_limit_seconds,
         registry_path=args.registry,
+        hybrid_config=hybrid_config,
     )
     visible = [
         "method",

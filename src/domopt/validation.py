@@ -7,6 +7,8 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
+from .resources import solution_capacity_usage
+from .rules import minimum_divert_fulfillment
 from .schemas import ProblemData, Solution, ValidationResult
 
 
@@ -69,15 +71,21 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
         duplicates = assignments.loc[
             assignments["order_id"].duplicated(keep=False), "order_id"
         ].unique().tolist()
-        assignment_violations.append(f"duplicate assignment rows for orders {duplicates[:5]}")
+        assignment_violations.append(
+            f"duplicate assignment rows for orders {duplicates[:5]}"
+        )
 
     assignment_ids = set(assignments["order_id"].astype(str))
     missing_orders = sorted(order_ids - assignment_ids)
     extra_orders = sorted(assignment_ids - order_ids)
     if missing_orders:
-        assignment_violations.append(f"orders missing assignment rows: {missing_orders[:5]}")
+        assignment_violations.append(
+            f"orders missing assignment rows: {missing_orders[:5]}"
+        )
     if extra_orders:
-        assignment_violations.append(f"assignment rows reference unknown orders: {extra_orders[:5]}")
+        assignment_violations.append(
+            f"assignment rows reference unknown orders: {extra_orders[:5]}"
+        )
 
     candidate_lookup = problem.candidates.set_index("candidate_id", drop=False)
     default_lookup = problem.orders.set_index("order_id")["default_dc"].to_dict()
@@ -88,8 +96,16 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
         if order_id in assignment_lookup:
             continue
         is_unassigned = bool(row.is_unassigned)
-        candidate_id = None if pd.isna(row.candidate_id) or str(row.candidate_id).strip() == "" else str(row.candidate_id)
-        selected_dc = None if pd.isna(row.selected_dc) or str(row.selected_dc).strip() == "" else str(row.selected_dc)
+        candidate_id = (
+            None
+            if pd.isna(row.candidate_id) or str(row.candidate_id).strip() == ""
+            else str(row.candidate_id)
+        )
+        selected_dc = (
+            None
+            if pd.isna(row.selected_dc) or str(row.selected_dc).strip() == ""
+            else str(row.selected_dc)
+        )
         selected_date = _date(row.selected_pgi_date)
 
         if is_unassigned:
@@ -98,10 +114,14 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
                     f"unassigned order {order_id} contains selected candidate/DC/date"
                 )
             if bool(row.is_divert):
-                assignment_violations.append(f"unassigned order {order_id} cannot be a divert")
+                assignment_violations.append(
+                    f"unassigned order {order_id} cannot be a divert"
+                )
         else:
             if candidate_id is None:
-                assignment_violations.append(f"assigned order {order_id} has no candidate_id")
+                assignment_violations.append(
+                    f"assigned order {order_id} has no candidate_id"
+                )
             elif candidate_id not in candidate_lookup.index:
                 eligibility_violations.append(
                     f"order {order_id} selects unknown candidate {candidate_id}"
@@ -112,7 +132,8 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
                     candidate = candidate.iloc[0]
                 if str(candidate["order_id"]) != order_id:
                     eligibility_violations.append(
-                        f"candidate {candidate_id} belongs to {candidate['order_id']}, not {order_id}"
+                        f"candidate {candidate_id} belongs to "
+                        f"{candidate['order_id']}, not {order_id}"
                     )
                 if not bool(candidate["eligible"]):
                     eligibility_violations.append(
@@ -122,9 +143,13 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
                     assignment_violations.append(
                         f"order {order_id} selected_dc does not match candidate {candidate_id}"
                     )
-                if pd.isna(selected_date) or selected_date != pd.Timestamp(candidate["pgi_date"]):
+                if (
+                    pd.isna(selected_date)
+                    or selected_date != pd.Timestamp(candidate["pgi_date"])
+                ):
                     assignment_violations.append(
-                        f"order {order_id} selected_pgi_date does not match candidate {candidate_id}"
+                        f"order {order_id} selected_pgi_date does not match "
+                        f"candidate {candidate_id}"
                     )
                 expected_divert = str(candidate["dc_id"]) != default_lookup.get(order_id)
                 if bool(row.is_divert) != expected_divert:
@@ -143,7 +168,12 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
         demand_violations.append("duplicate fulfillment rows for an order–SKU pair")
 
     fulfillment_keys = set(
-        map(tuple, fulfillment[["order_id", "sku_id"]].astype(str).itertuples(index=False, name=None))
+        map(
+            tuple,
+            fulfillment[["order_id", "sku_id"]]
+            .astype(str)
+            .itertuples(index=False, name=None),
+        )
     )
     missing_lines = sorted(line_keys - fulfillment_keys)
     extra_lines = sorted(fulfillment_keys - line_keys)
@@ -152,7 +182,10 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
     if extra_lines:
         demand_violations.append(f"unknown fulfillment rows: {extra_lines[:5]}")
 
-    demands = problem.order_lines.set_index(["order_id", "sku_id"])["demand_cases"].to_dict()
+    demands = (
+        problem.order_lines.set_index(["order_id", "sku_id"])["demand_cases"]
+        .to_dict()
+    )
     positive_usage: list[dict[str, object]] = []
 
     for row in fulfillment.itertuples(index=False):
@@ -179,7 +212,11 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
             )
 
         assignment = assignment_lookup.get(key[0])
-        row_dc = None if pd.isna(row.selected_dc) or str(row.selected_dc).strip() == "" else str(row.selected_dc)
+        row_dc = (
+            None
+            if pd.isna(row.selected_dc) or str(row.selected_dc).strip() == ""
+            else str(row.selected_dc)
+        )
         row_date = _date(row.selected_pgi_date)
         if assignment is None:
             continue
@@ -234,50 +271,36 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
                     f"available={inv.cumulative_available_cases}"
                 )
 
+    fulfilled_by_order = fulfillment.groupby("order_id")["fulfilled_cases"].sum()
+    for row in assignments.loc[
+        (~assignments["is_unassigned"].astype(bool))
+        & assignments["is_divert"].astype(bool)
+    ].itertuples(index=False):
+        try:
+            threshold = minimum_divert_fulfillment(problem, str(row.order_id))
+        except ValueError as error:
+            schema_violations.append(str(error))
+            continue
+        if threshold is not None:
+            fulfilled = float(fulfilled_by_order.get(str(row.order_id), 0.0))
+            if fulfilled + _TOL < threshold:
+                demand_violations.append(
+                    f"divert improvement fails for order {row.order_id}: "
+                    f"fulfilled={fulfilled}, required={threshold}"
+                )
+
     capacities = problem.capacities
     if not capacities.empty:
-        line_attributes = problem.order_lines.set_index(["order_id", "sku_id"])
-        assigned_rows = assignments.loc[~assignments["is_unassigned"].astype(bool)].copy()
-        assigned_rows["selected_pgi_date"] = pd.to_datetime(assigned_rows["selected_pgi_date"])
-
+        try:
+            capacity_usage = solution_capacity_usage(problem, solution)
+        except ValueError as error:
+            schema_violations.append(str(error))
+            capacity_usage = {}
         for cap in capacities.itertuples(index=False):
             date = pd.Timestamp(cap.date)
             resource = str(cap.resource)
             capacity = float(cap.capacity)
-            if resource == "dock":
-                consumed = float(
-                    (
-                        (assigned_rows["selected_dc"] == cap.dc_id)
-                        & (assigned_rows["selected_pgi_date"] == date)
-                    ).sum()
-                )
-            elif resource in {"throughput_cases", "case_pick"}:
-                consumed = 0.0 if usage.empty else float(
-                    usage.loc[
-                        (usage["dc_id"] == cap.dc_id) & (usage["date"] == date),
-                        "fulfilled_cases",
-                    ].sum()
-                )
-            elif resource in {"weight", "volume"}:
-                attribute = "unit_weight" if resource == "weight" else "unit_volume"
-                if attribute not in problem.order_lines.columns:
-                    schema_violations.append(
-                        f"capacity resource {resource!r} requires {attribute!r}"
-                    )
-                    continue
-                consumed = 0.0
-                if not usage.empty:
-                    for item in usage.loc[
-                        (usage["dc_id"] == cap.dc_id) & (usage["date"] == date)
-                    ].itertuples(index=False):
-                        consumed += float(item.fulfilled_cases) * float(
-                            line_attributes.loc[(item.order_id, item.sku_id), attribute]
-                        )
-            else:
-                schema_violations.append(
-                    f"unsupported capacity resource {resource!r}; define its consumption rule"
-                )
-                continue
+            consumed = float(capacity_usage.get((str(cap.dc_id), date, resource), 0.0))
 
             if consumed > capacity + _TOL:
                 capacity_violations.append(
@@ -302,4 +325,3 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
         capacity_violations=capacity_violations,
         schema_violations=schema_violations,
     )
-

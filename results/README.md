@@ -8,7 +8,7 @@ This directory contains final aggregate tables, figures, and planner-facing summ
 results/
   tables/
     baseline_comparison.csv
-    scaling_summary.csv
+    scaling_synthetic.csv
     sensitivity_summary.csv
   figures/
     objective_by_method.png
@@ -64,4 +64,7 @@ A planner-facing recommendation should state:
 - next-best feasible option when available.
 
 Use synthetic or approved anonymized examples only.
+
+`scripts/run_scaling_study.py` creates `scaling_synthetic.csv` from independently
+generated data. Do not mix those objective values with the challenge incumbent audit.
 

@@ -103,8 +103,12 @@ def generate_candidates(
 
     candidates = lane_options.copy()
     if "candidate_id" not in candidates.columns:
+        def candidate_id(row: pd.Series) -> str:
+            date = pd.Timestamp(row["pgi_date"]).date()
+            return f"{row['order_id']}__{row['dc_id']}__{date}"
+
         candidates["candidate_id"] = candidates.apply(
-            lambda row: f"{row['order_id']}__{row['dc_id']}__{pd.Timestamp(row['pgi_date']).date()}",
+            candidate_id,
             axis=1,
         )
     if "eligible" not in candidates.columns:

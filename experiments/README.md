@@ -4,7 +4,8 @@
 
 ## One row per method
 
-An integrated comparison using default, greedy, and classical methods creates three registry rows with the same `experiment_id` and different `method` values.
+An integrated comparison using default, greedy, classical, and hybrid methods creates
+four registry rows with the same `experiment_id` and different `method` values.
 
 ## Required columns
 
@@ -35,9 +36,10 @@ notes
 ## Example
 
 ```text
-tiny-v0,tiny-v0-default-7,2026-07-12T22:00:00Z,tiny,0.1.0,v0,default,7,<sha>,<config>,runs/tiny/baselines/default,true,<value>,<rate>,<rate>,<cost>,<cost>,<count>,<time>,,deterministic default baseline
-tiny-v0,tiny-v0-greedy-7,2026-07-12T22:00:01Z,tiny,0.1.0,v0,greedy,7,<sha>,<config>,runs/tiny/baselines/greedy,true,126,1.0,1.0,4,0,1,<time>,,sequential greedy
-tiny-v0,tiny-v0-classical-7,2026-07-12T22:00:02Z,tiny,0.1.0,v0,classical,7,<sha>,<config>,runs/tiny/classical,true,126,1.0,1.0,4,0,1,<time>,0.0,proven optimum
+tiny-v1,tiny-v1-default-7,2026-08-05T22:00:00Z,tiny,0.2.0,v1,default,7,<sha>,<config>,runs/tiny/default,true,-50,<rate>,<rate>,0,<cost>,0,<time>,,deterministic default baseline
+tiny-v1,tiny-v1-greedy-7,2026-08-05T22:00:01Z,tiny,0.2.0,v1,greedy,7,<sha>,<config>,runs/tiny/greedy,true,126,1.0,1.0,4,0,1,<time>,,sequential greedy
+tiny-v1,tiny-v1-classical-7,2026-08-05T22:00:02Z,tiny,0.2.0,v1,classical,7,<sha>,<config>,runs/tiny/classical,true,126,1.0,1.0,4,0,1,<time>,0.0,proven optimum
+tiny-v1,tiny-v1-hybrid-7,2026-08-05T22:00:03Z,tiny,0.2.0,v1,hybrid,7,<sha>,<config>,runs/tiny/hybrid,true,126,1.0,1.0,4,0,1,<time>,,bounded exact-QUBO test
 ```
 
 The default-baseline numerical values depend on the documented deterministic allocation sequence and must be produced by code rather than copied from this README.

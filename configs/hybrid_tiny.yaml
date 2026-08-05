@@ -1,0 +1,18 @@
+data_dir: data/synthetic/tiny
+output_dir: runs/tiny-hybrid
+
+hybrid:
+  initial_method: default
+  iterations: 4
+  neighborhood_orders: 2
+  max_qubo_variables: 8
+  max_candidates_per_order: 2
+  sampler: exact
+  num_reads: 64
+  sweeps: 100
+  top_k_recourse: 8
+  recourse_time_limit_seconds: 10.0
+  one_hot_penalty_multiplier: 1.25
+  pair_penalty_multiplier: 1.0
+  seed: 7
+  allow_remote: false

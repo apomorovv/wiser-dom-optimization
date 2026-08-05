@@ -38,3 +38,4 @@ def test_validator_detects_demand_and_inventory_violation() -> None:
     assert validation.demand_violations
     assert validation.inventory_violations
 
+

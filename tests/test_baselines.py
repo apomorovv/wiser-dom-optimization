@@ -30,3 +30,4 @@ def test_greedy_is_better_than_default_on_tiny_instance() -> None:
     greedy_value = evaluate_solution(problem, solve_greedy_baseline(problem)).objective_value
     assert greedy_value > default_value
 
+

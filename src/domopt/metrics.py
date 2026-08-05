@@ -37,7 +37,10 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
 
     assignments = solution.assignments
     reassigned = int(
-        ((~assignments["is_unassigned"].astype(bool)) & assignments["is_divert"].astype(bool)).sum()
+        (
+            (~assignments["is_unassigned"].astype(bool))
+            & assignments["is_divert"].astype(bool)
+        ).sum()
     )
     unassigned = int(assignments["is_unassigned"].astype(bool).sum())
 
@@ -55,7 +58,23 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
         "runtime_seconds": float(solution.runtime_seconds),
         "best_bound": solution.metadata.get("best_bound"),
         "optimality_gap": solution.metadata.get("optimality_gap"),
+        "initial_objective": solution.metadata.get("initial_objective"),
+        "hybrid_improvement": solution.metadata.get("improvement"),
+        "sampler_backend": solution.metadata.get("sampler"),
+        "sampler_calls": solution.metadata.get("sampler_calls"),
+        "qpu_calls": solution.metadata.get("qpu_calls"),
+        "accepted_moves": solution.metadata.get("accepted_moves"),
+        "raw_one_hot_rate": solution.metadata.get("raw_one_hot_rate"),
+        "hybrid_iterations": solution.metadata.get("iterations"),
+        "maximum_qubo_variables": solution.metadata.get("maximum_qubo_variables"),
+        "maximum_candidates_per_order": solution.metadata.get(
+            "maximum_candidates_per_order"
+        ),
+        "recourse_solves": solution.metadata.get("recourse_solves"),
+        "remote_enabled": solution.metadata.get("remote_enabled"),
+        "qubo_noise_relative_sigma": solution.metadata.get(
+            "qubo_noise_relative_sigma"
+        ),
         "violations": validation.to_dict(),
     }
     return metrics
-

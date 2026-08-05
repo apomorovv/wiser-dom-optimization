@@ -22,6 +22,8 @@ One row per order.
 | `default_dc` | string | yes | Default DC \(d_o^{\mathrm{def}}\). |
 | `requested_delivery_date` | date | yes | Requested delivery date. |
 | `default_pgi_date` | date | no | Original PGI date. |
+| `default_fillable_cases` | integer | conditional | Default-policy fill reference \(F_o^{\mathrm{def}}\); required when minimum-divert enforcement is enabled. |
+| `min_divert_improvement_fraction` | float | no | Fraction of total order demand added to default fill; defaults to metadata, normally 0.05. |
 | `load_id` | string | no | Anonymized load/group identifier. |
 | `priority` | integer/string | no | Documented customer or allocation priority. |
 | `is_top_customer` | boolean | no | Priority-customer indicator. |
@@ -63,14 +65,14 @@ Foreign key:
 
 ## 3. `inventory.csv`
 
-One row per DC–SKU–date cumulative inventory bucket.
+One row per DC–SKU–date protected inventory checkpoint.
 
 | Column | Type | Required | Definition |
 |---|---|---:|---|
 | `dc_id` | string | yes | DC \(d\). |
 | `sku_id` | string | yes | SKU \(s\). |
 | `date` | date | yes | Inventory checkpoint \(t\). |
-| `cumulative_available_cases` | integer | yes | Cumulative ATP \(I_{dst}\). |
+| `cumulative_available_cases` | integer | yes | Protected projected ATP \(I_{dst}\) available to focus orders through this checkpoint. |
 | `reserved_default_cases` | integer | no | Cases protected outside the focus-order set. |
 | `source_inventory_cases` | integer | no | Pre-reservation inventory for audit. |
 
@@ -86,7 +88,10 @@ Required invariant:
 I_{dst}\ge0.
 \]
 
-For fixed \((d,s)\), cumulative inventory should be nondecreasing unless an explicitly documented adjustment model is used.
+Under metadata policy `projected_atp`, values may decrease because later committed
+demand can reduce future availability. An earlier focus-order fulfillment consumes
+every later checkpoint. Under `cumulative_receipts`, the series must be
+nondecreasing.
 
 ## 4. `candidates.csv`
 
@@ -105,6 +110,7 @@ One row per feasible order–DC–PGI assignment candidate.
 | `eligible` | boolean | yes | Must be true in solver-facing data. |
 | `eligibility_reason` | string | no | Audit explanation. |
 | `distance` | float | no | Lane distance in declared units. |
+| `dock_units` | float | no | Fixed dock consumption when selected; defaults to 1. |
 
 Primary key:
 
@@ -128,7 +134,7 @@ One row per DC–date–resource capacity.
 |---|---|---:|---|
 | `dc_id` | string | yes | DC \(d\). |
 | `date` | date | yes | Capacity date \(t\). |
-| `resource` | string | yes | Resource \(r\), e.g. `dock`, `throughput_cases`, `case_pick`, or `pallet_pick`. |
+| `resource` | string | yes | One of `dock`, `throughput_cases`, `case_pick`, `pallet_pick`, `weight`, or `volume`. |
 | `capacity` | float | yes | Available capacity \(R^r_{dt}\). |
 | `unit` | string | yes | Physical unit. |
 
@@ -171,7 +177,7 @@ One row per order.
 | `selected_pgi_date` | date/null | Selected PGI date. |
 | `is_unassigned` | boolean | Value of \(z_o\). |
 | `is_divert` | boolean | Selected DC differs from default DC. |
-| `method` | string | `default`, `greedy`, `classical`, `qaoa`, etc. |
+| `method` | string | `default`, `greedy`, `classical`, or `hybrid`. |
 
 ## 8. Solver output: `fulfillment.csv`
 
@@ -212,9 +218,34 @@ Required identity:
   "runtime_seconds": 0.0,
   "best_bound": null,
   "optimality_gap": null,
+  "initial_objective": null,
+  "hybrid_improvement": null,
+  "sampler_calls": null,
+  "qpu_calls": null,
+  "maximum_qubo_variables": null,
+  "recourse_solves": null,
   "violations": {}
 }
 ```
+
+## 10. `metadata.json`
+
+| Field | Required | Definition |
+|---|---:|---|
+| `dataset_id` | yes | Non-sensitive dataset/version label. |
+| `schema_version` | yes | Canonical contract version, currently `0.2.0`. |
+| `assumption_version` | yes | Modeling assumption version, currently `v1`. |
+| `currency` | yes | Currency code or `synthetic_units`. |
+| `quantity_unit` | yes | Must be `cases` for this implementation. |
+| `inventory_policy` | yes | `projected_atp` or `cumulative_receipts`. |
+| `pick_capacity_mode` | no | `auto`, `cases`, or `pallet_case`. |
+| `enforce_min_divert_improvement` | yes | Whether the alternate-fill threshold is hard. |
+| `min_divert_improvement_fraction` | no | Dataset default, normally 0.05. |
+| `source_fingerprint` | recommended | Hash or approved source version, never a restricted path. |
+
+For `pallet_case` mode, every order line must contain a positive
+`cases_per_pallet`. For real data, metadata should also state the economic scale,
+source cutoff, timezone, working-day calendar version, and protection-horizon logic.
 
 ## Source-to-canonical examples
 
@@ -225,10 +256,12 @@ Required identity:
 | Material number | `sku_id` |
 | Requested delivery date | `requested_delivery_date` |
 | PGI / expected PGI | `default_pgi_date` or `pgi_date` |
-| Opening stock / available inventory | processed into `cumulative_available_cases` |
+| Projected inventory / ATP | processed into protected `cumulative_available_cases` checkpoints |
 | Ordered quantity | `demand_cases` |
 | SKU price | `unit_value` |
 | Shipping cost | `shipping_cost` |
+| Default fill quantity | `default_fillable_cases` |
+| Price × penalty rate | `penalty_per_unfilled_case` |
 | Lead time | `lead_time_days` |
 | Load number | `load_id` |
 

@@ -1,32 +1,71 @@
-import pytest
+import pandas as pd
 
-from domopt.baselines import solve_default_baseline, solve_greedy_baseline
-from domopt.data import make_tiny_problem_data
-from domopt.objective import evaluate_solution
-from domopt.validation import validate_solution
+from domopt.candidates import filter_feasible_candidates, generate_candidates
 
 
-def test_default_and_greedy_baselines_are_feasible() -> None:
-    problem = make_tiny_problem_data()
-    default = solve_default_baseline(problem)
-    greedy = solve_greedy_baseline(problem)
+def test_candidate_generation_filters_closed_and_late_options() -> None:
+    orders = pd.DataFrame(
+        [
+            {
+                "order_id": "O1",
+                "default_dc": "D1",
+                "requested_delivery_date": "2026-07-15",
+            }
+        ]
+    )
+    lanes = pd.DataFrame(
+        [
+            {
+                "order_id": "O1",
+                "dc_id": "D1",
+                "pgi_date": "2026-07-14",
+                "arrival_date": "2026-07-15",
+                "shipping_cost": 1,
+            },
+            {
+                "order_id": "O1",
+                "dc_id": "D2",
+                "pgi_date": "2026-07-14",
+                "arrival_date": "2026-07-16",
+                "shipping_cost": 2,
+            },
+        ]
+    )
+    calendar = pd.DataFrame(
+        [
+            {"dc_id": "D1", "date": "2026-07-14", "is_open": True},
+            {"dc_id": "D2", "date": "2026-07-14", "is_open": True},
+        ]
+    )
+    result = generate_candidates(orders, lanes, calendar=calendar)
 
-    assert validate_solution(problem, default).is_feasible
-    assert validate_solution(problem, greedy).is_feasible
+    assert list(result["dc_id"]) == ["D1"]
+    assert bool(result.iloc[0]["is_default"])
+    assert bool(result.iloc[0]["eligible"])
 
 
-def test_greedy_finds_tiny_split_assignment() -> None:
-    problem = make_tiny_problem_data()
-    greedy = solve_greedy_baseline(problem)
-    selected = greedy.assignments.set_index("order_id")["selected_dc"].to_dict()
-
-    assert selected == {"O1": "D2", "O2": "D1"}
-    assert evaluate_solution(problem, greedy).objective_value == pytest.approx(126.0)
-
-
-def test_greedy_is_better_than_default_on_tiny_instance() -> None:
-    problem = make_tiny_problem_data()
-    default_value = evaluate_solution(problem, solve_default_baseline(problem)).objective_value
-    greedy_value = evaluate_solution(problem, solve_greedy_baseline(problem)).objective_value
-    assert greedy_value > default_value
-
+def test_filter_removes_explicitly_ineligible_rows() -> None:
+    candidates = pd.DataFrame(
+        [
+            {
+                "candidate_id": "C1",
+                "order_id": "O1",
+                "dc_id": "D1",
+                "pgi_date": "2026-07-14",
+                "shipping_cost": 0,
+                "is_default": True,
+                "eligible": True,
+            },
+            {
+                "candidate_id": "C2",
+                "order_id": "O1",
+                "dc_id": "D2",
+                "pgi_date": "2026-07-14",
+                "shipping_cost": 0,
+                "is_default": False,
+                "eligible": False,
+            },
+        ]
+    )
+    result = filter_feasible_candidates(candidates)
+    assert list(result["candidate_id"]) == ["C1"]

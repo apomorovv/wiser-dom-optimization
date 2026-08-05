@@ -125,6 +125,12 @@ def normalize_problem_data(problem: ProblemData) -> ProblemData:
     _as_date(capacities, ["date"])
     _as_date(calendar, ["date"])
 
+    _as_numeric(orders, ["default_fillable_cases"], integer=True)
+    _as_numeric(
+        orders,
+        ["min_divert_improvement_fraction"],
+        nonnegative=True,
+    )
     _as_numeric(lines, ["demand_cases", "cases_per_pallet"], integer=True)
     _as_numeric(
         lines,
@@ -144,7 +150,9 @@ def normalize_problem_data(problem: ProblemData) -> ProblemData:
         ],
         integer=True,
     )
-    _as_numeric(candidates, ["shipping_cost", "distance"])
+    if "dock_units" not in candidates.columns:
+        candidates["dock_units"] = 1.0
+    _as_numeric(candidates, ["shipping_cost", "distance", "dock_units"])
     _as_numeric(candidates, ["lead_time_days"], integer=True)
     _as_numeric(capacities, ["capacity"])
 
@@ -203,7 +211,9 @@ def validate_problem_data(problem: ProblemData) -> None:
     unknown_lines = sorted(set(lines["order_id"]) - order_ids)
     unknown_candidates = sorted(set(candidates["order_id"]) - order_ids)
     if unknown_lines:
-        raise DataValidationError(f"order_lines references unknown orders: {unknown_lines[:5]}")
+        raise DataValidationError(
+            f"order_lines references unknown orders: {unknown_lines[:5]}"
+        )
     if unknown_candidates:
         raise DataValidationError(
             f"candidates references unknown orders: {unknown_candidates[:5]}"
@@ -212,16 +222,21 @@ def validate_problem_data(problem: ProblemData) -> None:
     eligible_candidates = candidates[candidates["eligible"]]
     missing_candidate_orders = sorted(order_ids - set(eligible_candidates["order_id"]))
     if missing_candidate_orders:
-        # No-assignment keeps the MILP feasible, but missing candidates are almost always a data issue.
+        # No-assignment preserves mathematical feasibility, but an absent candidate
+        # set is almost always an upstream data error.
         raise DataValidationError(
-            "Every V0 order must have at least one eligible assignment candidate; missing for "
+            "Every order must have at least one eligible assignment candidate; "
+            "missing for "
             f"{missing_candidate_orders[:5]}"
         )
 
     default_map = orders.set_index("order_id")["default_dc"].to_dict()
     incorrect_default = candidates[
         candidates["is_default"]
-        != candidates.apply(lambda row: row["dc_id"] == default_map[row["order_id"]], axis=1)
+        != candidates.apply(
+            lambda row: row["dc_id"] == default_map[row["order_id"]],
+            axis=1,
+        )
     ]
     if not incorrect_default.empty:
         ids = incorrect_default["candidate_id"].head().tolist()
@@ -239,11 +254,37 @@ def validate_problem_data(problem: ProblemData) -> None:
                 "Eligible candidates occur on closed dates: " f"{closed_selected[:5]}"
             )
 
-    for (dc_id, sku_id), group in inventory.groupby(["dc_id", "sku_id"], sort=False):
-        ordered = group.sort_values("date")["cumulative_available_cases"].to_numpy()
-        if np.any(np.diff(ordered) < 0):
+    inventory_policy = str(
+        problem.metadata.get("inventory_policy", "projected_atp")
+    ).lower()
+    if inventory_policy not in {"projected_atp", "cumulative_receipts"}:
+        raise DataValidationError(
+            "metadata.inventory_policy must be 'projected_atp' or 'cumulative_receipts'"
+        )
+    if inventory_policy == "cumulative_receipts":
+        for (dc_id, sku_id), group in inventory.groupby(
+            ["dc_id", "sku_id"], sort=False
+        ):
+            ordered = group.sort_values("date")["cumulative_available_cases"].to_numpy()
+            if np.any(np.diff(ordered) < 0):
+                raise DataValidationError(
+                    f"Cumulative inventory decreases for dc={dc_id}, sku={sku_id}"
+                )
+
+    if "min_divert_improvement_fraction" in orders.columns:
+        fractions = orders["min_divert_improvement_fraction"].dropna().astype(float)
+        if (fractions > 1).any():
             raise DataValidationError(
-                f"Cumulative inventory decreases for dc={dc_id}, sku={sku_id}"
+                "min_divert_improvement_fraction must be between zero and one"
+            )
+    if bool(problem.metadata.get("enforce_min_divert_improvement", False)):
+        if "default_fillable_cases" not in orders.columns:
+            raise DataValidationError(
+                "Minimum-divert enforcement requires orders.default_fillable_cases"
+            )
+        if orders["default_fillable_cases"].isna().any():
+            raise DataValidationError(
+                "orders.default_fillable_cases contains missing values"
             )
 
 
@@ -318,6 +359,7 @@ def save_problem_data(problem: ProblemData, data_dir: str | Path) -> Path:
         "assumption_version": ASSUMPTION_VERSION,
         "currency": "unspecified",
         "quantity_unit": "cases",
+        "inventory_policy": "projected_atp",
         **normalized.metadata,
     }
     (path / "metadata.json").write_text(
@@ -336,37 +378,65 @@ def make_tiny_problem_data() -> ProblemData:
                 "default_dc": "D1",
                 "requested_delivery_date": "2026-07-15",
                 "default_pgi_date": "2026-07-14",
+                "default_fillable_cases": 5,
+                "min_divert_improvement_fraction": 0.05,
             },
             {
                 "order_id": "O2",
                 "default_dc": "D1",
                 "requested_delivery_date": "2026-07-15",
                 "default_pgi_date": "2026-07-14",
+                "default_fillable_cases": 7,
+                "min_divert_improvement_fraction": 0.05,
             },
         ]
     )
     lines = pd.DataFrame(
         [
-            {"order_id": "O1", "sku_id": "A", "demand_cases": 4, "unit_value": 10, "penalty_per_unfilled_case": 20},
-            {"order_id": "O1", "sku_id": "B", "demand_cases": 2, "unit_value": 10, "penalty_per_unfilled_case": 20},
-            {"order_id": "O2", "sku_id": "A", "demand_cases": 3, "unit_value": 10, "penalty_per_unfilled_case": 20},
-            {"order_id": "O2", "sku_id": "B", "demand_cases": 4, "unit_value": 10, "penalty_per_unfilled_case": 20},
+            {
+                "order_id": order_id,
+                "sku_id": sku_id,
+                "demand_cases": demand,
+                "unit_value": 10,
+                "penalty_per_unfilled_case": 20,
+            }
+            for order_id, sku_id, demand in [
+                ("O1", "A", 4),
+                ("O1", "B", 2),
+                ("O2", "A", 3),
+                ("O2", "B", 4),
+            ]
         ]
     )
     inventory = pd.DataFrame(
         [
-            {"dc_id": "D1", "sku_id": "A", "date": "2026-07-14", "cumulative_available_cases": 3},
-            {"dc_id": "D1", "sku_id": "B", "date": "2026-07-14", "cumulative_available_cases": 4},
-            {"dc_id": "D2", "sku_id": "A", "date": "2026-07-14", "cumulative_available_cases": 4},
-            {"dc_id": "D2", "sku_id": "B", "date": "2026-07-14", "cumulative_available_cases": 2},
+            {
+                "dc_id": dc_id,
+                "sku_id": sku_id,
+                "date": "2026-07-14",
+                "cumulative_available_cases": available,
+            }
+            for dc_id, sku_id, available in [
+                ("D1", "A", 3),
+                ("D1", "B", 4),
+                ("D2", "A", 4),
+                ("D2", "B", 2),
+            ]
         ]
     )
     candidates = pd.DataFrame(
         [
-            {"candidate_id": "O1_D1_T1", "order_id": "O1", "dc_id": "D1", "pgi_date": "2026-07-14", "shipping_cost": 0, "is_default": True, "eligible": True},
-            {"candidate_id": "O1_D2_T1", "order_id": "O1", "dc_id": "D2", "pgi_date": "2026-07-14", "shipping_cost": 4, "is_default": False, "eligible": True},
-            {"candidate_id": "O2_D1_T1", "order_id": "O2", "dc_id": "D1", "pgi_date": "2026-07-14", "shipping_cost": 0, "is_default": True, "eligible": True},
-            {"candidate_id": "O2_D2_T1", "order_id": "O2", "dc_id": "D2", "pgi_date": "2026-07-14", "shipping_cost": 4, "is_default": False, "eligible": True},
+            {
+                "candidate_id": f"{order_id}_{dc_id}_T1",
+                "order_id": order_id,
+                "dc_id": dc_id,
+                "pgi_date": "2026-07-14",
+                "shipping_cost": 0 if dc_id == "D1" else 4,
+                "is_default": dc_id == "D1",
+                "eligible": True,
+            }
+            for order_id in ["O1", "O2"]
+            for dc_id in ["D1", "D2"]
         ]
     )
     capacities = pd.DataFrame(columns=["dc_id", "date", "resource", "capacity", "unit"])
@@ -382,6 +452,10 @@ def make_tiny_problem_data() -> ProblemData:
         "assumption_version": ASSUMPTION_VERSION,
         "currency": "synthetic_units",
         "quantity_unit": "cases",
+        "inventory_policy": "projected_atp",
+        "pick_capacity_mode": "auto",
+        "enforce_min_divert_improvement": True,
+        "min_divert_improvement_fraction": 0.05,
     }
     return normalize_problem_data(
         ProblemData(
@@ -394,4 +468,3 @@ def make_tiny_problem_data() -> ProblemData:
             metadata=metadata,
         )
     )
-
