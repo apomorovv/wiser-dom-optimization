@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import math
-import zipfile
+import re
+import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from functools import cache
@@ -17,25 +18,26 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from openpyxl import load_workbook
-from pypdf import PdfReader
 
 from .data import DataValidationError, normalize_problem_data
-from .penalties import order_penalty
+from .penalties import order_penalty, penalty_activation_fill_cases
 from .schemas import ASSUMPTION_VERSION, SCHEMA_VERSION, ProblemData
 
-POC_FILENAMES = {
-    "equations": "DOM Equations.docx",
-    "example": "Example.xlsx",
-    "order_output": "Output_order_level_data(3).csv",
-    "sku_output": "output_order_sku_level_data(3).csv",
+POC_INPUT_FILENAMES = {
     "inventory": "input_capacity_planning.csv",
-    "orders": "input_order data.csv",
+    "orders": "input_order_data.csv",
     "shipping": "input_shipping_cost_data.csv",
     "dock": "input_dock_capacity.csv",
     "throughput": "input_throughput_capacity.csv",
-    "challenge": "Nestle - WISER Quantum Challenge [SHARED](2).pdf",
 }
+
+POC_REFERENCE_FILENAMES = {
+    "order_output": "output_order_level_data.csv",
+    "sku_output": "output_order_sku_level_data.csv",
+}
+
+# Backward-compatible public name for callers that only need runtime inputs.
+POC_FILENAMES = POC_INPUT_FILENAMES
 
 
 class PocDataError(DataValidationError):
@@ -74,7 +76,81 @@ class PocConfig:
 
 def _paths(bundle_dir: str | Path) -> dict[str, Path]:
     root = Path(bundle_dir)
-    return {key: root / name for key, name in POC_FILENAMES.items()}
+    return {key: root / name for key, name in POC_INPUT_FILENAMES.items()}
+
+
+def _reference_paths(bundle_dir: str | Path) -> dict[str, Path]:
+    root = Path(bundle_dir)
+    return {key: root / name for key, name in POC_REFERENCE_FILENAMES.items()}
+
+
+def _normalized_upload_stem(path: Path) -> str:
+    stem = re.sub(r"\s*\(\d+\)$", "", path.stem.strip())
+    return re.sub(r"[^a-z0-9]+", "_", stem.lower()).strip("_")
+
+
+def prepare_poc_bundle(
+    source_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    include_reference_outputs: bool = True,
+) -> dict[str, Path]:
+    """Copy only useful CSVs to stable, parenthesis-free filenames.
+
+    Browser and macOS uploads often append ``(1)`` or preserve a space in
+    ``input_order data.csv``. The optimizer should not encode those accidental
+    names. PDF, DOCX, XLSX, ``__MACOSX``, AppleDouble, and ``.DS_Store`` files are
+    intentionally excluded because they are not runtime model inputs.
+    """
+
+    source = Path(source_dir)
+    destination = Path(output_dir)
+    if not source.is_dir():
+        raise PocDataError(f"Source bundle directory does not exist: {source}")
+    destination.mkdir(parents=True, exist_ok=True)
+
+    requested = dict(POC_INPUT_FILENAMES)
+    if include_reference_outputs:
+        requested.update(POC_REFERENCE_FILENAMES)
+    available = [
+        path
+        for path in source.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() == ".csv"
+        and not path.name.startswith("_")
+        and "__MACOSX" not in path.parts
+    ]
+    by_stem: dict[str, list[Path]] = {}
+    for path in available:
+        by_stem.setdefault(_normalized_upload_stem(path), []).append(path)
+
+    copied: dict[str, Path] = {}
+    for role, canonical_name in requested.items():
+        stem = _normalized_upload_stem(Path(canonical_name))
+        matches = by_stem.get(stem, [])
+        if not matches:
+            if role in POC_REFERENCE_FILENAMES:
+                continue
+            raise PocDataError(
+                f"Required input {canonical_name!r} was not found in {source}"
+            )
+        exact = [path for path in matches if path.name == canonical_name]
+        if len(matches) == 1:
+            chosen = matches[0]
+        else:
+            hashes = {
+                hashlib.sha256(path.read_bytes()).hexdigest(): path for path in matches
+            }
+            if len(hashes) != 1:
+                names = sorted(str(path.relative_to(source)) for path in matches)
+                raise PocDataError(
+                    f"Ambiguous uploads for {canonical_name!r}: {names}"
+                )
+            chosen = exact[0] if len(exact) == 1 else min(matches, key=str)
+        target = destination / canonical_name
+        shutil.copy2(chosen, target)
+        copied[role] = target
+    return copied
 
 
 def _read_csv(path: Path, *, dtype: dict[str, str] | None = None) -> pd.DataFrame:
@@ -87,10 +163,16 @@ def _read_csv(path: Path, *, dtype: dict[str, str] | None = None) -> pd.DataFram
     return frame
 
 
-def audit_poc_bundle(bundle_dir: str | Path) -> pd.DataFrame:
-    """Read every supplied artifact and fail immediately on the first bad file."""
+def audit_poc_bundle(
+    bundle_dir: str | Path,
+    *,
+    include_reference_outputs: bool = False,
+) -> pd.DataFrame:
+    """Parse the five runtime CSVs and optional recommendation outputs."""
 
     paths = _paths(bundle_dir)
+    if include_reference_outputs:
+        paths.update(_reference_paths(bundle_dir))
     rows: list[dict[str, object]] = []
     for key, path in paths.items():
         if not path.is_file() or path.stat().st_size == 0:
@@ -103,38 +185,12 @@ def audit_poc_bundle(bundle_dir: str | Path) -> pd.DataFrame:
             "readable": True,
         }
         try:
-            if suffix == ".csv":
-                frame = pd.read_csv(path, low_memory=False)
-                if frame.empty:
-                    raise ValueError("no data rows")
-                record.update(rows=len(frame), columns=len(frame.columns))
-            elif suffix == ".xlsx":
-                workbook = load_workbook(path, read_only=True, data_only=False)
-                if not workbook.sheetnames:
-                    raise ValueError("no worksheets")
-                record.update(
-                    rows=max(workbook[name].max_row for name in workbook.sheetnames),
-                    columns=max(
-                        workbook[name].max_column for name in workbook.sheetnames
-                    ),
-                )
-                workbook.close()
-            elif suffix == ".docx":
-                with zipfile.ZipFile(path) as archive:
-                    bad = archive.testzip()
-                    if bad is not None or "word/document.xml" not in archive.namelist():
-                        raise ValueError(f"invalid OOXML member: {bad}")
-                    xml = archive.read("word/document.xml")
-                record.update(rows=xml.count(b"<w:p"), columns=np.nan)
-            elif suffix == ".pdf":
-                reader = PdfReader(path)
-                if len(reader.pages) == 0:
-                    raise ValueError("no pages")
-                for page in reader.pages:
-                    page.extract_text()
-                record.update(rows=len(reader.pages), columns=np.nan)
-            else:
+            if suffix != ".csv":
                 raise ValueError(f"unsupported file type {suffix}")
+            frame = pd.read_csv(path, low_memory=False)
+            if frame.empty:
+                raise ValueError("no data rows")
+            record.update(rows=len(frame), columns=len(frame.columns))
         except Exception as error:
             raise PocDataError(f"Unreadable challenge file {path.name}: {error}") from error
         rows.append(record)
@@ -211,6 +267,12 @@ def _build_source_tables(bundle_dir: str | Path) -> dict[str, pd.DataFrame]:
         ),
         "dock": _read_csv(paths["dock"], dtype={"Plant": str}),
         "throughput": _read_csv(paths["throughput"], dtype={"Plant": str}),
+    }
+
+
+def _build_reference_tables(bundle_dir: str | Path) -> dict[str, pd.DataFrame]:
+    paths = _reference_paths(bundle_dir)
+    return {
         "order_output": _read_csv(
             paths["order_output"],
             dtype={"SalesDocument/GroupingIndicator": str},
@@ -936,22 +998,123 @@ def subset_problem(
 
 
 def select_shortage_subset(problem: ProblemData, count: int) -> ProblemData:
-    """Select high-shortage decision units deterministically for tractable studies."""
+    """Select exactly ``count`` high-shortage atomic decision units when available."""
 
     if count <= 0:
         raise ValueError("count must be positive")
     demand = problem.order_lines.groupby("order_id")["demand_cases"].sum()
     reference = problem.orders.set_index("order_id")["default_fillable_cases"]
-    shortage = (demand - reference).sort_values(ascending=False, kind="mergesort")
-    return subset_problem(problem, shortage.head(count).index.astype(str))
+    shortage = (demand - reference).clip(lower=0)
+    if bool(problem.metadata.get("enforce_assignment_group", False)):
+        order_group = problem.orders.set_index("order_id")["assignment_group"].astype(str)
+        group_shortage = (
+            shortage.rename("shortage")
+            .to_frame()
+            .assign(assignment_group=order_group)
+            .groupby("assignment_group")["shortage"]
+            .sum()
+            .sort_values(ascending=False, kind="mergesort")
+        )
+        selected_groups = set(group_shortage.head(count).index.astype(str))
+        selected_orders = problem.orders.loc[
+            problem.orders["assignment_group"].astype(str).isin(selected_groups),
+            "order_id",
+        ].astype(str)
+        return subset_problem(problem, selected_orders)
+    ranked = shortage.sort_values(ascending=False, kind="mergesort")
+    return subset_problem(problem, ranked.head(count).index.astype(str))
+
+
+def select_penalty_subset(problem: ProblemData, count: int) -> ProblemData:
+    """Select atomic units with the largest active worst-case penalty exposure.
+
+    A shortage-only subset can legitimately contain orders whose challenge penalty
+    threshold is zero. Such a subset makes a penalty-weight experiment vacuous. This
+    selector requires both a positive penalty and default fill below the activation
+    threshold, then ranks whole assignment groups by aggregate exposure.
+    """
+
+    if count <= 0:
+        raise ValueError("count must be positive")
+    orders = problem.orders.copy()
+    orders["order_id"] = orders["order_id"].astype(str)
+    order_lookup = orders.set_index("order_id")
+    rows: list[dict[str, object]] = []
+    for order_id, lines in problem.order_lines.groupby("order_id", sort=False):
+        order_key = str(order_id)
+        quantities = lines.copy()
+        quantities["unfulfilled_cases"] = quantities["demand_cases"]
+        exposure = order_penalty(problem, order_key, quantities)
+        required_fill = penalty_activation_fill_cases(problem, order_key)
+        default_fill = int(order_lookup.loc[order_key, "default_fillable_cases"])
+        activation_gap = max(0, required_fill - default_fill)
+        if exposure <= 0 or activation_gap <= 0:
+            continue
+        rows.append(
+            {
+                "order_id": order_key,
+                "assignment_group": str(
+                    order_lookup.loc[order_key].get("assignment_group", order_key)
+                ),
+                "penalty_exposure": float(exposure),
+                "activation_gap": int(activation_gap),
+            }
+        )
+    ranked = pd.DataFrame(rows)
+    if ranked.empty:
+        raise PocDataError("No penalty-active orders are available for sensitivity testing")
+
+    if bool(problem.metadata.get("enforce_assignment_group", False)):
+        units = (
+            ranked.groupby("assignment_group", as_index=False)
+            .agg(
+                penalty_exposure=("penalty_exposure", "sum"),
+                activation_gap=("activation_gap", "sum"),
+            )
+            .sort_values(
+                ["penalty_exposure", "activation_gap", "assignment_group"],
+                ascending=[False, False, True],
+                kind="mergesort",
+            )
+        )
+        if len(units) < count:
+            raise PocDataError(
+                f"Requested {count} penalty-active groups, but only {len(units)} exist"
+            )
+        selected_units = set(units.head(count)["assignment_group"].astype(str))
+        selected_orders = orders.loc[
+            orders["assignment_group"].astype(str).isin(selected_units), "order_id"
+        ]
+    else:
+        units = ranked.sort_values(
+            ["penalty_exposure", "activation_gap", "order_id"],
+            ascending=[False, False, True],
+            kind="mergesort",
+        )
+        if len(units) < count:
+            raise PocDataError(
+                f"Requested {count} penalty-active orders, but only {len(units)} exist"
+            )
+        selected_orders = units.head(count)["order_id"].astype(str)
+
+    subset = subset_problem(
+        problem,
+        selected_orders,
+        recompute_default_reference="estimated_fill_cases" in problem.candidates,
+    )
+    return replace(
+        subset,
+        metadata={**subset.metadata, "selection_basis": "active_penalty_exposure"},
+    )
 
 
 def audit_poc_outputs(bundle_dir: str | Path, problem: ProblemData | None = None) -> dict[str, object]:
     """Return privacy-safe reconciliation metrics for supplied recommendation outputs."""
 
     source = _build_source_tables(bundle_dir)
-    order_output = source["order_output"]
-    sku_output = source["sku_output"]
+    references = _build_reference_tables(bundle_dir)
+    order_output = references["order_output"]
+    sku_output = references["sku_output"]
     order_ids = order_output["SalesDocument/GroupingIndicator"].map(_id)
     sku_order_ids = sku_output["SalesDocument/GroupingIndicator"].map(_id)
     key_match = set(order_ids) == set(sku_order_ids)

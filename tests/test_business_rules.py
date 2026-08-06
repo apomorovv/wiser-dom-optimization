@@ -1,11 +1,13 @@
 import pandas as pd
 import pytest
 
+from domopt.baselines import solve_default_baseline, solve_greedy_baseline
 from domopt.classical import ClassicalSolverError, solve_classical
 from domopt.data import make_tiny_problem_data, normalize_problem_data
 from domopt.resources import solution_capacity_usage
 from domopt.rules import minimum_divert_fulfillment
 from domopt.schemas import ProblemData
+from domopt.validation import validate_solution
 
 
 def test_projected_atp_may_decrease_over_protection_horizon() -> None:
@@ -90,6 +92,49 @@ def test_exact_model_enforces_assignment_group_cohesion() -> None:
             grouped,
             fixed_assignments={"O1": "O1_D1_T1", "O2": "O2_D2_T1"},
         )
+
+
+@pytest.mark.parametrize("solver", [solve_default_baseline, solve_greedy_baseline])
+def test_baselines_make_assignment_groups_atomic(solver) -> None:
+    problem = make_tiny_problem_data()
+    orders = problem.orders.copy()
+    orders["assignment_group"] = "LOAD-1"
+    candidates = problem.candidates.copy()
+    candidates["group_option_id"] = (
+        candidates["dc_id"].astype(str)
+        + "::"
+        + pd.to_datetime(candidates["pgi_date"]).dt.strftime("%Y-%m-%d")
+    )
+    grouped = normalize_problem_data(
+        ProblemData(
+            orders=orders,
+            order_lines=problem.order_lines,
+            inventory=problem.inventory,
+            candidates=candidates,
+            capacities=problem.capacities,
+            calendar=problem.calendar,
+            metadata={
+                **problem.metadata,
+                "enforce_assignment_group": True,
+                "enforce_min_divert_improvement": False,
+            },
+        )
+    )
+
+    solution = solver(grouped)
+    signatures = solution.assignments.assign(
+        outcome=lambda frame: frame.apply(
+            lambda row: (
+                bool(row["is_unassigned"]),
+                str(row["selected_dc"]),
+                str(row["selected_pgi_date"]),
+            ),
+            axis=1,
+        )
+    )["outcome"]
+
+    assert validate_solution(grouped, solution).is_feasible
+    assert signatures.nunique() == 1
 
 
 def test_exact_pallet_and_loose_case_capacity_accounting() -> None:

@@ -101,43 +101,44 @@ already committed outside the neighborhood.
 
 ### Step 5: assignment-plan QUBO
 
-For active order $o$, the QUBO contains one binary variable $y_{ok}$ for each
-previewed candidate plan $k$, plus an explicit unassigned plan. Orders in the same
-assignment group share the same option during sample repair and recourse. A plan
-contains a candidate DC/date, preview fulfillment, isolated business value
-$w_{ok}$, and a resource-usage signature.
+For active assignment group $g$, the QUBO contains one binary variable $y_{gk}$ for
+each common group option $k$, plus an explicit unassigned plan. A group option maps
+every member order to the corresponding candidate at the same DC/date. It contains
+the aggregate preview fulfillment, isolated business value $w_{gk}$, and resource
+usage of all members. Group cohesion is therefore structural in the QUBO instead of
+being imposed by majority-vote repair after sampling.
 
 Exactly one outcome per order is encouraged by
 
 $$
 P_{\mathrm{one}}
-\left(1-\sum_{k\in\mathcal K_o}y_{ok}\right)^2.
+\left(1-\sum_{k\in\mathcal K_g}y_{gk}\right)^2.
 $$
 
-The plan value is encoded as $-w_{ok}y_{ok}$, because the QUBO is minimized.
+The plan value is encoded as $-w_{gk}y_{gk}$, because the QUBO is minimized.
 The penalty $P_{\mathrm{one}}$ is calibrated above the largest plan benefit plus
 incident resource penalties.
 
-For resource bucket $r$, let $a_{okr}$ be plan usage and $R_r$ its residual
+For resource bucket $r$, let $a_{gkr}$ be plan usage and $R_r$ its residual
 limit. A quadratic surrogate adds a loss-weighted penalty when two plans have a
 direct overload or contribute to higher-order contention. Higher-order pressure is
 
 $$
 \rho_r=
 \max\left(0,
-\frac{\sum_o\max_{k\in\mathcal K_o}a_{okr}-R_r}
-{\sum_o\max_{k\in\mathcal K_o}a_{okr}}
+\frac{\sum_g\max_{k\in\mathcal K_g}a_{gkr}-R_r}
+{\sum_g\max_{k\in\mathcal K_g}a_{gkr}}
 \right).
 $$
 
-For plans $(o,k)$ and $(o',k')$, $o\ne o'$, the surrogate resource amount is
+For plans $(g,k)$ and $(g',k')$, $g\ne g'$, the surrogate resource amount is
 
 $$
-h_{ok,o'k',r}
+h_{gk,g'k',r}
 =\max\left\{
 0,
-a_{okr}+a_{o'k'r}-R_r,
-\rho_r\min(a_{okr},a_{o'k'r})
+a_{gkr}+a_{g'k'r}-R_r,
+\rho_r\min(a_{gkr},a_{g'k'r})
 \right\}.
 $$
 
@@ -146,10 +147,10 @@ quadratic coefficient. The complete local energy is
 
 $$
 E(y)=
--\sum_{o,k}\widetilde w_{ok}y_{ok}
-+P_{\mathrm{one}}\sum_o
-\left(1-\sum_k y_{ok}\right)^2
-+\sum_{(ok,o'k')}P_{ok,o'k'}y_{ok}y_{o'k'}.
+-\sum_{g,k}\widetilde w_{gk}y_{gk}
++P_{\mathrm{one}}\sum_g
+\left(1-\sum_k y_{gk}\right)^2
++\sum_{(gk,g'k')}P_{gk,g'k'}y_{gk}y_{g'k'}.
 $$
 
 This is a ranking surrogate, not a proof of capacity feasibility. Aggregate resource
@@ -175,9 +176,9 @@ constraint information. Remote calls therefore require `allow_remote=True`.
 ### Step 7: repair and exact recourse
 
 Raw samples may violate one-hot structure. Deterministic repair keeps the selected
-highest-value plan or, if none is selected, chooses the highest-value plan. It then
-projects all members of an assignment group onto one common option. The unperturbed
-QUBO ranks unique repaired assignments.
+highest-value group plan or, if none is selected, chooses the highest-value plan.
+Because every variable already represents a whole group, repair cannot split a load.
+The unperturbed QUBO ranks unique repaired assignments.
 
 For each of the best `top_k_recourse` assignments, the local MILP fixes assignment
 variables and reoptimizes all fulfillment quantities under residual inventory and
@@ -209,11 +210,11 @@ all preprocessing, queue, sampling, repair, and recourse time.
 
 ## 5. Scaling
 
-Let $B$ be active orders and $K_o$ candidate plans for order $o$. The local
+Let $B$ be active assignment groups and $K_g$ common plans for group $g$. The local
 logical-variable count is
 
 $$
-n_{\mathrm{QUBO}}=\sum_{o\in B}(|K_o|+1),
+n_{\mathrm{QUBO}}=\sum_{g\in B}(|K_g|+1),
 $$
 
 where one is the unassigned plan and $|K_o|$ is capped before QUBO construction.
@@ -245,7 +246,7 @@ usable problem size on a QPU.
 QUBO coefficients. This is a coefficient-sensitivity test, not a complete physical
 noise model. Samples are still ranked against the original QUBO and evaluated by
 exact business recourse. Report performance over multiple seeds and noise levels.
-The full profile uses four seeds and three relative-noise levels; do not infer
+The full profile uses four seeds and four relative-noise levels; do not infer
 hardware robustness from a local coefficient perturbation.
 
 ## 7. Limitations

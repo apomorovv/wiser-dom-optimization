@@ -105,7 +105,7 @@ def _sample_dwave(
     num_samples: int,
     allow_remote: bool,
     time_limit_seconds: float | None,
-) -> list[np.ndarray]:
+) -> tuple[list[np.ndarray], dict[str, object]]:
     if not allow_remote:
         raise QuantumSolverError(
             "Remote QPU access is disabled. Set allow_remote=True only after the "
@@ -156,7 +156,27 @@ def _sample_dwave(
             break
     if not samples:
         raise QuantumSolverError("D-Wave returned no samples")
-    return samples
+    response_info = dict(getattr(response, "info", {}) or {})
+    timing = {
+        str(key): float(value)
+        for key, value in dict(response_info.get("timing", {}) or {}).items()
+        if isinstance(value, (int, float, np.integer, np.floating))
+    }
+    record_names = set(getattr(response.record.dtype, "names", ()) or ())
+    chain_break = None
+    if "chain_break_fraction" in record_names:
+        chain_break = float(np.mean(response.record.chain_break_fraction))
+    child = getattr(sampler, "child", sampler)
+    solver = getattr(child, "solver", None)
+    metadata: dict[str, object] = {
+        "backend": method,
+        "problem_id": response_info.get("problem_id"),
+        "solver_id": getattr(solver, "id", None),
+        "timing": timing,
+        "mean_chain_break_fraction": chain_break,
+        "returned_samples": len(samples),
+    }
+    return samples, metadata
 
 
 def sample_qubo(
@@ -185,6 +205,7 @@ def sample_qubo(
     """
 
     n = len(model.variable_names)
+    sampler_info: dict[str, object] = {"backend": method, "remote": False}
     if method == "exact":
         if n > max_exact_variables:
             raise QuantumSolverError(
@@ -208,13 +229,14 @@ def sample_qubo(
             initial_sample=initial_sample,
         )
     elif method in {"dwave-qpu", "dwave-hybrid"}:
-        bitstrings = _sample_dwave(
+        bitstrings, sampler_info = _sample_dwave(
             model,
             method=method,
             num_samples=num_samples,
             allow_remote=allow_remote,
             time_limit_seconds=time_limit_seconds,
         )
+        sampler_info["remote"] = True
     else:
         raise QuantumSolverError(f"Unknown QUBO sampling method {method!r}")
 
@@ -232,4 +254,8 @@ def sample_qubo(
             }
         )
     frame = pd.DataFrame(rows)
-    return frame.sort_values(["energy", "bitstring"], kind="mergesort").reset_index(drop=True)
+    frame = frame.sort_values(["energy", "bitstring"], kind="mergesort").reset_index(
+        drop=True
+    )
+    frame.attrs["sampler_info"] = sampler_info
+    return frame

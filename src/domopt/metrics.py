@@ -61,6 +61,12 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
         "sampler_backend": solution.metadata.get("sampler"),
         "sampler_calls": solution.metadata.get("sampler_calls"),
         "qpu_calls": solution.metadata.get("qpu_calls"),
+        "qpu_access_time_microseconds": solution.metadata.get(
+            "qpu_access_time_microseconds"
+        ),
+        "mean_chain_break_fraction": solution.metadata.get(
+            "mean_chain_break_fraction"
+        ),
         "accepted_moves": solution.metadata.get("accepted_moves"),
         "raw_one_hot_rate": solution.metadata.get("raw_one_hot_rate"),
         "hybrid_iterations": solution.metadata.get("iterations"),
@@ -69,6 +75,11 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
             "maximum_candidates_per_order"
         ),
         "recourse_solves": solution.metadata.get("recourse_solves"),
+        "initialization_seconds": solution.metadata.get("initialization_seconds"),
+        "qubo_build_seconds": solution.metadata.get("qubo_build_seconds"),
+        "sampling_seconds": solution.metadata.get("sampling_seconds"),
+        "recourse_seconds": solution.metadata.get("recourse_seconds"),
+        "other_seconds": solution.metadata.get("other_seconds"),
         "remote_enabled": solution.metadata.get("remote_enabled"),
         "qubo_noise_relative_sigma": solution.metadata.get(
             "qubo_noise_relative_sigma"

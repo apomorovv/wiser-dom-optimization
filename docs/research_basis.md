@@ -64,6 +64,31 @@ and [hybrid reference](https://docs.dwavequantum.com/en/latest/ocean/api_ref_hyb
 IBM's official QAOA tutorial explains the variational gate-model workflow retained
 as a future comparison path. [IBM QAOA tutorial](https://quantum.cloud.ibm.com/docs/en/tutorials/quantum-approximate-optimization-algorithm).
 
+### GPU optimization
+
+NVIDIA documents cuOpt as a GPU-accelerated optimization library with a beta MIP
+solver. Its current emphasis is finding high-quality feasible solutions quickly;
+proving optimality remains under active development. That makes cuOpt a useful
+future large-instance incumbent generator, but not yet a drop-in replacement for
+the HiGHS reference when a bound or proof matters.
+[NVIDIA cuOpt MIP documentation](https://docs.nvidia.com/cuopt/user-guide/latest/cuopt-python/mip/index.html).
+
+The present local QUBOs are deliberately small, so transferring them to a GPU is
+unlikely to dominate end-to-end time. The notebook therefore measures a synthetic
+CPU/GPU batch-scoring crossover and reports solver stage timing before recommending
+any backend change. Candidate preprocessing, group-level greedy construction, and
+exact recourse should be optimized first.
+
+### Risk objectives
+
+Inventory protection and calibrated shortage penalties already represent known
+business exposure. Adding an arbitrary risk coefficient would double-count that
+exposure and make the objective harder to defend. The implemented inventory-shock
+frontier is the appropriate first robustness test. A scenario-based expected-value,
+worst-case, or CVaR objective becomes justified only when forecast scenarios,
+probabilities, and business risk tolerance are available and held out for
+validation.
+
 ## Claims policy
 
 A result may be described as *quantum-assisted* only when a QPU or quantum service

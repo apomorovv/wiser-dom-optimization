@@ -4,7 +4,8 @@ This directory separates restricted source data, reproducible transformations, c
 
 ## Directory policy
 
-- `data/raw/`: original challenge-approved files. Restricted; do not commit contents.
+- `data/raw/nestle_challenge/`: cleaned challenge CSV bundle. Restricted; do not
+  commit contents.
 - `data/interim/`: intermediate joins, filters, diagnostics, and extracts. Normally restricted.
 - `data/processed/`: canonical normalized solver tables. Normally restricted.
 - `data/synthetic/`: independently generated public-safe instances.
@@ -89,3 +90,17 @@ Every generated dataset should include:
 ```
 
 Do not store confidential source paths or source-file contents in public metadata.
+
+## Prepare the restricted runtime bundle
+
+```bash
+python scripts/prepare_challenge_bundle.py \
+  --source-dir /approved/path/to/downloads \
+  --output-dir data/raw/nestle_challenge
+```
+
+The five required files are `input_order_data.csv`,
+`input_capacity_planning.csv`, `input_shipping_cost_data.csv`,
+`input_dock_capacity.csv`, and `input_throughput_capacity.csv`. Two normalized
+recommendation outputs may also be retained for auditing. Documentation files and
+numbered upload copies are not runtime inputs.

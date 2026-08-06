@@ -17,9 +17,10 @@ import numpy as np
 import pandas as pd
 
 from .baselines import (
+    _assignment_units,
     _CapacityState,
+    _feasible_decisions,
     _InventoryState,
-    _preview_candidate,
     solve_default_baseline,
     solve_greedy_baseline,
 )
@@ -295,55 +296,98 @@ def build_neighborhood_qubo(
     eligible = problem.candidates.loc[
         problem.candidates["eligible"].astype(bool)
     ].sort_values(["order_id", "pgi_date", "candidate_id"], kind="mergesort")
+    units = _assignment_units(problem)
+    incumbent_lookup = incumbent.assignments.set_index("order_id")
+    candidate_options = problem.candidates.set_index("candidate_id").get(
+        "group_option_id"
+    )
+    incumbent_targets: dict[str, str] = {}
 
-    for order_id in sorted(problem.orders["order_id"].astype(str)):
+    for unit_id, members in sorted(units.items()):
+        unassigned_id = f"unassigned::{unit_id}"
         records.append(
             {
-                "plan_id": f"unassigned::{order_id}",
-                "order_id": order_id,
+                "plan_id": unassigned_id,
+                "order_id": unit_id,
                 "candidate_id": None,
-                "value": _unassigned_value(problem, order_id),
+                "value": sum(
+                    _unassigned_value(problem, order_id) for order_id in members
+                ),
                 "usage": {},
                 "loss": {},
+                "fixed_assignments": {order_id: None for order_id in members},
+                "is_unassigned": True,
             }
         )
-        for _, candidate in eligible.loc[eligible["order_id"] == order_id].iterrows():
-            plan = _preview_candidate(problem, candidate, inventory, capacities)
-            if plan is None:
-                continue
-            usage, limits, loss = _plan_usage(problem, plan)
-            resource_limits.update(limits)
+
+        member_incumbent = incumbent_lookup.loc[list(members)]
+        if member_incumbent["is_unassigned"].astype(bool).all():
+            incumbent_targets[unit_id] = unassigned_id
+        else:
+            chosen_options: set[str] = set()
+            for row in member_incumbent.itertuples():
+                if bool(row.is_unassigned):
+                    continue
+                candidate_id = str(row.candidate_id)
+                option_id = (
+                    str(candidate_options.loc[candidate_id])
+                    if candidate_options is not None
+                    else candidate_id
+                )
+                chosen_options.add(option_id)
+            if len(chosen_options) != 1:
+                raise ValueError(f"Incumbent splits assignment unit {unit_id!r}")
+            incumbent_targets[unit_id] = (
+                f"option::{unit_id}::{next(iter(chosen_options))}"
+            )
+
+        decisions = _feasible_decisions(
+            problem,
+            unit_id,
+            members,
+            eligible,
+            inventory,
+            capacities,
+        )
+        for decision in decisions:
+            usage: defaultdict[tuple[Any, ...], float] = defaultdict(float)
+            loss: dict[tuple[Any, ...], float] = {}
+            fixed_assignments: dict[str, str | None] = {}
+            for member_plan in decision.member_plans:
+                member_usage, limits, member_loss = _plan_usage(
+                    problem, member_plan
+                )
+                resource_limits.update(limits)
+                for key, amount in member_usage.items():
+                    usage[key] += float(amount)
+                for key, amount in member_loss.items():
+                    loss[key] = min(float(amount), loss.get(key, float("inf")))
+                fixed_assignments[member_plan.order_id] = member_plan.candidate_id
             records.append(
                 {
-                    "plan_id": str(plan.candidate_id),
-                    "order_id": order_id,
-                    "candidate_id": str(plan.candidate_id),
-                    "value": float(plan.score),
-                    "usage": usage,
+                    "plan_id": f"option::{unit_id}::{decision.option_id}",
+                    "order_id": unit_id,
+                    "candidate_id": decision.option_id,
+                    "value": float(decision.score),
+                    "usage": dict(usage),
                     "loss": loss,
+                    "fixed_assignments": fixed_assignments,
+                    "is_unassigned": False,
                 }
             )
 
     all_plans = pd.DataFrame(records)
-    incumbent_lookup = incumbent.assignments.set_index("order_id")
     retained_groups: list[pd.DataFrame] = []
-    for order_id, group in all_plans.groupby("order_id", sort=False):
-        unassigned = group.loc[group["candidate_id"].isna()]
-        candidates_for_order = group.loc[group["candidate_id"].notna()].sort_values(
+    for unit_id, group in all_plans.groupby("order_id", sort=False):
+        unassigned = group.loc[group["is_unassigned"].astype(bool)]
+        candidates_for_order = group.loc[~group["is_unassigned"].astype(bool)].sort_values(
             ["value", "plan_id"],
             ascending=[False, True],
             kind="mergesort",
         )
-        incumbent_row = incumbent_lookup.loc[str(order_id)]
-        incumbent_id = (
-            None
-            if bool(incumbent_row["is_unassigned"])
-            else str(incumbent_row["candidate_id"])
-        )
+        incumbent_id = incumbent_targets[str(unit_id)]
         keep_ids: list[str] = []
-        if incumbent_id is not None and incumbent_id in set(
-            candidates_for_order["plan_id"].astype(str)
-        ):
+        if incumbent_id in set(candidates_for_order["plan_id"].astype(str)):
             keep_ids.append(incumbent_id)
         for plan_id in candidates_for_order["plan_id"].astype(str):
             if plan_id not in keep_ids:
@@ -421,13 +465,8 @@ def build_neighborhood_qubo(
     )
 
     warm_start = {name: 0 for name in model.variable_names}
-    for order_id, group in plans.groupby("order_id", sort=False):
-        row = incumbent_lookup.loc[str(order_id)]
-        target = (
-            f"unassigned::{order_id}"
-            if bool(row["is_unassigned"])
-            else str(row["candidate_id"])
-        )
+    for unit_id, group in plans.groupby("order_id", sort=False):
+        target = incumbent_targets[str(unit_id)]
         available = set(group["plan_id"].astype(str))
         if target not in available:
             target = str(
@@ -501,26 +540,35 @@ def _select_neighborhood(
         .sum()
         .to_dict()
     )
-    candidate_count = (
-        problem.candidates.loc[problem.candidates["eligible"].astype(bool)]
-        .groupby("order_id")["candidate_id"]
-        .nunique()
-        .to_dict()
-    )
+    eligible_candidates = problem.candidates.loc[
+        problem.candidates["eligible"].astype(bool)
+    ].copy()
+    if bool(problem.metadata.get("enforce_assignment_group", False)):
+        eligible_candidates["decision_unit"] = eligible_candidates["order_id"].map(
+            unit_for_order
+        )
+        candidate_count = (
+            eligible_candidates.groupby("decision_unit")["group_option_id"]
+            .nunique()
+            .to_dict()
+        )
+    else:
+        candidate_count = (
+            eligible_candidates.groupby("order_id")["candidate_id"]
+            .nunique()
+            .to_dict()
+        )
     unit_unfilled = {
         unit: sum(float(unfilled.get(order_id, 0.0)) for order_id in members)
         for unit, members in members_by_unit.items()
     }
     unit_variables = {
-        unit: sum(
-            min(
-                int(candidate_count.get(order_id, 0)),
-                config.max_candidates_per_order,
-            )
-            + 1
-            for order_id in members
+        unit: min(
+            int(candidate_count.get(unit, 0)),
+            config.max_candidates_per_order,
         )
-        for unit, members in members_by_unit.items()
+        + 1
+        for unit in members_by_unit
     }
     ranked = sorted(
         members_by_unit,
@@ -625,48 +673,19 @@ def _sample_to_fixed_assignments(
     plans: pd.DataFrame,
     problem: ProblemData,
 ) -> dict[str, str | None]:
+    del problem  # The selected atomic plans already contain every member mapping.
     selected = {plan_id for plan_id, value in repaired.items() if int(value) == 1}
     fixed: dict[str, str | None] = {}
     for row in plans.itertuples(index=False):
         if str(row.plan_id) in selected:
-            fixed[str(row.order_id)] = (
-                None if pd.isna(row.candidate_id) else str(row.candidate_id)
+            fixed.update(
+                {
+                    str(order_id): (
+                        None if candidate_id is None else str(candidate_id)
+                    )
+                    for order_id, candidate_id in row.fixed_assignments.items()
+                }
             )
-    if not bool(problem.metadata.get("enforce_assignment_group", False)):
-        return fixed
-
-    order_group = problem.orders.set_index("order_id")["assignment_group"].astype(str)
-    candidate_options = problem.candidates.set_index("candidate_id")[
-        "group_option_id"
-    ].astype(str)
-    for _, members in order_group.groupby(order_group, sort=False):
-        member_ids = [str(order_id) for order_id in members.index if str(order_id) in fixed]
-        if len(member_ids) <= 1:
-            continue
-        selected_options = []
-        for order_id in member_ids:
-            candidate_id = fixed[order_id]
-            selected_options.append(
-                "__UNASSIGNED__"
-                if candidate_id is None
-                else str(candidate_options.loc[candidate_id])
-            )
-        chosen = min(
-            set(selected_options),
-            key=lambda option: (-selected_options.count(option), option),
-        )
-        for order_id in member_ids:
-            if chosen == "__UNASSIGNED__":
-                fixed[order_id] = None
-                continue
-            matches = problem.candidates.loc[
-                (problem.candidates["order_id"].astype(str) == order_id)
-                & (problem.candidates["group_option_id"].astype(str) == chosen),
-                "candidate_id",
-            ]
-            if len(matches) != 1:
-                return {}
-            fixed[order_id] = str(matches.iloc[0])
     return fixed
 
 
@@ -685,6 +704,7 @@ def solve_hybrid(
         if settings.initial_method == "default"
         else solve_greedy_baseline(problem)
     )
+    initialization_seconds = perf_counter() - start
     initial_value = evaluate_solution(problem, incumbent).objective_value
     incumbent_value = initial_value
     if not validate_solution(problem, incumbent).is_feasible:
@@ -697,8 +717,13 @@ def solve_hybrid(
     total_raw_samples = 0
     raw_one_hot_samples = 0
     maximum_qubo_variables = 0
+    qubo_build_seconds = 0.0
+    sampling_seconds = 0.0
+    recourse_seconds = 0.0
+    hardware_runs: list[dict[str, object]] = []
 
     for iteration in range(settings.iterations):
+        build_start = perf_counter()
         active_orders = _select_neighborhood(
             problem,
             incumbent,
@@ -725,6 +750,8 @@ def solve_hybrid(
             relative_sigma=settings.qubo_noise_relative_sigma,
             seed=settings.seed + iteration,
         )
+        qubo_build_seconds += perf_counter() - build_start
+        sampling_start = perf_counter()
         samples = sample_qubo(
             sampled_model,
             method=settings.sampler,
@@ -735,6 +762,10 @@ def solve_hybrid(
             allow_remote=settings.allow_remote,
             time_limit_seconds=settings.remote_time_limit_seconds,
         )
+        sampling_seconds += perf_counter() - sampling_start
+        sampler_info = samples.attrs.get("sampler_info")
+        if isinstance(sampler_info, dict) and sampler_info.get("remote"):
+            hardware_runs.append(dict(sampler_info))
         sampler_calls += 1
         total_raw_samples += len(samples)
 
@@ -764,6 +795,7 @@ def solve_hybrid(
         best_iteration = incumbent
         best_iteration_value = incumbent_value
         attempted = 0
+        recourse_start = perf_counter()
         for _, _, repaired in candidates[: settings.top_k_recourse]:
             fixed = _sample_to_fixed_assignments(repaired, plans, local_problem)
             if set(fixed) != active_orders:
@@ -792,6 +824,7 @@ def solve_hybrid(
             if value > best_iteration_value + 1e-9:
                 best_iteration = merged
                 best_iteration_value = value
+        recourse_seconds += perf_counter() - recourse_start
 
         improved = best_iteration_value > incumbent_value + 1e-9
         if improved:
@@ -833,9 +866,42 @@ def solve_hybrid(
             "qpu_calls": (
                 sampler_calls if settings.sampler in {"dwave-qpu", "dwave-hybrid"} else 0
             ),
+            "qpu_access_time_microseconds": sum(
+                float(run.get("timing", {}).get("qpu_access_time", 0.0))
+                for run in hardware_runs
+                if isinstance(run.get("timing"), dict)
+            ),
+            "mean_chain_break_fraction": (
+                float(
+                    np.mean(
+                        [
+                            float(run["mean_chain_break_fraction"])
+                            for run in hardware_runs
+                            if run.get("mean_chain_break_fraction") is not None
+                        ]
+                    )
+                )
+                if any(
+                    run.get("mean_chain_break_fraction") is not None
+                    for run in hardware_runs
+                )
+                else None
+            ),
             "recourse_solves": recourse_solves,
             "maximum_qubo_variables": maximum_qubo_variables,
             "maximum_candidates_per_order": settings.max_candidates_per_order,
+            "initialization_seconds": initialization_seconds,
+            "qubo_build_seconds": qubo_build_seconds,
+            "sampling_seconds": sampling_seconds,
+            "recourse_seconds": recourse_seconds,
+            "other_seconds": max(
+                0.0,
+                runtime
+                - initialization_seconds
+                - qubo_build_seconds
+                - sampling_seconds
+                - recourse_seconds,
+            ),
             "raw_one_hot_rate": (
                 raw_one_hot_samples / total_raw_samples if total_raw_samples else 0.0
             ),
@@ -843,6 +909,7 @@ def solve_hybrid(
             "qubo_noise_relative_sigma": settings.qubo_noise_relative_sigma,
             "batch_strategy": settings.batch_strategy,
             "history": history,
+            "hardware_runs": hardware_runs,
             "claim": "No quantum advantage is inferred from this run.",
         },
     )

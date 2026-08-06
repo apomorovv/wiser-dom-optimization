@@ -62,7 +62,11 @@ Let $F_o^{\mathrm{def}}$ be the default candidate's protected-ATP fill preview.
 The minimum non-default fill is
 
 $$
-L_o^{\mathrm{div}}=\min\Bigl\{Q_o, F_o^{\mathrm{def}}+ \max\left(\bigl\lceil\delta_o \cdot Q_o\bigr\rceil,B_o\right) \Bigr\}
+L_o^{\mathrm{div}}=
+\min\Bigl\{Q_o,
+F_o^{\mathrm{def}}+
+\max\left(\bigl\lceil\delta_o \cdot Q_o\bigr\rceil,B_o\right)
+\Bigr\},
 $$
 
 where the POC uses $\delta_o=0.05$ and $B_o=100$ cases. Thus diversion must
@@ -263,4 +267,3 @@ independent validator and objective evaluator pass.
 - the complete business objective.
 
 Only validator-passed solutions enter comparisons or the planner copilot.
-

@@ -272,29 +272,61 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
     usage = pd.DataFrame(positive_usage)
     inventory = problem.inventory.copy()
     if not usage.empty:
-        for row in usage.itertuples(index=False):
-            compatible = inventory[
-                (inventory["dc_id"] == row.dc_id)
-                & (inventory["sku_id"] == row.sku_id)
-                & (inventory["date"] >= row.date)
-            ]
-            if compatible.empty:
+        usage["date"] = pd.to_datetime(usage["date"])
+        inventory["date"] = pd.to_datetime(inventory["date"])
+        usage_groups = {
+            (str(dc_id), str(sku_id)): group
+            for (dc_id, sku_id), group in usage.groupby(
+                ["dc_id", "sku_id"], sort=False
+            )
+        }
+        inventory_groups = {
+            (str(dc_id), str(sku_id)): group.sort_values("date")
+            for (dc_id, sku_id), group in inventory.groupby(
+                ["dc_id", "sku_id"], sort=False
+            )
+        }
+
+        for key, group in usage_groups.items():
+            checkpoints = inventory_groups.get(key)
+            if checkpoints is None:
+                for date in group["date"]:
+                    inventory_violations.append(
+                        "no cumulative inventory checkpoint covers "
+                        f"dc={key[0]}, sku={key[1]}, date={pd.Timestamp(date).date()}"
+                    )
+                continue
+            last_checkpoint = pd.Timestamp(checkpoints["date"].max())
+            for date in group.loc[group["date"] > last_checkpoint, "date"]:
                 inventory_violations.append(
-                    f"no cumulative inventory checkpoint covers dc={row.dc_id}, "
-                    f"sku={row.sku_id}, date={row.date.date()}"
+                    "no cumulative inventory checkpoint covers "
+                    f"dc={key[0]}, sku={key[1]}, date={pd.Timestamp(date).date()}"
                 )
 
-        for inv in inventory.itertuples(index=False):
-            consumed = usage[
-                (usage["dc_id"] == inv.dc_id)
-                & (usage["sku_id"] == inv.sku_id)
-                & (usage["date"] <= inv.date)
-            ]["fulfilled_cases"].sum()
-            if consumed > float(inv.cumulative_available_cases) + _TOL:
+        # A shipment on date t consumes every cumulative checkpoint at t or later.
+        # Grouping and searchsorted replace the previous inventory-row-by-row scans.
+        for key, checkpoints in inventory_groups.items():
+            group = usage_groups.get(key)
+            if group is None:
+                continue
+            daily = (
+                group.groupby("date", as_index=False)["fulfilled_cases"]
+                .sum()
+                .sort_values("date")
+            )
+            usage_dates = daily["date"].to_numpy(dtype="datetime64[ns]")
+            cumulative = daily["fulfilled_cases"].to_numpy(dtype=float).cumsum()
+            checkpoint_dates = checkpoints["date"].to_numpy(dtype="datetime64[ns]")
+            positions = np.searchsorted(usage_dates, checkpoint_dates, side="right") - 1
+            consumed = np.where(positions >= 0, cumulative[np.maximum(positions, 0)], 0.0)
+            available = checkpoints["cumulative_available_cases"].to_numpy(dtype=float)
+            exceeded = np.flatnonzero(consumed > available + _TOL)
+            for index in exceeded:
+                row = checkpoints.iloc[int(index)]
                 inventory_violations.append(
-                    f"inventory exceeded at dc={inv.dc_id}, sku={inv.sku_id}, "
-                    f"date={pd.Timestamp(inv.date).date()}: used={consumed}, "
-                    f"available={inv.cumulative_available_cases}"
+                    f"inventory exceeded at dc={key[0]}, sku={key[1]}, "
+                    f"date={pd.Timestamp(row['date']).date()}: used={consumed[index]}, "
+                    f"available={row['cumulative_available_cases']}"
                 )
 
     fulfilled_by_order = fulfillment.groupby("order_id")["fulfilled_cases"].sum()

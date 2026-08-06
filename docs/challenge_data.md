@@ -2,31 +2,31 @@
 
 ## Readability gate
 
-All ten files in the supplied proof-of-concept bundle are readable. The adapter calls
-`audit_poc_bundle` before parsing business data and raises `PocDataError` immediately
-if any required artifact is missing, empty, malformed, or unreadable.
-
-The gate performs the appropriate structural check for each format:
-
-- CSV: parse the header and at least one data row;
-- XLSX: open the OOXML workbook and inspect worksheets;
-- DOCX: validate the ZIP package and `word/document.xml` member; and
-- PDF: open every page and extract text.
+The runtime gate parses five required CSV files and raises `PocDataError` immediately
+if an input is missing, empty, malformed, or unreadable. Documentation and challenge
+briefs are reviewed separately; the optimizer never requires a PDF, DOCX, or XLSX to
+run.
 
 ## Supplied files
 
 | File | Rows/pages | Role in the workflow |
 |---|---:|---|
-| `input_order data.csv` | 25,193 rows, 39 columns | Order-SKU demand, default source/date, customer priority, economics, unit conversion, and penalty parameters. |
+| `input_order_data.csv` | 25,193 rows, 39 columns | Order-SKU demand, default source/date, customer priority, economics, unit conversion, and penalty parameters. |
 | `input_capacity_planning.csv` | 377,504 rows, 23 columns | Daily inventory/forecast by DC and SKU; used to construct protected ATP. |
 | `input_shipping_cost_data.csv` | 12,922 rows, 7 columns | Plant-to-destination-ZIP lanes, distance, and total shipping cost. |
 | `input_dock_capacity.csv` | 480 rows, 13 columns | Date-specific `Dock_Remaining`; used as incremental alternate-load capacity. |
 | `input_throughput_capacity.csv` | 530 rows, 7 columns | Observed case-pick, pallet-pick, and order utilization; not a documented maximum. |
-| `DOM Equations.docx` | Valid OOXML, 110 equation objects | Authoritative business equations and rule definitions. |
-| `Example.xlsx` | 561 rows, 64 columns | Worked POC calculations used as an interpretation and reconciliation aid. |
-| `Output_order_level_data(3).csv` | 1,109 rows, 64 columns | Supplied order-level recommendation output used only for audit. |
-| `output_order_sku_level_data(3).csv` | 25,193 rows, 32 columns | Supplied SKU-level recommendation output used only for audit. |
-| `Nestle - WISER Quantum Challenge [SHARED](2).pdf` | 5 pages | Tasks, judging criteria, privacy rules, and submission requirements. |
+
+The clean bundle may also contain two optional reconciliation files:
+
+| File | Rows | Role |
+|---|---:|---|
+| `output_order_level_data.csv` | 1,109 | Supplied order-level recommendation output used only for audit. |
+| `output_order_sku_level_data.csv` | 25,193 | Supplied SKU-level recommendation output used only for audit. |
+
+`DOM Equations.docx`, `Example.xlsx`, and the five-page challenge PDF are source
+references. They are not copied into the runtime bundle and are not required by the
+loader.
 
 An all-null trailing column in the order input is ignored. Identifiers are loaded as
 strings so leading zeros and exact joins are preserved.
@@ -52,7 +52,7 @@ Raw identifiers, DC details, and commercial totals are not emitted.
 
 ### Order-SKU data
 
-`input_order data.csv` is the main fact table. One row is one order-SKU line. The
+`input_order_data.csv` is the main fact table. One row is one order-SKU line. The
 adapter derives integer case demand as follows:
 
 $$
@@ -140,16 +140,23 @@ assumption version, or candidate rules change.
 
 ## Run the gate and adapter
 
+First normalize browser-added suffixes such as `(1)` into a clean local directory:
+
+```bash
+python scripts/prepare_challenge_bundle.py \
+  --source-dir /approved/path/to/downloads \
+  --output-dir data/raw/nestle_challenge
+```
+
 ```python
 from domopt.poc import PocConfig, audit_poc_bundle, load_poc_problem
 
-audit = audit_poc_bundle("/approved/path/to/challenge-files")
+audit = audit_poc_bundle("data/raw/nestle_challenge")
 problem = load_poc_problem(
-    "/approved/path/to/challenge-files",
+    "data/raw/nestle_challenge",
     config=PocConfig(pareto_prune=False),
 )
 ```
 
 See [POC source mapping](poc_data_mapping.md) for field-level transformations and
 [canonical data dictionary](data_dictionary.md) for the solver contract.
-

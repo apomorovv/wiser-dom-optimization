@@ -32,32 +32,73 @@ class _CandidatePlan:
     incremental_score: float
 
 
+@dataclass(frozen=True)
+class _DecisionPlan:
+    """One atomic order or assignment-group decision."""
+
+    unit_id: str
+    option_id: str
+    member_plans: tuple[_CandidatePlan, ...]
+    score: float
+    incremental_score: float
+
+
 class _InventoryState:
     """Residual cumulative inventory with correct earlier-date consumption."""
 
     def __init__(self, inventory: pd.DataFrame):
-        self._rows: dict[tuple[str, str], list[list[object]]] = {}
-        for (dc_id, sku_id), group in inventory.groupby(["dc_id", "sku_id"], sort=False):
-            self._rows[(str(dc_id), str(sku_id))] = [
-                [pd.Timestamp(row.date), int(row.cumulative_available_cases)]
-                for row in group.sort_values("date").itertuples(index=False)
-            ]
+        grouped: dict[tuple[str, str], tuple[list[int], list[int]]] = {}
+        ordered = inventory.sort_values(
+            ["dc_id", "sku_id", "date"], kind="mergesort"
+        )
+        for row in ordered.itertuples(index=False):
+            key = (str(row.dc_id), str(row.sku_id))
+            dates, amounts = grouped.setdefault(key, ([], []))
+            dates.append(pd.Timestamp(row.date).value)
+            amounts.append(int(row.cumulative_available_cases))
+        self._rows: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]] = {
+            key: (
+                np.asarray(dates, dtype=np.int64),
+                np.asarray(amounts, dtype=np.int64),
+            )
+            for key, (dates, amounts) in grouped.items()
+        }
+        # Arrays in _rows are immutable base data. Every consume creates a new
+        # remaining array, so preview clones need only copy this small dictionary.
+        self._remaining: dict[tuple[str, str], np.ndarray] = {}
 
     def available(self, dc_id: str, sku_id: str, date: pd.Timestamp) -> int:
-        checkpoints = self._rows.get((dc_id, sku_id), [])
-        covering = [int(amount) for checkpoint, amount in checkpoints if checkpoint >= date]
-        return max(0, min(covering)) if covering else 0
+        key = (dc_id, sku_id)
+        rows = self._rows.get(key)
+        if rows is None:
+            return 0
+        dates, base = rows
+        covering = dates >= pd.Timestamp(date).value
+        if not covering.any():
+            return 0
+        amounts = self._remaining.get(key, base)
+        return max(0, int(amounts[covering].min()))
 
     def consume(self, dc_id: str, sku_id: str, date: pd.Timestamp, quantity: int) -> None:
         if quantity < 0:
             raise ValueError("Cannot consume a negative inventory quantity")
+        if quantity == 0:
+            return
         if quantity > self.available(dc_id, sku_id, date):
             raise ValueError(
                 f"Insufficient inventory for dc={dc_id}, sku={sku_id}, date={date}"
             )
-        for checkpoint in self._rows.get((dc_id, sku_id), []):
-            if checkpoint[0] >= date:
-                checkpoint[1] = int(checkpoint[1]) - int(quantity)
+        key = (dc_id, sku_id)
+        dates, base = self._rows[key]
+        updated = self._remaining.get(key, base).copy()
+        updated[dates >= pd.Timestamp(date).value] -= int(quantity)
+        self._remaining[key] = updated
+
+    def clone(self) -> _InventoryState:
+        clone = object.__new__(_InventoryState)
+        clone._rows = self._rows
+        clone._remaining = dict(self._remaining)
+        return clone
 
 
 class _CapacityState:
@@ -80,6 +121,11 @@ class _CapacityState:
         if amount > self._remaining[key] + 1e-9:
             raise ValueError(f"Insufficient {resource} capacity for {dc_id} on {date.date()}")
         self._remaining[key] -= amount
+
+    def clone(self) -> _CapacityState:
+        clone = object.__new__(_CapacityState)
+        clone._remaining = dict(self._remaining)
+        return clone
 
 
 def _order_lines(problem: ProblemData, order_id: str) -> pd.DataFrame:
@@ -246,6 +292,152 @@ def _commit_plan(
     capacities.consume(plan.dc_id, plan.pgi_date, "volume", total_volume)
 
 
+def _assignment_units(problem: ProblemData) -> dict[str, tuple[str, ...]]:
+    """Return the atomic decisions used by every baseline.
+
+    Nestle loads may contain several order records. When group cohesion is enabled,
+    every member must choose the same DC/date option, so treating members as separate
+    greedy decisions can create an infeasible split load.
+    """
+
+    if bool(problem.metadata.get("enforce_assignment_group", False)):
+        if "assignment_group" not in problem.orders.columns:
+            raise ValueError("Group cohesion requires orders.assignment_group")
+        return {
+            str(group_id): tuple(sorted(group["order_id"].astype(str)))
+            for group_id, group in problem.orders.groupby(
+                "assignment_group", sort=False
+            )
+        }
+    return {
+        str(order_id): (str(order_id),)
+        for order_id in problem.orders["order_id"].astype(str)
+    }
+
+
+def _candidate_options_for_unit(
+    problem: ProblemData,
+    eligible: pd.DataFrame,
+    members: tuple[str, ...],
+    *,
+    default_only: bool = False,
+) -> list[tuple[str, pd.DataFrame]]:
+    rows = eligible.loc[eligible["order_id"].astype(str).isin(members)].copy()
+    if default_only:
+        rows = rows.loc[rows["is_default"].astype(bool)]
+    grouped = bool(problem.metadata.get("enforce_assignment_group", False))
+    option_column = "group_option_id" if grouped else "candidate_id"
+    if option_column not in rows.columns:
+        raise ValueError(f"Candidate table requires {option_column!r}")
+
+    options: list[tuple[str, pd.DataFrame]] = []
+    expected = set(members)
+    for option_id, option_rows in rows.groupby(option_column, sort=False):
+        if set(option_rows["order_id"].astype(str)) != expected:
+            continue
+        options.append(
+            (
+                str(option_id),
+                option_rows.sort_values("order_id", kind="mergesort"),
+            )
+        )
+    options.sort(key=lambda item: item[0])
+    return options
+
+
+def _preview_decision(
+    problem: ProblemData,
+    unit_id: str,
+    option_id: str,
+    option_rows: pd.DataFrame,
+    inventory: _InventoryState,
+    capacities: _CapacityState,
+) -> _DecisionPlan | None:
+    """Preview all members against private residual states, then commit atomically."""
+
+    trial_inventory = inventory.clone()
+    trial_capacities = capacities.clone()
+    member_plans: list[_CandidatePlan] = []
+    unassigned_score = 0.0
+
+    for candidate in option_rows.itertuples(index=False):
+        candidate_row = pd.Series(candidate._asdict())
+        order_id = str(candidate_row["order_id"])
+        plan = _preview_candidate(
+            problem,
+            candidate_row,
+            trial_inventory,
+            trial_capacities,
+        )
+        if plan is None:
+            return None
+        _commit_plan(problem, plan, trial_inventory, trial_capacities)
+        member_plans.append(plan)
+        lines = _order_lines(problem, order_id)
+        unassigned_score += _unassigned_score(problem, order_id, lines)
+
+    score = sum(plan.score for plan in member_plans)
+    return _DecisionPlan(
+        unit_id=unit_id,
+        option_id=option_id,
+        member_plans=tuple(member_plans),
+        score=score,
+        incremental_score=score - unassigned_score,
+    )
+
+
+def _feasible_decisions(
+    problem: ProblemData,
+    unit_id: str,
+    members: tuple[str, ...],
+    eligible: pd.DataFrame,
+    inventory: _InventoryState,
+    capacities: _CapacityState,
+    *,
+    default_only: bool = False,
+) -> list[_DecisionPlan]:
+    decisions: list[_DecisionPlan] = []
+    for option_id, option_rows in _candidate_options_for_unit(
+        problem,
+        eligible,
+        members,
+        default_only=default_only,
+    ):
+        decision = _preview_decision(
+            problem,
+            unit_id,
+            option_id,
+            option_rows,
+            inventory,
+            capacities,
+        )
+        if decision is not None:
+            decisions.append(decision)
+    return decisions
+
+
+def _decision_sort_key(decision: _DecisionPlan) -> tuple[object, ...]:
+    return (
+        -decision.incremental_score,
+        -sum(sum(plan.quantities.values()) for plan in decision.member_plans),
+        sum(plan.shipping_cost for plan in decision.member_plans),
+        not all(plan.is_default for plan in decision.member_plans),
+        decision.option_id,
+    )
+
+
+def _commit_decision(
+    problem: ProblemData,
+    decision: _DecisionPlan,
+    inventory: _InventoryState,
+    capacities: _CapacityState,
+    selected: dict[str, _CandidatePlan | None],
+) -> None:
+    for plan in decision.member_plans:
+        _commit_plan(problem, plan, inventory, capacities)
+        selected[plan.order_id] = plan
+
+
 def _solution_from_plans(
     problem: ProblemData,
     method: str,
@@ -317,19 +509,33 @@ def solve_default_baseline(problem: ProblemData) -> Solution:
     selected: dict[str, _CandidatePlan | None] = {}
 
     eligible = problem.candidates[problem.candidates["eligible"]].copy()
-    for order_id in sorted(problem.orders["order_id"].astype(str)):
-        options = eligible[
-            (eligible["order_id"] == order_id) & eligible["is_default"].astype(bool)
-        ].sort_values(["pgi_date", "candidate_id"], kind="mergesort")
-        if options.empty:
-            selected[order_id] = None
+    units = _assignment_units(problem)
+    for unit_id, members in sorted(units.items()):
+        decisions = _feasible_decisions(
+            problem,
+            unit_id,
+            members,
+            eligible,
+            inventory,
+            capacities,
+            default_only=True,
+        )
+        if not decisions:
+            selected.update({order_id: None for order_id in members})
             continue
-        plan = _preview_candidate(problem, options.iloc[0], inventory, capacities)
-        if plan is None:
-            selected[order_id] = None
-        else:
-            _commit_plan(problem, plan, inventory, capacities)
-            selected[order_id] = plan
+        decisions.sort(
+            key=lambda decision: (
+                max(plan.pgi_date for plan in decision.member_plans),
+                decision.option_id,
+            )
+        )
+        _commit_decision(
+            problem,
+            decisions[0],
+            inventory,
+            capacities,
+            selected,
+        )
 
     return _solution_from_plans(
         problem, "default", selected, runtime_seconds=perf_counter() - start
@@ -339,49 +545,61 @@ def solve_default_baseline(problem: ProblemData) -> Solution:
 def solve_greedy_baseline(problem: ProblemData) -> Solution:
     """Sequential scarcity-aware greedy reassignment baseline.
 
-    At each round, select the remaining order/candidate pair with the largest
-    improvement over leaving that order unassigned. Residual inventory and
-    capacities are updated immediately.
+    Rank atomic orders or assignment groups once, then choose the best currently
+    feasible option for each unit. Residual inventory and capacities are updated
+    immediately, and an assignment group is never split across outcomes.
     """
 
     start = perf_counter()
     inventory = _InventoryState(problem.inventory)
     capacities = _CapacityState(problem.capacities)
-    remaining = set(problem.orders["order_id"].astype(str))
     selected: dict[str, _CandidatePlan | None] = {}
     eligible = problem.candidates[problem.candidates["eligible"]].copy()
+    units = _assignment_units(problem)
 
-    while remaining:
-        plans: list[_CandidatePlan] = []
-        for order_id in sorted(remaining):
-            options = eligible[eligible["order_id"] == order_id]
-            for _, candidate in options.iterrows():
-                plan = _preview_candidate(problem, candidate, inventory, capacities)
-                if plan is not None:
-                    plans.append(plan)
-
-        positive = [plan for plan in plans if plan.incremental_score > 1e-9]
-        if not positive:
-            # No remaining assignment improves over the explicit no-assignment option.
-            for order_id in sorted(remaining):
-                selected[order_id] = None
-            break
-
-        # Stable deterministic order: incremental objective, filled cases, lower
-        # shipping cost, default before alternate, candidate ID.
-        positive.sort(
-            key=lambda plan: (
-                -plan.incremental_score,
-                -sum(plan.quantities.values()),
-                plan.shipping_cost,
-                not plan.is_default,
-                plan.candidate_id,
-            )
+    # Establish one stable priority from the unconstrained initial previews. The
+    # previous implementation rescanned every remaining order after every commit,
+    # giving quadratic DataFrame work. Each unit is now revisited exactly once
+    # against current residual resources, while candidate choice remains dynamic.
+    priority: list[tuple[tuple[object, ...], str]] = []
+    for unit_id, members in units.items():
+        initial = _feasible_decisions(
+            problem,
+            unit_id,
+            members,
+            eligible,
+            inventory,
+            capacities,
         )
-        chosen = positive[0]
-        _commit_plan(problem, chosen, inventory, capacities)
-        selected[chosen.order_id] = chosen
-        remaining.remove(chosen.order_id)
+        positive = [decision for decision in initial if decision.incremental_score > 1e-9]
+        if positive:
+            positive.sort(key=_decision_sort_key)
+            priority.append((_decision_sort_key(positive[0]), unit_id))
+        else:
+            priority.append(((float("inf"), unit_id), unit_id))
+
+    for _, unit_id in sorted(priority, key=lambda item: (item[0], item[1])):
+        members = units[unit_id]
+        decisions = _feasible_decisions(
+            problem,
+            unit_id,
+            members,
+            eligible,
+            inventory,
+            capacities,
+        )
+        positive = [decision for decision in decisions if decision.incremental_score > 1e-9]
+        if not positive:
+            selected.update({order_id: None for order_id in members})
+            continue
+        positive.sort(key=_decision_sort_key)
+        _commit_decision(
+            problem,
+            positive[0],
+            inventory,
+            capacities,
+            selected,
+        )
 
     return _solution_from_plans(
         problem, "greedy", selected, runtime_seconds=perf_counter() - start

@@ -1,10 +1,13 @@
+from dataclasses import replace
+
 import pandas as pd
 import pytest
 
 from domopt.classical import solve_classical
-from domopt.data import normalize_problem_data
+from domopt.data import make_tiny_problem_data, normalize_problem_data
 from domopt.objective import evaluate_solution
 from domopt.penalties import order_penalty
+from domopt.poc import select_penalty_subset
 from domopt.schemas import ProblemData
 from domopt.validation import validate_solution
 
@@ -95,3 +98,23 @@ def test_milp_penalty_matches_independent_evaluator() -> None:
     evaluated = evaluate_solution(problem, solution)
     assert evaluated.penalty_cost == 100
     assert solution.raw_objective == pytest.approx(evaluated.objective_value)
+
+
+def test_penalty_subset_excludes_orders_already_above_threshold() -> None:
+    problem = make_tiny_problem_data()
+    orders = problem.orders.copy()
+    orders["penalty_threshold_fraction"] = 1.0
+    orders["penalty_fixed"] = 0.0
+    orders["penalty_per_cut_sku"] = 0.0
+    orders["penalty_minimum"] = 0.0
+    orders["penalty_maximum"] = 0.0
+    thresholded = replace(
+        problem,
+        orders=orders,
+        metadata={**problem.metadata, "penalty_mode": "thresholded_cut"},
+    )
+
+    selected = select_penalty_subset(thresholded, 1)
+
+    assert selected.orders["order_id"].tolist() == ["O1"]
+    assert selected.metadata["selection_basis"] == "active_penalty_exposure"

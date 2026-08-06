@@ -1,10 +1,11 @@
 # WISER–Nestlé Distributed Order Management optimizer
 
-This repository is a complete, privacy-safe submission for the 2026 WISER–Nestlé
+This branch is the experiment-ready implementation for the 2026 WISER–Nestlé
 Distributed Order Management (DOM) challenge. It reads the supplied proof-of-concept
 data, constructs a validated optimization instance, compares transparent classical
-baselines with an exact solver and a hybrid quantum-classical search, and produces a
-notebook, planner copilot, report, planner view, and seven-slide presentation.
+baselines with an exact solver and a hybrid quantum-classical search, and persists
+aggregate tables and figures. Final reports, planner PDFs, and slides are deliberately
+deferred until the full experiment profile has produced reviewed results.
 
 The central safety rule is simple: a QUBO sample is only a proposal. Exact
 mixed-integer recourse rebuilds SKU quantities, an independent validator checks all
@@ -14,22 +15,26 @@ the returned incumbent.
 
 ## What is implemented
 
-- strict readability checks for all ten supplied challenge files;
-- a real-data adapter for orders, inventory, lanes, dock availability, throughput
-  observations, the equations document, workbook, and two reference outputs;
+- strict readability checks for the five runtime input CSVs;
+- a cleanup command that removes numbered-upload names and retains only runtime
+  inputs plus two optional recommendation outputs;
+- a real-data adapter for orders, inventory, lanes, dock availability, and throughput
+  observations;
 - source-accurate case conversion and thresholded order-penalty logic;
 - load-cohesive candidate generation, five-day protected ATP, shipping lead times,
   working-day PGI adjustment, forecast eligibility, and dock usage;
-- deterministic default and sequential-greedy baselines;
+- deterministic load-atomic default and sequential-greedy baselines;
 - an exact SciPy/HiGHS mixed-integer linear program (MILP);
 - bounded large-neighborhood search with QUBO assignment proposals and exact MILP
   fulfillment recourse;
 - exact enumeration, random sampling, simulated annealing, and optional D-Wave
   backends behind an explicit privacy gate;
 - an independent objective evaluator and feasibility validator;
-- all requested experiments plus two additional solver controls;
-- a runnable Jupyter notebook and aggregate-only Streamlit planner copilot; and
-- submission-ready Markdown, PDF, and PowerPoint artifacts.
+- all requested experiments, business- and QUBO-penalty sweeps, and additional
+  controls;
+- automatically saved tables and PNG figures under `runs/challenge-study/`;
+- an opt-in synthetic CPU/GPU crossover benchmark and privacy-gated D-Wave test; and
+- a runnable Jupyter notebook and aggregate-only Streamlit planner copilot.
 
 No QPU experiment has been run and no quantum advantage is claimed.
 
@@ -39,7 +44,7 @@ The repository intentionally publishes only non-identifying aggregates.
 
 | Measure | Verified value |
 |---|---:|
-| Supplied artifacts opened | 10 of 10 |
+| Required runtime CSVs opened | 5 of 5 |
 | Order-level output rows | 1,109 |
 | Order-SKU output rows | 25,193 |
 | Named loads | 614 |
@@ -51,10 +56,10 @@ The repository intentionally publishes only non-identifying aggregates.
 
 The input order table contains 25,193 order-SKU rows. The capacity-planning table
 contains 377,504 DC-SKU-date rows, shipping contains 12,922 lanes, dock contains 480
-rows, and throughput contains 530 observed-utilization rows. The workbook is a
-561-row worked example and the Word document contains the source business equations.
-The output files are used only for reconciliation; they are never treated as labels
-for optimization.
+rows, and throughput contains 530 observed-utilization rows. The optional output
+files are used only for reconciliation; they are never treated as labels for
+optimization. The challenge PDF, equations document, and worked workbook are source
+references, not runtime solver inputs.
 
 ## Solver architecture
 
@@ -95,13 +100,37 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev,notebook,app]"
 ```
 
-Install `.[qpu]` only inside an approved environment configured for D-Wave access.
-The default workflow is entirely local.
+Optional extras are `.[gpu]` for CUDA 12 CuPy benchmarking, `.[qpu]` for D-Wave,
+and `.[full]` for the complete workstation environment. The default solver remains
+local and CPU-based because exact recourse and small local QUBOs dominate the current
+workload.
+
+## Prepare the challenge bundle
+
+Keep raw files outside Git. Browser downloads commonly add suffixes such as `(1)`
+and macOS archives add metadata sidecars. Create a clean directory with stable names:
+
+```bash
+python scripts/prepare_challenge_bundle.py \
+  --source-dir /approved/path/to/downloads \
+  --output-dir data/raw/nestle_challenge
+```
+
+The resulting directory contains five required inputs:
+
+- `input_order_data.csv`
+- `input_capacity_planning.csv`
+- `input_shipping_cost_data.csv`
+- `input_dock_capacity.csv`
+- `input_throughput_capacity.csv`
+
+When available, the script also retains `output_order_level_data.csv` and
+`output_order_sku_level_data.csv` for optional reconciliation. It excludes the PDF,
+DOCX, XLSX, screenshots, ZIP files, numbered duplicates, and AppleDouble metadata.
 
 ## Run the challenge study
 
-Keep the supplied raw files outside Git. Point the command to a directory containing
-the exact filenames listed in [challenge data](docs/challenge_data.md).
+Point the command to the cleaned directory:
 
 ```bash
 python scripts/run_challenge_study.py \
@@ -112,7 +141,8 @@ python scripts/run_challenge_study.py \
 
 The command first opens every required file and stops on the first missing,
 unreadable, empty, or structurally invalid artifact. `--profile smoke` runs a short
-development grid; `--profile full` runs the submission grid.
+development grid; `--profile full` runs the evidence grid. Aggregate CSVs and all
+applicable PNG charts are written below `runs/challenge-study/`.
 
 ## Run the notebook
 
@@ -120,19 +150,23 @@ development grid; `--profile full` runs the submission grid.
 jupyter lab notebooks/nestle_challenge_experiments.ipynb
 ```
 
-Set `BUNDLE_DIR` in the first configuration cell. The notebook performs:
+Set `NESTLE_BUNDLE_DIR` before launching Jupyter, or use the default cleaned path
+`data/raw/nestle_challenge`. The notebook performs and checkpoints:
 
 1. strict bundle and output reconciliation audits;
 2. default, greedy, exact MILP, and hybrid comparison;
 3. size scaling;
-4. penalty-weight sensitivity;
-5. candidate-count sensitivity;
-6. inventory shocks;
-7. sampler seed and local coefficient-noise sensitivity;
-8. Pareto-pruning ablation;
-9. random-versus-conflict batching ablation;
-10. random-versus-simulated-annealing sampler ablation; and
-11. a synthetic coordination control with a known exact reference.
+4. business penalty-weight sensitivity;
+5. QUBO one-hot and conflict-penalty calibration;
+6. candidate-count sensitivity;
+7. inventory shocks;
+8. sampler seed and local coefficient-noise sensitivity;
+9. Pareto-pruning ablation;
+10. random-versus-conflict batching ablation;
+11. random-versus-simulated-annealing sampler ablation;
+12. a synthetic coordination control with a known exact reference;
+13. an optional CPU/GPU QUBO-scoring crossover; and
+14. an optional synthetic-only D-Wave hardware validation.
 
 All persisted experiment rows are aggregate-only.
 
@@ -169,27 +203,24 @@ hybrid exact-QUBO configuration both reproduce it.
 
 | Path | Purpose |
 |---|---|
-| `src/domopt/poc.py` | strict real-data audit and source-to-canonical adapter |
+| `src/domopt/poc.py` | runtime-bundle cleanup, audit, and source adapter |
 | `src/domopt/classical.py` | exact MILP and fixed-assignment recourse |
 | `src/domopt/hybrid.py` | conflict batching, QUBO search, repair, and acceptance |
 | `src/domopt/validation.py` | independent feasibility authority |
 | `src/domopt/experiments.py` | complete experiment matrix |
+| `src/domopt/hardware.py` | privacy-safe hardware discovery and GPU benchmark |
 | `notebooks/` | runnable challenge analysis |
 | `apps/` | aggregate-only planner copilot |
 | `docs/` | data, assumptions, formulation, algorithm, and requirement mapping |
-| `reports/` | submission sources and rendered deliverables |
+| `reports/` | deferral notice and planner sign-off template |
 | `tests/` | unit, model, sampler, audit, privacy, and Markdown checks |
 
-## Submission artifacts
+## Deferred submission artifacts
 
-- [challenge requirement matrix](docs/challenge_requirements.md)
-- [two-page business and technical summary](reports/business_technical_summary.md)
-- [6–10 page technical report](reports/technical_report.md)
-- [one-page planner view](reports/planner_view.md)
-- [presentation source](reports/presentation.md)
-- `reports/wiser_dom_submission_deck.pptx`
-
-Rendered PDFs are generated from the Markdown sources and kept next to them.
+The requirement matrix, experiment protocol, and literature basis are available now.
+The final report, data-specific planner view, and presentation are intentionally
+absent and must not be rendered or described as final until the full profile and any
+approved hardware runs have been reviewed.
 
 ## Privacy and interpretation
 
@@ -202,4 +233,3 @@ The supplied throughput file reports observed utilization rather than a document
 maximum. It is not enforced as a real hard limit. Experiments may add explicit
 scenario headroom, and those rows are labeled as scenarios. Likewise, local QUBO
 coefficient perturbation is a robustness test, not physical QPU noise.
-
