@@ -343,7 +343,7 @@ def _coordination_control(
     Four groups also keep the feasible gate-model statevector at only 4^4 states.
     """
 
-    problem = make_synthetic_problem(order_count=4, seed=6)
+    problem = make_ibm_hardware_study_problem()
     config = replace(
         settings.hybrid,
         iterations=max(3, settings.hybrid.iterations),
@@ -364,6 +364,12 @@ def _coordination_control(
         qaoa_restarts=max(6, settings.hybrid.qaoa_restarts),
     )
     return problem, config
+
+
+def make_ibm_hardware_study_problem() -> ProblemData:
+    """Return the public synthetic instance shared by IBM and local controls."""
+
+    return make_synthetic_problem(order_count=4, seed=6)
 
 
 def _assignment_policy(solution: Solution) -> dict[str, str | None]:
@@ -493,7 +499,7 @@ def run_challenge_experiments(
                     lns = replace(
                         settings.exact_lns,
                         seed=settings.exact_lns.seed + repetition,
-                        polish_initial_incumbent=False,
+                        polish_initial_incumbent=True,
                     )
                     _attempt(
                         rows,
@@ -556,7 +562,7 @@ def run_challenge_experiments(
                             config=replace(
                                 settings.exact_lns,
                                 seed=settings.exact_lns.seed + repetition,
-                                polish_initial_incumbent=False,
+                                polish_initial_incumbent=True,
                             ),
                         ),
                     ),
@@ -988,71 +994,222 @@ def run_challenge_experiments(
     return result.reindex(columns=ordered + [c for c in result if c not in ordered])
 
 
-def run_remote_qpu_validation(
+def run_ibm_hardware_study(
     *,
-    sampler: str = "dwave-qpu",
     allow_remote: bool = False,
-    num_reads: int = 100,
-    seed: int = 19,
+    backend_name: str | None = None,
+    shots: int = 512,
+    profile: str = "quick",
+    progress_callback: Callable[[pd.DataFrame], None] | None = None,
+    allow_dirty: bool = False,
 ) -> pd.DataFrame:
-    """Run one privacy-safe hardware check on a generated synthetic QUBO.
+    """Run a matched IBM QPU stress test on the verified coupled control.
 
-    Real Nestle coefficients are deliberately excluded. This validates remote
-    submission, embedding, sampling, repair, exact recourse, and metadata capture;
-    it is not a quantum-advantage experiment.
+    The study sends only independently generated synthetic circuits.  ``quick``
+    uses one seed and four hardware configurations. ``presentation`` repeats the
+    same matrix over three seeds so plots can show variability.  Full MILP and
+    local statevector rows provide exact and ideal-algorithm references.
     """
 
     if not allow_remote:
-        raise ValueError("Remote QPU validation requires allow_remote=True")
-    if sampler not in {"dwave-qpu", "dwave-hybrid", "ibm-qpu"}:
+        raise ValueError("IBM hardware study requires allow_remote=True")
+    if current_source_state().get("git_dirty") is True and not allow_dirty:
         raise ValueError(
-            "sampler must be 'dwave-qpu', 'dwave-hybrid', or 'ibm-qpu'"
+            "Refusing an IBM evidence run from a dirty Git worktree. Commit the "
+            "source first, or set allow_dirty=True for an explicitly provisional run."
         )
-    problem = make_synthetic_problem(
-        order_count=4,
-        dc_count=3,
-        candidates_per_order=3,
-        seed=seed,
-    )
-    config = HybridConfig(
-        iterations=1,
-        neighborhood_orders=4,
-        max_qubo_variables=20,
-        max_candidates_per_order=3,
-        sampler=sampler,
-        num_reads=num_reads,
-        sweeps=50,
-        top_k_recourse=3,
-        recourse_time_limit_seconds=10,
-        initial_method="greedy",
-        seed=seed,
-        allow_remote=True,
+    if shots <= 0:
+        raise ValueError("shots must be positive")
+    normalized = str(profile).strip().lower()
+    if normalized == "quick":
+        seeds = (6,)
+    elif normalized == "presentation":
+        seeds = (3, 11, 29)
+    else:
+        raise ValueError("IBM hardware profile must be 'quick' or 'presentation'")
+
+    problem, base_hybrid = _coordination_control(experiment_profile("full"))
+    hardware_variants = (
+        (1, "baseline"),
+        (1, "dynamical_decoupling"),
+        (1, "dd_measure_twirling"),
+        (2, "dd_measure_twirling"),
     )
     rows: list[dict[str, Any]] = []
+
+    def persist_progress() -> None:
+        if progress_callback is not None:
+            progress_callback(pd.DataFrame(rows).copy())
+
     for method, solver in [
-        ("greedy", lambda: solve_greedy_baseline(problem)),
+        ("greedy_reference", lambda: solve_greedy_baseline(problem)),
         (
-            "classical",
+            "exact_reference",
             lambda: solve_classical(
                 problem, time_limit_seconds=30, mip_relative_gap=0
             ),
         ),
-        ("remote_hybrid", lambda: solve_hybrid(problem, config=config)),
     ]:
         _attempt(
             rows,
             problem,
             solver,
-            experiment="remote_qpu_validation",
+            experiment="ibm_hardware_stress",
             level=method,
             configuration={
                 "method": method,
-                "sampler": sampler if method == "remote_hybrid" else "none",
-                "data_scope": "generated synthetic coefficients only",
-                "seed": seed,
+                "data_scope": "independently generated coupled synthetic control",
+                "hardware_profile": normalized,
             },
         )
+        persist_progress()
+
+    for seed in seeds:
+        for layers in (1, 2):
+            local = replace(
+                base_hybrid,
+                iterations=1,
+                sampler="qaoa_statevector",
+                num_reads=shots,
+                qaoa_layers=layers,
+                seed=seed,
+                allow_remote=False,
+            )
+            _attempt(
+                rows,
+                problem,
+                lambda local=local: solve_hybrid(problem, config=local),
+                experiment="ibm_hardware_stress",
+                level=f"local_qaoa:p={layers}:seed={seed}",
+                configuration={
+                    "method": "local_qaoa",
+                    "sampler": "qaoa_statevector",
+                    "qaoa_layers": layers,
+                    "seed": seed,
+                    "shots": shots,
+                    "data_scope": "independently generated coupled synthetic control",
+                    "hardware_profile": normalized,
+                },
+            )
+            persist_progress()
+
+        for layers, mitigation in hardware_variants:
+            remote = replace(
+                base_hybrid,
+                iterations=1,
+                sampler="ibm-qpu",
+                num_reads=shots,
+                qaoa_layers=layers,
+                seed=seed,
+                allow_remote=True,
+                remote_time_limit_seconds=180.0,
+                ibm_backend_name=backend_name,
+                ibm_mitigation_strategy=mitigation,
+                ibm_transpiler_optimization_level=3,
+                ibm_transpiler_trials=8,
+            )
+            _attempt(
+                rows,
+                problem,
+                lambda remote=remote: solve_hybrid(problem, config=remote),
+                experiment="ibm_hardware_stress",
+                level=f"ibm:p={layers}:{mitigation}:seed={seed}",
+                configuration={
+                    "method": "ibm_qaoa",
+                    "sampler": "ibm-qpu",
+                    "qaoa_layers": layers,
+                    "seed": seed,
+                    "shots": shots,
+                    "ibm_mitigation_strategy": mitigation,
+                    "requested_backend": backend_name or "least_busy",
+                    "data_scope": "independently generated coupled synthetic control",
+                    "hardware_profile": normalized,
+                },
+            )
+            persist_progress()
     return pd.DataFrame(rows)
+
+
+def rank_ibm_hardware_strategies(results: pd.DataFrame) -> pd.DataFrame:
+    """Rank successful IBM variants using quality first and cost as a tie-breaker.
+
+    Exact-optimum raw hit rate is the primary hardware outcome. Raw one-hot
+    feasibility is next because repaired assignments are not evidence of native
+    constraint preservation. Validated assignment gain then confirms end-to-end
+    usefulness; quantum usage and wall time break remaining ties. Presentation
+    profiles report medians and interquartile ranges across seeds.
+    """
+
+    required = {
+        "feasible",
+        "sampler_backend",
+        "qaoa_layers",
+        "hardware_mitigation_strategy",
+        "hardware_optimal_hit_rate",
+        "raw_one_hot_rate",
+        "search_improvement",
+        "hardware_two_qubit_gates",
+        "hardware_quantum_seconds",
+        "hardware_queue_seconds",
+        "hardware_execution_seconds",
+        "runtime_seconds",
+    }
+    if missing := required - set(results.columns):
+        raise ValueError(f"IBM hardware results are missing {sorted(missing)}")
+    feasibility = results["feasible"]
+    if feasibility.dtype == bool:
+        feasible = feasibility.fillna(False)
+    else:
+        feasible = feasibility.astype(str).str.lower().isin({"true", "1"})
+    data = results.loc[
+        feasible & results["sampler_backend"].eq("ibm-qpu")
+    ].copy()
+    if data.empty:
+        raise ValueError("IBM hardware results contain no successful QPU rows")
+
+    group_columns = ["qaoa_layers", "hardware_mitigation_strategy"]
+    measures = [
+        "hardware_optimal_hit_rate",
+        "raw_one_hot_rate",
+        "search_improvement",
+        "hardware_two_qubit_gates",
+        "hardware_quantum_seconds",
+        "hardware_queue_seconds",
+        "hardware_execution_seconds",
+        "runtime_seconds",
+    ]
+    grouped = data.groupby(group_columns, dropna=False, sort=True)
+    summary = grouped[measures].median().reset_index()
+    summary["successful_runs"] = grouped.size().to_numpy()
+    for measure in ["hardware_optimal_hit_rate", "raw_one_hot_rate", "runtime_seconds"]:
+        quantiles = grouped[measure].quantile([0.25, 0.75]).unstack()
+        summary[f"{measure}_q25"] = quantiles[0.25].to_numpy()
+        summary[f"{measure}_q75"] = quantiles[0.75].to_numpy()
+    summary["variant"] = summary.apply(
+        lambda row: (
+            f"p={int(row['qaoa_layers'])} | "
+            f"{row['hardware_mitigation_strategy']}"
+        ),
+        axis=1,
+    )
+    summary = summary.sort_values(
+        [
+            "hardware_optimal_hit_rate",
+            "raw_one_hot_rate",
+            "search_improvement",
+            "hardware_quantum_seconds",
+            "runtime_seconds",
+            "hardware_two_qubit_gates",
+            "qaoa_layers",
+            "hardware_mitigation_strategy",
+        ],
+        ascending=[False, False, False, True, True, True, True, True],
+        kind="mergesort",
+        na_position="last",
+    ).reset_index(drop=True)
+    summary.insert(0, "rank", np.arange(1, len(summary) + 1))
+    summary.insert(1, "selected_best_observed", summary["rank"].eq(1))
+    return summary
 
 
 def write_experiment_results(results: pd.DataFrame, path: str | Path) -> Path:

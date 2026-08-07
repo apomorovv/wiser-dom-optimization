@@ -1,20 +1,82 @@
-# Pre-run implementation and evidence audit
+# Results and implementation audit
 
 Audit updated: 2026-08-07
 
 ## Status
 
-This page is an implementation audit, not a results report. Earlier local tables were
-produced under older experiment schemas and are not valid submission evidence for the
-current source state. The corrected full profile must be rerun through the
-content-addressed checkpoint workflow before any business conclusion, solver ranking,
-planner recommendation, report, or slide is finalized.
+The supplied command-line aggregate contains 247 feasible rows across 14 experiment
+families and zero independently reported validation violations. It is useful evidence,
+but every row reports `git_dirty=True`; numerical conclusions are therefore provisional
+until the corrected full profile is rerun from a clean commit. The separately supplied
+notebook aggregate has an older 62-column schema, only 86 rows, and two infeasible exact
+rows. It is stale and must not be combined with the 105-column command-line aggregate.
 
 No exact source-scale objective, revenue, penalty, shipping, inventory, capacity, or
 row-level identifier is published here. Reviewed public results should use normalized
 objective capture, baseline-indexed changes, rates, runtimes, model sizes, or
 independently generated synthetic values unless the challenge owner approves another
 aggregate explicitly.
+
+## Supplied-results evaluation
+
+### Solver decision
+
+The common 20-assignment-group comparison supports **polished greedy as the operational
+default**. It matched the zero-gap exact MILP's normalized objective capture (64.9002%)
+in 6.63 seconds, versus 6.67 seconds for the full MILP, 16.05 seconds for exact LNS,
+and 28.43 seconds for sampler-assisted LNS. Raw greedy was the speed option at 1.73
+seconds and reached 64.8961% capture. The hybrid run accepted no sampler move, so it
+does not establish sampler value on this real subset.
+
+| Method | Objective capture | Runtime (s) | Evidence-based role |
+|---|---:|---:|---|
+| Greedy | 64.8961% | 1.73 | Time-critical fallback |
+| Polished greedy | 64.9002% | 6.63 | Production default |
+| Exact MILP | 64.9002% | 6.67 | Small-instance certificate |
+| Exact LNS | 64.9002% | 16.05 | Coordinated-assignment escalation |
+| Hybrid sampler LNS | 64.9002% | 28.43 | Research comparator |
+
+This is not a universal solver theorem. The independent synthetic coordination control
+contains a deliberately coupled greedy trap: exact LNS and exact MILP improve its
+objective by 197.2, while polished greedy cannot. Exact LNS reaches that result in
+0.57 seconds versus 8.32 seconds for the sampler-assisted path. This justifies retaining
+exact LNS as an escalation, but not making the sampler the production solver.
+
+### Scaling and design choices
+
+- At 372 real assignment groups, median greedy and polished-greedy runtimes were 37.55
+  and 133.35 seconds. Polishing improved objective capture by about 3.37 basis points.
+- The supplied scaling configuration started exact LNS from raw greedy while the
+  comparison showed a separately polished baseline. That was an unfair attribution
+  mismatch and explains why exact LNS appeared below polished greedy at larger sizes.
+  The corrected experiment always starts exact LNS from the polished incumbent, so its
+  accepted-result invariant prevents this artifact.
+- Raising the candidate cap from one to two increased capture from 61.5664% to
+  64.9002%; caps of four and six added candidates and runtime without improving quality
+  on the tested subset. A cap of two is the measured default for this instance, not a
+  globally proven optimum.
+- Heuristic Pareto pruning reduced the tested hybrid candidate set from 90 to 70 while
+  preserving observed quality and modestly reducing runtime. It remains an ablation,
+  not a proof of globally safe dominance.
+- Penalty scaling from 0.25× through 4× did not change the selected routing on the
+  tested subset. That is evidence of local routing stability, not evidence that the
+  business penalty scale is correct.
+- All exact-feasible, random, simulated-annealing, and local QAOA samplers found the
+  synthetic coupled move after repair and exact recourse. With no observed quality
+  separation and a faster random control, the supplied simulation does not show a
+  quantum-algorithm advantage.
+
+### IBM evidence boundary
+
+The supplied IBM screenshot reports one QPU call and only 19% raw one-hot samples, but
+does not identify the backend and reports zero QPU access time. The former hardware
+adapter read a provider-specific timing field that IBM does not populate, so zero was a
+measurement bug rather than evidence of zero device usage. The corrected study uses a
+coupled synthetic instance with an exact reference, discovers and records the current
+least-busy eligible IBM backend, compares baseline/DD/DD-plus-measurement-twirling and
+$p=1$/$p=2$ variants, and records Runtime timestamps, quantum seconds, raw feasibility,
+optimal-hit rate, assignment gain, and transpiled two-qubit cost. No new IBM hardware
+result is claimed until that opt-in study is run from an authenticated machine.
 
 ## Implemented validity controls
 
@@ -95,8 +157,9 @@ robust/CVaR recommendation.
 
 ## Scalability interpretation rules
 
-- The production comparison is polished greedy versus exact LNS, with global exact
-  MILP used for tractable certificates and hybrid retained as an experimental control.
+- Polished greedy is the measured production default. Exact LNS is the coordinated-
+  assignment escalation, global exact MILP supplies tractable certificates, and hybrid
+  remains an experimental control.
 - Exact LNS bounds each neighborhood by groups, orders, fulfillment variables, local
   time, and requested MILP gap; independent global validation guards every accepted
   move.
@@ -104,9 +167,9 @@ robust/CVaR recommendation.
   construction, validation, and MILP recourse remain classical end-to-end costs.
 - GPU throughput for synthetic dense QUBO scoring is not application speedup unless
   transfer and all surrounding workflow time are included.
-- Logical QUBO variables are not physical qubits. Hardware claims additionally require
-  transpilation/embedding statistics, queue and access timing, repeated trials, and a
-  matched tuned classical control.
+- Logical QUBO variables are not physical qubits. IBM hardware claims additionally
+  require transpilation depth/two-qubit statistics, queue and execution timing, repeated
+  trials, and a matched tuned classical control.
 - A zero exact-MILP gap proves optimality only for that exact frozen instance. A local
   neighborhood gap or a feasible repaired sample does not.
 

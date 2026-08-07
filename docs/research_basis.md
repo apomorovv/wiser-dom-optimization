@@ -2,11 +2,12 @@
 
 ## Decision
 
-Use adaptive exact-MILP large-neighborhood search (LNS) as the production solver,
-starting from a separately reported polished-greedy incumbent. Each bounded
-neighborhood leaves both assignment and fulfillment decisions free, so the detailed
-business objective and hard constraints are optimized together rather than through a
-QUBO ranking surrogate.
+Use polished greedy as the production default: it matched the zero-gap exact MILP on
+the supplied common comparison while finishing faster than the other quality-tied
+methods. Use adaptive exact-MILP large-neighborhood search (LNS) as the classical
+escalation when assignment coordination is valuable. Every LNS run starts from that
+separately reported polished incumbent, and each bounded neighborhood leaves both
+assignment and fulfillment decisions free.
 
 Retain the bounded QUBO path as an experimental comparator. Quantum sampling proposes
 assignment candidates there and is compared with exact, random, and
@@ -18,14 +19,13 @@ attributed to a sampler.
 |---|---|---|---|---|
 | Global MILP | high | Exact constraints, bounds, mature solvers | Can slow as integer coupling grows | Reference and small-instance solver |
 | Polished greedy | high | Fast feasible routing plus exact fixed-assignment quantities | Cannot revise routing | Production incumbent and attribution baseline |
-| Adaptive exact-MILP LNS | highest | Joint assignment/quantity optimization with exact local constraints | Bounded neighborhoods can miss global moves | Production choice |
+| Adaptive exact-MILP LNS | high | Joint assignment/quantity optimization with exact local constraints | Bounded neighborhoods can miss global moves | Assignment-search escalation |
 | Sampler-assisted local QUBO | experimental | Backend-neutral, hardware-bounded assignment comparison | Approximate shared-resource model and repeated recourse | Controlled research comparator |
 | Monolithic QUBO | low | Uniform binary representation | Quantity/slack expansion and penalty tuning | Rejected |
 | Dicke(1)/XY QAOA | experimental | One-hot feasibility is structural | State preparation, depth, parameter training | Local simulator and optional IBM adapter |
 | PCE / PB-PCE / QRAO | early research | Qubit compression | Decoding and hard-constraint feasibility | Research backlog |
-| Quantum annealing | experimental | Direct binary quadratic input | Embedding, coefficient range, noise | Optional D-Wave adapter |
 
-## Why exact-MILP LNS is the production choice
+## Why exact-MILP LNS remains the classical escalation
 
 The important coupling is not merely one-hot assignment. Shared projected ATP,
 date/resource capacity, partial fulfillment, pallet/case logic, and thresholded
@@ -192,15 +192,6 @@ Add PB-PCE only as a separate synthetic adapter once local QUBO width, rather th
 recourse or preprocessing, is empirically the limiting resource. It must use the same
 decoded-assignment repair, exact recourse, validator, and end-to-end timing protocol.
 
-### Industrial quantum annealing evidence
-
-Yarkoni et al., *Quantum Annealing for Industry Applications: Introduction and
-Review* (2022), surveys formulation, embedding, hybridization, and benchmarking
-issues across industrial use cases. Its cautious assessment supports reporting
-logical size, embedding overhead, total workflow time, and classical comparators
-instead of equating physical qubits with useful problem scale.
-[Preprint](https://arxiv.org/abs/2112.07491).
-
 ### Logistics-specific hybrid workflow
 
 The 2026 shipment-selection study by Lopez-Ruiz et al., *Hybrid Quantum-Classical
@@ -210,18 +201,17 @@ structure to DOM and supports the candidate-generation/recourse split. Its repor
 gains are scenario-specific and do not establish general quantum advantage.
 [Preprint](https://arxiv.org/abs/2604.11758).
 
-### Platform behavior
+### IBM hardware behavior
 
-D-Wave documents direct QPU sampling for binary quadratic models and larger managed
-hybrid workflows, including classical decomposition around QPU-sized subproblems.
-This motivates separate `dwave-qpu` and `dwave-hybrid` adapters and explicit remote
-call accounting. [D-Wave hybrid concepts](https://docs.dwavequantum.com/en/latest/concepts/hybrid.html)
-and [hybrid reference](https://docs.dwavequantum.com/en/latest/ocean/api_ref_hybrid/reference.html).
-
-IBM's official QAOA material provides the gate-model execution path used by the optional
-adapter. IBM's Open Plan currently offers limited free QPU time, so D-Wave is not the only
-hardware route. [IBM QAOA tutorial](https://quantum.cloud.ibm.com/docs/en/tutorials/quantum-approximate-optimization-algorithm)
-and [IBM plan overview](https://quantum.cloud.ibm.com/docs/en/guides/plans-overview).
+IBM Runtime supplies the gate-model execution path used by the optional adapter.
+Backend discovery uses `least_busy` among accessible, operational devices with enough
+qubits. The hardware study records the full queue snapshot, selected backend,
+transpilation depth and two-qubit gates, Runtime timestamps, quantum usage, and raw
+sample quality. It compares a baseline against dynamical decoupling and measurement
+twirling rather than assuming mitigation helps.
+[IBM QAOA tutorial](https://quantum.cloud.ibm.com/docs/en/tutorials/quantum-approximate-optimization-algorithm),
+[backend discovery API](https://quantum.cloud.ibm.com/docs/api/qiskit-ibm-runtime/qiskit-runtime-service),
+and [Sampler options](https://quantum.cloud.ibm.com/docs/en/guides/sampler-options).
 
 ### GPU optimization
 

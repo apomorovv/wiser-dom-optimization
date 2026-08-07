@@ -40,6 +40,8 @@ def test_hybrid_improves_default_and_finds_tiny_optimum() -> None:
         + solution.metadata["improvement"]
     )
     assert solution.metadata["qpu_calls"] == 0
+    assert solution.metadata["qpu_access_time_microseconds"] is None
+    assert solution.metadata["hardware_wall_seconds"] is None
     assert solution.metadata["maximum_qubo_variables"] <= 8
 
 

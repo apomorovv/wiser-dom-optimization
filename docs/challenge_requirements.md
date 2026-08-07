@@ -32,7 +32,7 @@ already been generated and reviewed.
 | Add uncertainty (optional) | Inventory-shock and coefficient-noise scenarios | notebook experiments |
 | Planner dashboard (optional) | Aggregate-only Streamlit copilot | `apps/planner_copilot.py` |
 | GPU acceleration study (optional) | Synthetic CPU/GPU QUBO-scoring crossover and capability audit | notebook and `src/domopt/hardware.py` |
-| Remote QPU test (optional) | Opt-in IBM or D-Wave adapter using generated synthetic coefficients only | notebook and `src/domopt/experiments.py` |
+| Remote QPU test (optional) | Opt-in IBM hardware study using generated synthetic coefficients only, least-busy discovery, repeated mitigation variants, and exact references | notebook, `scripts/run_ibm_hardware_study.py`, and `src/domopt/experiments.py` |
 | Reproducible evidence | Aggregate rows record problem/bundle hashes, schema and assumption versions, objective version, commit, dirty state, source-state hash, configuration, and seed | `src/domopt/experiments.py`, `src/domopt/pipeline.py`, `src/domopt/checkpoints.py` |
 | Privacy-safe public package | No raw challenge tables or identifiers committed; public result writers reject identifier-like columns | `.gitignore`, `docs/privacy.md`, aggregate-output guards |
 
@@ -55,7 +55,7 @@ already been generated and reviewed.
 | Synthetic coordination control | greedy/polished greedy/exact LNS/exact/hybrid | Can each architecture revisit a deliberately coupled greedy trap without misattributing exact quantity recourse to sampling? |
 
 Coefficient perturbation and the local readout channel are not full physical QPU noise. A hardware claim requires an
-approved QPU run with matched QUBOs, end-to-end timing, embedding statistics,
+approved QPU run with matched QUBOs, end-to-end timing, transpilation statistics,
 multiple trials, and uncertainty bounds.
 
 The real size subsets are nested and deliberately shortage-focused, so their quality

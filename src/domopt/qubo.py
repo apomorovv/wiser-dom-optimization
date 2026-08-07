@@ -124,7 +124,7 @@ def perturb_qubo(
     """Return a symmetric QUBO with reproducible coefficient noise.
 
     This models analog/control-coefficient sensitivity, not a complete physical
-    gate or annealer noise channel. Classical recourse still evaluates the
+    gate-model hardware noise channel. Classical recourse still evaluates the
     unperturbed business model.
     """
 

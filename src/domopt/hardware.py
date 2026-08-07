@@ -1,4 +1,4 @@
-"""Hardware discovery and a privacy-safe CPU/GPU QUBO scoring benchmark."""
+"""Hardware discovery and privacy-safe CPU/GPU and IBM diagnostics."""
 
 from __future__ import annotations
 
@@ -18,6 +18,15 @@ def _module_available(name: str) -> bool:
         return False
 
 
+def _backend_name(backend: object) -> str:
+    """Return a backend name across current and legacy property styles."""
+
+    value = getattr(backend, "name", "unknown")
+    if callable(value):
+        value = value()
+    return str(value)
+
+
 def hardware_capabilities() -> dict[str, object]:
     """Return capability flags without exposing credentials or host identifiers."""
 
@@ -35,11 +44,17 @@ def hardware_capabilities() -> dict[str, object]:
             os.environ.get("QISKIT_IBM_TOKEN")
             or os.environ.get("QISKIT_IBM_INSTANCE")
         ),
-        "dwave_system_available": _module_available("dwave.system"),
-        "dwave_credentials_configured": bool(
-            os.environ.get("DWAVE_API_TOKEN") or os.environ.get("DWAVE_CONFIG_FILE")
-        ),
     }
+    if result["qiskit_ibm_runtime_available"]:
+        try:
+            from qiskit_ibm_runtime import QiskitRuntimeService
+
+            saved = QiskitRuntimeService.saved_accounts()
+            result["ibm_saved_account_count"] = len(saved)
+            result["ibm_saved_account_available"] = bool(saved)
+        except (ImportError, OSError, RuntimeError, ValueError) as error:
+            result["ibm_saved_account_available"] = False
+            result["ibm_account_discovery_error"] = f"{type(error).__name__}: {error}"
     try:
         import cupy as cp
 
@@ -57,6 +72,75 @@ def hardware_capabilities() -> dict[str, object]:
         # CUDA imports and device discovery can fail cleanly on CPU-only machines.
         result["cuda_error"] = f"{type(error).__name__}: {error}"
     return result
+
+
+def discover_ibm_backends(*, min_num_qubits: int = 1) -> pd.DataFrame:
+    """Return accessible operational QPUs ordered by current queue length.
+
+    This performs authenticated IBM Runtime discovery but submits no job.  The
+    returned table contains public device diagnostics only; credentials and account
+    identifiers are never included.
+    """
+
+    if min_num_qubits <= 0:
+        raise ValueError("min_num_qubits must be positive")
+    try:
+        from qiskit_ibm_runtime import QiskitRuntimeService
+    except ImportError as error:
+        raise RuntimeError(
+            "IBM backend discovery requires the optional 'ibm' dependencies"
+        ) from error
+
+    service = QiskitRuntimeService()
+    backends = service.backends(
+        operational=True,
+        simulator=False,
+        min_num_qubits=int(min_num_qubits),
+        use_fractional_gates=False,
+    )
+    if not backends:
+        raise RuntimeError(
+            f"No accessible operational IBM QPU has at least {min_num_qubits} qubits"
+        )
+    selected = service.least_busy(
+        operational=True,
+        simulator=False,
+        min_num_qubits=int(min_num_qubits),
+        use_fractional_gates=False,
+    )
+    selected_name = _backend_name(selected)
+    rows: list[dict[str, object]] = []
+    for backend in backends:
+        name = _backend_name(backend)
+        try:
+            status = backend.status()
+            pending_jobs = int(getattr(status, "pending_jobs", 0))
+            operational = bool(getattr(status, "operational", True))
+            status_message = str(getattr(status, "status_msg", ""))
+        except (OSError, RuntimeError, ValueError):
+            pending_jobs = -1
+            operational = False
+            status_message = "status unavailable"
+        num_qubits = int(getattr(backend, "num_qubits", 0))
+        rows.append(
+            {
+                "backend": name,
+                "num_qubits": num_qubits,
+                "pending_jobs": pending_jobs,
+                "operational": operational,
+                "status_message": status_message,
+                "selected_least_busy": name == selected_name,
+            }
+        )
+    return (
+        pd.DataFrame(rows)
+        .sort_values(
+            ["selected_least_busy", "pending_jobs", "backend"],
+            ascending=[False, True, True],
+            kind="mergesort",
+        )
+        .reset_index(drop=True)
+    )
 
 
 def _time_cpu(samples: np.ndarray, matrix: np.ndarray, repeats: int) -> float:

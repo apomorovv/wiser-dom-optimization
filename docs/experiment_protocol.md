@@ -31,7 +31,7 @@ an uncommitted run.
 | `hybrid` | Bounded QUBO assignment search plus exact MILP recourse. |
 
 Simulated annealing is quantum-inspired, and local statevector QAOA is a quantum
-algorithm simulation rather than quantum hardware. Optional IBM and D-Wave backends
+algorithm simulation rather than quantum hardware. The optional IBM backend
 are excluded until restricted-data approval is obtained.
 
 ## 3. Common metrics
@@ -222,21 +222,24 @@ python scripts/prepare_challenge_bundle.py \
 ```bash
 python scripts/run_challenge_study.py \
   --bundle-dir data/raw/nestle_challenge \
-  --profile full \
-  --output runs/challenge-study/aggregate_results.csv
+  --profile full
 ```
 
 Or run `notebooks/nestle_challenge_experiments.ipynb` with
 `NESTLE_BUNDLE_DIR=data/raw/nestle_challenge`. Each study uses a content-addressed run
-directory below `runs/challenge-study/<profile>/<problem-hash>/<run-hash>/`. The CSV is
+directory below
+`results/challenge-study/notebook/<profile>/<problem-hash>/<run-hash>/`. The CSV is
 paired with a manifest containing its exact identity, row count, and ordered columns.
 A checkpoint is loaded only when the manifest, identity, required columns, row count,
 and table schema all match; otherwise the study is rerun rather than silently mixing
 profiles or code states. Plots live in the same run-scoped directory.
 
-The optional GPU cell benchmarks synthetic batched QUBO scoring only. Optional IBM or
-D-Wave hardware validation sends generated synthetic coefficients and records provider
-metadata. Neither optional test is part of the default profile.
+The command-line suite writes separately below
+`results/challenge-study/cli/<profile>/`. The optional GPU cell benchmarks synthetic
+batched QUBO scoring only. Optional IBM hardware validation sends generated synthetic
+circuits and records backend, queue, transpilation, mitigation, raw feasibility,
+exact-reference quality, and usage metadata. Neither optional test is part of the
+default profile.
 
 ## 8. Interpretation rules
 

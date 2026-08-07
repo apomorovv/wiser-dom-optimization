@@ -1,7 +1,7 @@
 # Results
 
-This directory is reserved for reviewed aggregate tables, figures, and planner-facing
-summaries selected from validated runs. Raw per-run artifacts belong in `runs/`.
+This directory is reserved for aggregate tables, figures, and planner-facing summaries.
+Raw per-order solver artifacts still belong in ignored `runs/` directories.
 The existing `scaling_synthetic.*` pair is a historical development snapshot from the
 pre-LNS experiment schema; it is not current challenge evidence and must be regenerated
 before inclusion in a report.
@@ -10,17 +10,25 @@ before inclusion in a report.
 
 ```text
 results/
-  tables/
-    baseline_comparison.csv
-    scaling_synthetic.csv
-    sensitivity_summary.csv
-  figures/
-    objective_by_method.png
-    runtime_scaling.png
-    feasible_sample_rate.png
+  challenge-study/
+    cli/
+      full/
+        aggregate_results.csv
+        aggregate_results.manifest.json
+        figures/
+    notebook/
+      <profile>/<problem-hash>/<run-hash>/
+        aggregate_results.csv
+        aggregate_results.manifest.json
+        tables/
+        figures/
   planner/
     synthetic_planner_example.md
 ```
+
+`challenge-study/` is ignored by Git until a human selects publication-safe aggregates.
+Separating `cli` from `notebook` prevents either execution surface from loading or
+overwriting the other's checkpoints.
 
 ## Required provenance
 

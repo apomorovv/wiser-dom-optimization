@@ -9,14 +9,14 @@ and how many cases of each stock-keeping unit (SKU) can be fulfilled.
 
 There are two deliberately separate local-search paths:
 
-1. `exact_lns`, the production choice, solves assignment and fulfillment decisions
-   jointly in one bounded local MILP; and
+1. `exact_lns`, the classical assignment-search escalation, solves assignment and
+   fulfillment decisions jointly in one bounded local MILP; and
 2. `hybrid`, the experimental comparison path, uses a bounded QUBO sampler to propose
    assignments and an exact fixed-assignment MILP to evaluate their fulfillment.
 
 The distinction matters. The QUBO is an intentionally approximate assignment-ranking
-model. The production LNS does not require a sampler, repair, or top-$k$ recourse loop;
-it optimizes the detailed local model directly.
+model. Exact LNS does not require a sampler, repair, or top-$k$ recourse loop; it
+optimizes the detailed local model directly.
 
 QUBO means *quadratic unconstrained binary optimization*: minimize
 
@@ -241,8 +241,6 @@ Available backends are:
 | `simulated_annealing` | Scalable local quantum-inspired benchmark | no |
 | `qaoa_statevector` | Gate-model simulation with product W/Dicke(1) states and XY mixers | no |
 | `ibm-qpu` | The same constraint-preserving QAOA circuit on IBM hardware | yes, approval required |
-| `dwave-qpu` | Direct quantum annealing experiment | yes, approval required |
-| `dwave-hybrid` | D-Wave managed hybrid experiment | yes, approval required |
 
 The QPU adapter uses integer labels, but coefficients may still reveal commercial or
 constraint information. Remote calls therefore require `allow_remote=True`.
@@ -274,16 +272,46 @@ solve described in Step 5.
 ## 4. Quantum execution choices
 
 The experimental bounded assignment problem is naturally binary and quadratic after
-plan generation. Annealers accept that object directly. Gate-model QAOA needs parameter
-optimization and compilation, but the assignment groups expose useful structure: one
+plan generation. Gate-model QAOA needs parameter optimization and compilation, but
+the assignment groups expose useful structure: one
 weight-one Dicke (W) state and one XY ring mixer per group keep every ideal state
 one-hot. The local statevector implementation tests this quantum component without a
-subscription; the optional IBM adapter provides a second hardware route alongside
-D-Wave. Neither route replaces the exact-LNS production path.
+subscription; the optional IBM adapter executes that same circuit on hardware. It does
+not replace the classical production path.
 
-This is an engineering choice, not evidence that annealing outperforms QAOA or
-classical search. A fair study must compare samplers on identical QUBOs and include
-all preprocessing, queue, sampling, repair, and recourse time.
+This is an engineering choice, not evidence that QAOA outperforms classical search. A
+fair study must compare samplers on identical QUBOs and include all preprocessing,
+queue, sampling, repair, and recourse time.
+
+### IBM stress matrix and selection rule
+
+The opt-in study deliberately uses the four-group, 16-logical-qubit coupled synthetic
+control whose polished-greedy assignment is known to be suboptimal. This avoids paying
+for hardware runs on a random instance where no assignment improvement is possible,
+and prevents source coefficients or identifiers from leaving the approved environment.
+
+Before submission, authenticated discovery records every accessible operational IBM
+backend with at least 16 qubits and calls IBM Runtime's `least_busy` selector. A named
+backend remains available for a controlled rerun, but the queue snapshot distinguishes
+the least-busy recommendation from the device actually selected for the study. The
+presentation profile holds the device and 512-shot budget fixed while repeating three
+seeds across four variants:
+
+| Layers | Runtime options | Purpose |
+|---:|---|---|
+| $p=1$ | baseline | Unmitigated hardware reference |
+| $p=1$ | dynamical decoupling | Isolate idle-error suppression |
+| $p=1$ | dynamical decoupling plus measurement twirling | Test the combined readout strategy |
+| $p=2$ | dynamical decoupling plus measurement twirling | Test extra ansatz depth against added hardware error |
+
+Each variant uses eight seeded transpiler trials; the circuit with the fewest two-qubit
+gates, then depth and size, is submitted. The evidence table records backend queue,
+logical qubits, transpiled depth and two-qubit cost, raw one-hot rate, exact raw hit
+rate, best feasible normalized gap, Runtime queue/execution/quantum time, repaired
+assignment gain, recourse time, and total solver time. The best-observed variant is
+ranked by median exact raw hit rate, raw feasibility, and validated gain, with quantum
+usage and end-to-end runtime used only as tie-breakers. This empirical ranking is
+reported after the run; no mitigation strategy is assumed to win in advance.
 
 ## 5. Scaling
 
@@ -322,9 +350,9 @@ scaling experiments include:
 5. benchmark integer-scaled CP-SAT and current direct HiGHS interfaces against the
    same validated instances.
 
-Physical qubit count is not the same as logical QUBO capacity. Minor embedding,
-connectivity, coefficient range, chain strength, and analog noise determine the
-usable problem size on a QPU.
+Physical qubit count is not the same as logical QUBO capacity. Circuit connectivity,
+routing overhead, two-qubit gate count/depth, calibration drift, and noise determine
+the usable problem size on a gate-model QPU.
 
 ## 6. Noise study
 
@@ -351,7 +379,7 @@ still not a full gate/decoherence/hardware noise model.
 - Preview plans use isolated residual resources; the QUBO represents coupling only
   approximately.
 - Linear penalty calibration may need rescaling for a particular hardware range.
-- Direct IBM and D-Wave paths require optional dependencies, credentials, and data approval.
+- Direct IBM execution requires optional dependencies, credentials, and data approval.
 - No QPU benchmark has been executed in this branch, so no quantum advantage or
   business improvement is attributed to quantum hardware.
 

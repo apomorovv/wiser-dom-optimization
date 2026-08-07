@@ -67,6 +67,10 @@ data/external/*
 runs/*
 !runs/.gitkeep
 
+# CLI and notebook evidence are separated by producer below this root.
+# Keep only reviewed, intentionally selected aggregates in Git.
+results/challenge-study/
+
 logs/
 checkpoints/
 tmp/

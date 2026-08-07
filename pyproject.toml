@@ -20,13 +20,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-qpu = [
-    "dwave-system>=1.30",
-]
-
 ibm = [
-    "qiskit>=2.0",
-    "qiskit-ibm-runtime>=0.43",
+    "qiskit>=2.5,<3",
+    "qiskit-ibm-runtime>=0.47,<1",
 ]
 
 gpu = [
@@ -52,9 +48,8 @@ dev = [
 
 full = [
     "cupy-cuda12x>=13.0",
-    "dwave-system>=1.30",
-    "qiskit>=2.0",
-    "qiskit-ibm-runtime>=0.43",
+    "qiskit>=2.5,<3",
+    "qiskit-ibm-runtime>=0.47,<1",
     "ipykernel",
     "jupyterlab",
     "matplotlib>=3.8",

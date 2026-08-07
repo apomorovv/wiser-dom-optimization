@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from domopt.data import make_tiny_problem_data
-from domopt.experiments import write_experiment_results
+from domopt.experiments import experiment_profile, write_experiment_results
 from domopt.hybrid import ExactLNSConfig
 from domopt.pipeline import problem_fingerprint, run_methods
 
@@ -87,6 +87,11 @@ def test_problem_fingerprint_is_invariant_to_table_row_order() -> None:
     )
 
     assert problem_fingerprint(reordered) == problem_fingerprint(problem)
+
+
+def test_production_lns_profile_polishes_its_incumbent() -> None:
+    assert experiment_profile("smoke").exact_lns.polish_initial_incumbent is True
+    assert experiment_profile("full").exact_lns.polish_initial_incumbent is True
 
 
 def test_scaling_visualization_aggregates_repetitions_and_new_methods(

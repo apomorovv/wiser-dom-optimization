@@ -132,8 +132,53 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
         "qpu_access_time_microseconds": solution.metadata.get(
             "qpu_access_time_microseconds"
         ),
-        "mean_chain_break_fraction": solution.metadata.get(
-            "mean_chain_break_fraction"
+        "hardware_backend": solution.metadata.get("hardware_backend"),
+        "hardware_backend_pending_jobs": solution.metadata.get(
+            "hardware_backend_pending_jobs"
+        ),
+        "hardware_mitigation_strategy": solution.metadata.get(
+            "hardware_mitigation_strategy"
+        ),
+        "hardware_wall_seconds": solution.metadata.get("hardware_wall_seconds"),
+        "hardware_queue_seconds": solution.metadata.get("hardware_queue_seconds"),
+        "hardware_execution_seconds": solution.metadata.get(
+            "hardware_execution_seconds"
+        ),
+        "hardware_turnaround_seconds": solution.metadata.get(
+            "hardware_turnaround_seconds"
+        ),
+        "hardware_quantum_seconds": solution.metadata.get(
+            "hardware_quantum_seconds"
+        ),
+        "hardware_returned_samples": solution.metadata.get(
+            "hardware_returned_samples"
+        ),
+        "hardware_feasible_shots": solution.metadata.get(
+            "hardware_feasible_shots"
+        ),
+        "hardware_backend_num_qubits": solution.metadata.get(
+            "hardware_backend_num_qubits"
+        ),
+        "hardware_logical_qubits": solution.metadata.get(
+            "hardware_logical_qubits"
+        ),
+        "hardware_transpiled_depth": solution.metadata.get(
+            "hardware_transpiled_depth"
+        ),
+        "hardware_two_qubit_gates": solution.metadata.get(
+            "hardware_two_qubit_gates"
+        ),
+        "hardware_two_qubit_depth": solution.metadata.get(
+            "hardware_two_qubit_depth"
+        ),
+        "hardware_optimal_hit_rate": solution.metadata.get(
+            "hardware_optimal_hit_rate"
+        ),
+        "hardware_optimal_hit_rate_given_feasible": solution.metadata.get(
+            "hardware_optimal_hit_rate_given_feasible"
+        ),
+        "hardware_best_feasible_normalized_gap": solution.metadata.get(
+            "hardware_best_feasible_normalized_gap"
         ),
         "accepted_moves": solution.metadata.get("accepted_moves"),
         "raw_one_hot_rate": solution.metadata.get("raw_one_hot_rate"),

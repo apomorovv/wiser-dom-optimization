@@ -1,9 +1,18 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
 from scipy.linalg import expm
 
-from domopt.quantum import QuantumSolverError, _xy_edge_unitary, sample_qubo
+from domopt.quantum import (
+    QuantumSolverError,
+    _hardware_sample_statistics,
+    _ibm_job_timing,
+    _xy_edge_unitary,
+    ibm_sampler_options,
+    sample_qubo,
+)
 from domopt.qubo import build_candidate_qubo
 
 
@@ -111,7 +120,155 @@ def test_simulated_annealing_is_reproducible() -> None:
     assert first[["bitstring", "energy"]].equals(second[["bitstring", "energy"]])
 
 
-@pytest.mark.parametrize("method", ["dwave-qpu", "ibm-qpu"])
-def test_remote_qpu_requires_explicit_privacy_approval(method: str) -> None:
+def test_ibm_qpu_requires_explicit_privacy_approval() -> None:
     with pytest.raises(QuantumSolverError):
-        sample_qubo(_model(), method=method, allow_remote=False)
+        sample_qubo(_model(), method="ibm-qpu", allow_remote=False)
+
+
+def test_unknown_backend_is_rejected() -> None:
+    with pytest.raises(QuantumSolverError, match="Unknown"):
+        sample_qubo(_model(), method="unsupported-qpu")  # type: ignore[arg-type]
+
+
+def test_ibm_mitigation_options_are_explicit_and_cost_bounded() -> None:
+    baseline = ibm_sampler_options("baseline", shots=256)
+    mitigated = ibm_sampler_options(
+        "dd_measure_twirling",
+        shots=512,
+        max_execution_time_seconds=20_000,
+    )
+
+    assert baseline["dynamical_decoupling"]["enable"] is False
+    assert baseline["twirling"]["enable_measure"] is False
+    assert mitigated["dynamical_decoupling"]["sequence_type"] == "XpXm"
+    assert mitigated["twirling"]["enable_measure"] is True
+    assert mitigated["max_execution_time"] == 10_800
+
+
+def test_hardware_sample_statistics_measure_raw_feasibility_and_optimum() -> None:
+    samples = [
+        np.asarray([0, 1, 0, 1], dtype=np.int8),
+        np.asarray([1, 1, 0, 0], dtype=np.int8),
+    ]
+
+    statistics = _hardware_sample_statistics(
+        _model(), samples, max_feasible_states=16
+    )
+
+    assert statistics["hardware_raw_one_hot_rate"] == pytest.approx(0.5)
+    assert statistics["hardware_feasible_shots"] == 1
+    assert statistics["hardware_optimal_hit_rate"] == pytest.approx(0.5)
+    assert statistics["hardware_best_feasible_normalized_gap"] == pytest.approx(0.0)
+
+
+def test_ibm_job_timing_uses_runtime_metrics() -> None:
+    class FakeJob:
+        def __init__(self) -> None:
+            self.usage_estimation = {"quantum_seconds": 0.125}
+
+        @staticmethod
+        def metrics():
+            return {
+                "timestamps": {
+                    "created": "2026-08-07T10:00:00Z",
+                    "running": "2026-08-07T10:00:03Z",
+                    "finished": "2026-08-07T10:00:05Z",
+                }
+            }
+
+    timing = _ibm_job_timing(FakeJob(), wall_seconds=5.5)
+
+    assert timing["hardware_queue_seconds"] == pytest.approx(3.0)
+    assert timing["hardware_execution_seconds"] == pytest.approx(2.0)
+    assert timing["hardware_turnaround_seconds"] == pytest.approx(5.0)
+    assert timing["hardware_quantum_seconds"] == pytest.approx(0.125)
+
+
+def test_ibm_adapter_transpiles_and_collects_current_runtime_schema(monkeypatch) -> None:
+    runtime = pytest.importorskip("qiskit_ibm_runtime")
+    pytest.importorskip("qiskit")
+    from qiskit.providers.fake_provider import GenericBackendV2
+    from qiskit_ibm_runtime.options import SamplerOptions
+
+    class FakeBackend(GenericBackendV2):
+        def status(self):
+            return SimpleNamespace(operational=True, pending_jobs=3)
+
+    backend = FakeBackend(20, seed=7)
+
+    class FakeService:
+        @staticmethod
+        def least_busy(**kwargs):
+            assert kwargs["min_num_qubits"] == 4
+            assert kwargs["operational"] is True
+            return backend
+
+        @staticmethod
+        def backend(name, **kwargs):
+            assert name == backend.name
+            assert kwargs["use_fractional_gates"] is False
+            return backend
+
+    class FakeMeasurement:
+        @staticmethod
+        def get_counts():
+            return {"1010": 16}
+
+    class FakeJob:
+        usage_estimation = {"quantum_seconds": 0.125}  # noqa: RUF012
+
+        @staticmethod
+        def result():
+            publication = SimpleNamespace(
+                data=SimpleNamespace(meas=FakeMeasurement())
+            )
+            return [publication]
+
+        @staticmethod
+        def metrics():
+            return {
+                "timestamps": {
+                    "created": "2026-08-07T10:00:00Z",
+                    "running": "2026-08-07T10:00:03Z",
+                    "finished": "2026-08-07T10:00:05Z",
+                }
+            }
+
+        @staticmethod
+        def job_id():
+            return "synthetic-test-job"
+
+    class FakeSampler:
+        def __init__(self, *, mode, options):
+            assert mode is backend
+            SamplerOptions(**options)
+
+        @staticmethod
+        def run(publications, *, shots):
+            assert len(publications) == 1
+            assert shots == 16
+            return FakeJob()
+
+    monkeypatch.setattr(runtime, "QiskitRuntimeService", FakeService)
+    monkeypatch.setattr(runtime, "SamplerV2", FakeSampler)
+
+    samples = sample_qubo(
+        _model(),
+        method="ibm-qpu",
+        num_samples=16,
+        seed=3,
+        allow_remote=True,
+        qaoa_restarts=1,
+        ibm_backend_name=backend.name,
+        ibm_mitigation_strategy="dd_measure_twirling",
+        ibm_transpiler_trials=2,
+    )
+    info = samples.attrs["sampler_info"]
+
+    assert len(samples) == 16
+    assert info["backend_name"] == backend.name
+    assert info["mitigation_strategy"] == "dd_measure_twirling"
+    assert info["returned_samples"] == 16
+    assert info["hardware_optimal_hit_rate"] == pytest.approx(1.0)
+    assert info["transpiled_two_qubit_gates"] > 0
+    assert info["hardware_queue_seconds"] == pytest.approx(3.0)

@@ -17,6 +17,24 @@ class StaleCheckpointError(RuntimeError):
     """Raised when a checkpoint does not match the requested experiment identity."""
 
 
+def challenge_results_root(
+    project_root: str | Path,
+    *,
+    producer: str,
+) -> Path:
+    """Return the non-overlapping result root for one execution surface.
+
+    ``runs/`` remains reserved for row-level solver artifacts.  Aggregate study
+    evidence belongs in ``results/`` and is separated by the process that created
+    it so a CLI run cannot overwrite notebook checkpoints (or vice versa).
+    """
+
+    normalized = str(producer).strip().lower()
+    if normalized not in {"cli", "notebook"}:
+        raise ValueError("producer must be 'cli' or 'notebook'")
+    return Path(project_root) / "results" / "challenge-study" / normalized
+
+
 def checkpoint_identity(
     problem: ProblemData,
     *,

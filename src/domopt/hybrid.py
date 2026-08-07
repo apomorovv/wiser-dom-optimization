@@ -28,7 +28,7 @@ from .classical import ClassicalSolverError, solve_classical
 from .data import normalize_problem_data
 from .objective import evaluate_solution
 from .penalties import order_penalty
-from .quantum import sample_qubo
+from .quantum import IBM_MITIGATION_STRATEGIES, sample_qubo
 from .qubo import build_candidate_qubo, perturb_qubo, qubo_energy
 from .repair import repair_one_hot
 from .resources import (
@@ -68,6 +68,10 @@ class HybridConfig:
     qaoa_restarts: int = 4
     qaoa_readout_bitflip_probability: float = 0.0
     max_feasible_states: int = 65_536
+    ibm_backend_name: str | None = None
+    ibm_mitigation_strategy: str = "baseline"
+    ibm_transpiler_optimization_level: int = 3
+    ibm_transpiler_trials: int = 4
 
     def validate(self) -> None:
         if self.iterations <= 0:
@@ -103,6 +107,15 @@ class HybridConfig:
             )
         if self.max_feasible_states <= 0:
             raise ValueError("max_feasible_states must be positive")
+        if self.ibm_mitigation_strategy not in IBM_MITIGATION_STRATEGIES:
+            raise ValueError(
+                "ibm_mitigation_strategy must be one of "
+                f"{IBM_MITIGATION_STRATEGIES}"
+            )
+        if self.ibm_transpiler_optimization_level not in {0, 1, 2, 3}:
+            raise ValueError("ibm_transpiler_optimization_level must be 0, 1, 2, or 3")
+        if self.ibm_transpiler_trials <= 0:
+            raise ValueError("ibm_transpiler_trials must be positive")
 
 
 @dataclass(frozen=True)
@@ -1339,6 +1352,12 @@ def solve_hybrid(
                 settings.qaoa_readout_bitflip_probability
             ),
             max_feasible_states=settings.max_feasible_states,
+            ibm_backend_name=settings.ibm_backend_name,
+            ibm_mitigation_strategy=settings.ibm_mitigation_strategy,
+            ibm_transpiler_optimization_level=(
+                settings.ibm_transpiler_optimization_level
+            ),
+            ibm_transpiler_trials=settings.ibm_transpiler_trials,
         )
         sampling_seconds += perf_counter() - sampling_start
         sampler_info = samples.attrs.get("sampler_info")
@@ -1425,7 +1444,7 @@ def solve_hybrid(
     runtime = perf_counter() - start
     assignments = incumbent.assignments.copy()
     assignments["method"] = "hybrid"
-    if settings.sampler in {"dwave-qpu", "dwave-hybrid", "ibm-qpu"}:
+    if settings.sampler == "ibm-qpu":
         execution_class = "quantum-assisted-hardware"
     elif settings.sampler == "qaoa_statevector":
         execution_class = "quantum-algorithm-simulation"
@@ -1433,6 +1452,29 @@ def solve_hybrid(
         execution_class = "quantum-inspired-classical"
     else:
         execution_class = "classical-control"
+    def hardware_values(key: str) -> list[float]:
+        return [
+            float(run[key])
+            for run in hardware_runs
+            if isinstance(run.get(key), (int, float, np.integer, np.floating))
+        ]
+
+    backend_names = sorted(
+        {
+            str(run["backend_name"])
+            for run in hardware_runs
+            if run.get("backend_name") is not None
+        }
+    )
+    mitigation_names = sorted(
+        {
+            str(run["mitigation_strategy"])
+            for run in hardware_runs
+            if run.get("mitigation_strategy") is not None
+        }
+    )
+    hardware_present = bool(hardware_runs)
+    quantum_seconds = sum(hardware_values("hardware_quantum_seconds"))
     return Solution(
         method="hybrid",
         assignments=assignments,
@@ -1459,33 +1501,82 @@ def solve_hybrid(
             "accepted_moves": accepted_moves,
             "sampler_calls": sampler_calls,
             "qpu_calls": (
-                sampler_calls
-                if settings.sampler in {"dwave-qpu", "dwave-hybrid", "ibm-qpu"}
-                else 0
+                sampler_calls if settings.sampler == "ibm-qpu" else 0
             ),
             "quantum_simulator_calls": (
                 sampler_calls if settings.sampler == "qaoa_statevector" else 0
             ),
-            "qpu_access_time_microseconds": sum(
-                float(run.get("timing", {}).get("qpu_access_time", 0.0))
-                for run in hardware_runs
-                if isinstance(run.get("timing"), dict)
+            "qpu_access_time_microseconds": (
+                quantum_seconds * 1_000_000.0 if hardware_present else None
             ),
-            "mean_chain_break_fraction": (
+            "hardware_backend": ",".join(backend_names) if backend_names else None,
+            "hardware_backend_pending_jobs": (
+                min(hardware_values("backend_pending_jobs_at_selection"), default=None)
+            ),
+            "hardware_mitigation_strategy": (
+                ",".join(mitigation_names) if mitigation_names else None
+            ),
+            "hardware_wall_seconds": (
+                sum(hardware_values("hardware_wall_seconds"))
+                if hardware_present
+                else None
+            ),
+            "hardware_queue_seconds": (
+                sum(hardware_values("hardware_queue_seconds"))
+                if hardware_present
+                else None
+            ),
+            "hardware_execution_seconds": sum(
+                hardware_values("hardware_execution_seconds")
+            )
+            if hardware_present
+            else None,
+            "hardware_turnaround_seconds": (
+                sum(hardware_values("hardware_turnaround_seconds"))
+                if hardware_present
+                else None
+            ),
+            "hardware_quantum_seconds": quantum_seconds if hardware_present else None,
+            "hardware_returned_samples": (
+                sum(hardware_values("returned_samples")) if hardware_present else None
+            ),
+            "hardware_feasible_shots": (
+                sum(hardware_values("hardware_feasible_shots"))
+                if hardware_present
+                else None
+            ),
+            "hardware_backend_num_qubits": max(
+                hardware_values("backend_num_qubits"), default=None
+            ),
+            "hardware_logical_qubits": max(
+                hardware_values("logical_qubits"), default=None
+            ),
+            "hardware_transpiled_depth": max(
+                hardware_values("transpiled_depth"), default=None
+            ),
+            "hardware_two_qubit_gates": max(
+                hardware_values("transpiled_two_qubit_gates"), default=None
+            ),
+            "hardware_two_qubit_depth": max(
+                hardware_values("transpiled_two_qubit_depth"), default=None
+            ),
+            "hardware_optimal_hit_rate": (
+                float(np.mean(hardware_values("hardware_optimal_hit_rate")))
+                if hardware_values("hardware_optimal_hit_rate")
+                else None
+            ),
+            "hardware_optimal_hit_rate_given_feasible": (
                 float(
                     np.mean(
-                        [
-                            float(run["mean_chain_break_fraction"])
-                            for run in hardware_runs
-                            if run.get("mean_chain_break_fraction") is not None
-                        ]
+                        hardware_values("hardware_optimal_hit_rate_given_feasible")
                     )
                 )
-                if any(
-                    run.get("mean_chain_break_fraction") is not None
-                    for run in hardware_runs
-                )
+                if hardware_values("hardware_optimal_hit_rate_given_feasible")
                 else None
+            ),
+            "hardware_best_feasible_normalized_gap": min(
+                hardware_values("hardware_best_feasible_normalized_gap"),
+                default=None,
             ),
             "recourse_solves": recourse_solves,
             "maximum_qubo_variables": maximum_qubo_variables,

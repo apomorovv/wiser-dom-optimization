@@ -137,7 +137,7 @@ confirmed before a business deployment or external QPU experiment.
 ### U5. Physical QPU benchmark
 
 The repository provides adapters but has not sent the restricted QUBO to hardware.
-Any claim needs organizer approval, matched timing, embedding statistics, repeated
+Any claim needs organizer approval, matched timing, transpilation statistics, repeated
 trials, and uncertainty intervals.
 
 ### U6. Operational candidate-DC authorization

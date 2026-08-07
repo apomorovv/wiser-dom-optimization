@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from itertools import product
 from math import exp
+from time import perf_counter
 from typing import Literal
 
 import numpy as np
@@ -23,6 +24,151 @@ from .schemas import QUBOModel
 
 class QuantumSolverError(RuntimeError):
     pass
+
+
+IBM_MITIGATION_STRATEGIES = (
+    "baseline",
+    "dynamical_decoupling",
+    "dd_measure_twirling",
+)
+
+
+def ibm_sampler_options(
+    strategy: str,
+    *,
+    shots: int,
+    max_execution_time_seconds: float | None = None,
+) -> dict[str, object]:
+    """Return explicit SamplerV2 options for a matched mitigation ablation."""
+
+    normalized = str(strategy).strip().lower()
+    if normalized not in IBM_MITIGATION_STRATEGIES:
+        raise QuantumSolverError(
+            f"IBM mitigation strategy must be one of {IBM_MITIGATION_STRATEGIES}"
+        )
+    if shots <= 0:
+        raise QuantumSolverError("IBM shots must be positive")
+    use_dd = normalized in {"dynamical_decoupling", "dd_measure_twirling"}
+    use_measure_twirling = normalized == "dd_measure_twirling"
+    options: dict[str, object] = {
+        "default_shots": int(shots),
+        "dynamical_decoupling": {
+            "enable": use_dd,
+            "sequence_type": "XpXm",
+            "scheduling_method": "alap",
+        },
+        "twirling": {
+            "enable_gates": False,
+            "enable_measure": use_measure_twirling,
+        },
+        "environment": {
+            "job_tags": ["wiser-dom", "synthetic-only", normalized],
+        },
+    }
+    if max_execution_time_seconds is not None:
+        options["max_execution_time"] = max(
+            1, min(10_800, int(np.ceil(max_execution_time_seconds)))
+        )
+    return options
+
+
+def _hardware_sample_statistics(
+    model: QUBOModel,
+    samples: list[np.ndarray],
+    *,
+    max_feasible_states: int,
+) -> dict[str, float | int | None]:
+    """Compare raw hardware samples with the exact feasible QUBO reference."""
+
+    feasible, groups = _feasible_bitstrings(
+        model,
+        max_feasible_states=max_feasible_states,
+    )
+    optimum = float(min(qubo_energy(model, vector) for vector in feasible))
+    feasible_energies = np.asarray(
+        [qubo_energy(model, vector) for vector in feasible], dtype=float
+    )
+    span = max(1.0, float(np.ptp(feasible_energies)))
+    raw_energies = np.asarray(
+        [qubo_energy(model, vector) for vector in samples], dtype=float
+    )
+    one_hot = np.asarray(
+        [all(int(vector[list(group)].sum()) == 1 for group in groups) for vector in samples],
+        dtype=bool,
+    )
+    feasible_raw = raw_energies[one_hot]
+    tolerance = 1e-9 * max(1.0, abs(optimum))
+    best = float(np.min(feasible_raw)) if len(feasible_raw) else None
+    return {
+        "hardware_raw_one_hot_rate": float(one_hot.mean()) if len(one_hot) else 0.0,
+        "hardware_feasible_shots": int(one_hot.sum()),
+        "hardware_optimal_hit_rate": float(
+            np.mean(one_hot & (np.abs(raw_energies - optimum) <= tolerance))
+        )
+        if len(raw_energies)
+        else 0.0,
+        "hardware_optimal_hit_rate_given_feasible": float(
+            np.mean(np.abs(feasible_raw - optimum) <= tolerance)
+        )
+        if len(feasible_raw)
+        else 0.0,
+        "hardware_best_feasible_energy": best,
+        "hardware_best_feasible_normalized_gap": (
+            None if best is None else float((best - optimum) / span)
+        ),
+        "hardware_mean_raw_energy": (
+            float(np.mean(raw_energies)) if len(raw_energies) else None
+        ),
+        "hardware_mean_feasible_energy": (
+            float(np.mean(feasible_raw)) if len(feasible_raw) else None
+        ),
+        "exact_best_feasible_energy": optimum,
+    }
+
+
+def _duration_seconds(timestamps: dict[str, object], start: str, end: str) -> float | None:
+    start_value = timestamps.get(start)
+    end_value = timestamps.get(end)
+    if start_value is None or end_value is None:
+        return None
+    try:
+        return float((pd.Timestamp(end_value) - pd.Timestamp(start_value)).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+def _ibm_job_timing(job: object, wall_seconds: float) -> dict[str, float | None]:
+    """Normalize IBM Runtime wall, queue, execution, and quantum usage timing."""
+
+    try:
+        metrics = dict(job.metrics() or {})
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        metrics = {}
+    timestamps = dict(metrics.get("timestamps", {}) or {})
+    queue_seconds = _duration_seconds(timestamps, "created", "running")
+    execution_seconds = _duration_seconds(timestamps, "running", "finished")
+    turnaround_seconds = _duration_seconds(timestamps, "created", "finished")
+
+    usage = dict(metrics.get("usage", {}) or {})
+    estimation = getattr(job, "usage_estimation", {})
+    if callable(estimation):
+        try:
+            estimation = estimation()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            estimation = {}
+    estimation = dict(estimation or {}) if isinstance(estimation, dict) else {}
+    quantum_seconds = estimation.get("quantum_seconds")
+    if quantum_seconds is None:
+        quantum_seconds = usage.get("quantum_seconds", usage.get("seconds"))
+    return {
+        "hardware_wall_seconds": float(wall_seconds),
+        "hardware_queue_seconds": queue_seconds,
+        "hardware_execution_seconds": execution_seconds,
+        "hardware_turnaround_seconds": turnaround_seconds,
+        "hardware_quantum_seconds": (
+            None if quantum_seconds is None else float(quantum_seconds)
+        ),
+    }
 
 
 def _one_hot_group_indices(model: QUBOModel) -> tuple[tuple[int, ...], ...]:
@@ -290,87 +436,6 @@ def _simulated_annealing_samples(
     return samples
 
 
-def _sample_dwave(
-    model: QUBOModel,
-    *,
-    method: str,
-    num_samples: int,
-    allow_remote: bool,
-    time_limit_seconds: float | None,
-) -> tuple[list[np.ndarray], dict[str, object]]:
-    if not allow_remote:
-        raise QuantumSolverError(
-            "Remote QPU access is disabled. Set allow_remote=True only after the "
-            "challenge data owner approves sending model coefficients off-platform."
-        )
-    try:
-        import dimod
-        from dwave.system import DWaveSampler, EmbeddingComposite, LeapHybridSampler
-    except ImportError as error:
-        raise QuantumSolverError(
-            "D-Wave sampling requires the optional 'qpu' dependencies"
-        ) from error
-
-    matrix = np.asarray(model.Q, dtype=float)
-    linear = {index: float(matrix[index, index]) for index in range(len(matrix))}
-    quadratic = {
-        (i, j): float(matrix[i, j] + matrix[j, i])
-        for i in range(len(matrix))
-        for j in range(i + 1, len(matrix))
-        if abs(matrix[i, j] + matrix[j, i]) > 0
-    }
-    # Integer labels prevent order, SKU, and DC identifiers from becoming remote labels.
-    bqm = dimod.BinaryQuadraticModel(
-        linear,
-        quadratic,
-        float(model.constant),
-        dimod.BINARY,
-    )
-    if method == "dwave-hybrid":
-        sampler = LeapHybridSampler()
-        kwargs = {}
-        if time_limit_seconds is not None:
-            kwargs["time_limit"] = float(time_limit_seconds)
-        response = sampler.sample(bqm, **kwargs)
-    else:
-        sampler = EmbeddingComposite(DWaveSampler())
-        response = sampler.sample(bqm, num_reads=int(num_samples))
-
-    samples: list[np.ndarray] = []
-    for datum in response.data(fields=["sample", "energy"]):
-        samples.append(
-            np.asarray(
-                [int(datum.sample[index]) for index in range(len(model.variable_names))],
-                dtype=np.int8,
-            )
-        )
-        if len(samples) >= num_samples:
-            break
-    if not samples:
-        raise QuantumSolverError("D-Wave returned no samples")
-    response_info = dict(getattr(response, "info", {}) or {})
-    timing = {
-        str(key): float(value)
-        for key, value in dict(response_info.get("timing", {}) or {}).items()
-        if isinstance(value, (int, float, np.integer, np.floating))
-    }
-    record_names = set(getattr(response.record.dtype, "names", ()) or ())
-    chain_break = None
-    if "chain_break_fraction" in record_names:
-        chain_break = float(np.mean(response.record.chain_break_fraction))
-    child = getattr(sampler, "child", sampler)
-    solver = getattr(child, "solver", None)
-    metadata: dict[str, object] = {
-        "backend": method,
-        "problem_id": response_info.get("problem_id"),
-        "solver_id": getattr(solver, "id", None),
-        "timing": timing,
-        "mean_chain_break_fraction": chain_break,
-        "returned_samples": len(samples),
-    }
-    return samples, metadata
-
-
 def _sample_ibm_qpu(
     model: QUBOModel,
     *,
@@ -381,6 +446,10 @@ def _sample_ibm_qpu(
     restarts: int,
     max_feasible_states: int,
     time_limit_seconds: float | None,
+    backend_name: str | None,
+    mitigation_strategy: str,
+    transpiler_optimization_level: int,
+    transpiler_trials: int,
 ) -> tuple[list[np.ndarray], dict[str, object]]:
     """Run constraint-preserving QAOA on a configured IBM Quantum account.
 
@@ -464,19 +533,68 @@ def _sample_ibm_qpu(
     circuit.measure_all()
 
     service = QiskitRuntimeService()
-    backend = service.least_busy(
-        operational=True,
-        simulator=False,
-        min_num_qubits=n,
+    if transpiler_optimization_level not in {0, 1, 2, 3}:
+        raise QuantumSolverError("IBM transpiler optimization level must be 0, 1, 2, or 3")
+    if transpiler_trials <= 0:
+        raise QuantumSolverError("IBM transpiler trials must be positive")
+    if backend_name:
+        backend = service.backend(str(backend_name), use_fractional_gates=False)
+        status = backend.status()
+        if not bool(getattr(status, "operational", False)):
+            raise QuantumSolverError(f"Requested IBM backend {backend_name!r} is not operational")
+        if int(getattr(backend, "num_qubits", 0)) < n:
+            raise QuantumSolverError(
+                f"Requested IBM backend {backend_name!r} has fewer than {n} qubits"
+            )
+    else:
+        backend = service.least_busy(
+            operational=True,
+            simulator=False,
+            min_num_qubits=n,
+            use_fractional_gates=False,
+        )
+        status = backend.status()
+
+    transpiled: list[tuple[tuple[int, int, int], int, object]] = []
+    for trial in range(transpiler_trials):
+        transpiler_seed = int(seed + 104_729 * trial)
+        pass_manager = generate_preset_pass_manager(
+            backend=backend,
+            optimization_level=transpiler_optimization_level,
+            seed_transpiler=transpiler_seed,
+        )
+        candidate = pass_manager.run(circuit)
+        two_qubit_gates = sum(
+            1 for instruction in candidate.data if len(instruction.qubits) == 2
+        )
+        transpiled.append(
+            (
+                (two_qubit_gates, int(candidate.depth()), int(candidate.size())),
+                transpiler_seed,
+                candidate,
+            )
+        )
+    score, selected_transpiler_seed, isa_circuit = min(
+        transpiled, key=lambda item: item[0]
     )
-    pass_manager = generate_preset_pass_manager(
-        backend=backend,
-        optimization_level=3,
+    two_qubit_gates, transpiled_depth, transpiled_size = score
+    try:
+        two_qubit_depth = int(
+            isa_circuit.depth(filter_function=lambda item: len(item.qubits) == 2)
+        )
+    except (AttributeError, TypeError, ValueError):
+        two_qubit_depth = 0
+
+    options = ibm_sampler_options(
+        mitigation_strategy,
+        shots=int(num_samples),
+        max_execution_time_seconds=time_limit_seconds,
     )
-    isa_circuit = pass_manager.run(circuit)
-    sampler = SamplerV2(mode=backend)
+    sampler = SamplerV2(mode=backend, options=options)
+    wall_start = perf_counter()
     job = sampler.run([isa_circuit], shots=int(num_samples))
     publication = job.result()[0]
+    wall_seconds = perf_counter() - wall_start
     counts = publication.data.meas.get_counts()
     samples: list[np.ndarray] = []
     for remote_bits, count in counts.items():
@@ -489,6 +607,12 @@ def _sample_ibm_qpu(
     backend_name = getattr(backend, "name", "unknown")
     if callable(backend_name):
         backend_name = backend_name()
+    sample_statistics = _hardware_sample_statistics(
+        model,
+        samples,
+        max_feasible_states=max_feasible_states,
+    )
+    timing = _ibm_job_timing(job, wall_seconds)
     metadata: dict[str, object] = {
         **local_info,
         "backend": "ibm-qpu",
@@ -498,6 +622,19 @@ def _sample_ibm_qpu(
         "job_id": str(job.job_id()),
         "returned_samples": len(samples),
         "requested_time_limit_seconds": time_limit_seconds,
+        "backend_pending_jobs_at_selection": int(getattr(status, "pending_jobs", 0)),
+        "backend_num_qubits": int(getattr(backend, "num_qubits", 0)),
+        "logical_qubits": n,
+        "mitigation_strategy": mitigation_strategy,
+        "transpiler_optimization_level": transpiler_optimization_level,
+        "transpiler_trials": transpiler_trials,
+        "selected_transpiler_seed": selected_transpiler_seed,
+        "transpiled_depth": transpiled_depth,
+        "transpiled_size": transpiled_size,
+        "transpiled_two_qubit_gates": two_qubit_gates,
+        "transpiled_two_qubit_depth": two_qubit_depth,
+        **timing,
+        **sample_statistics,
     }
     return samples[:num_samples], metadata
 
@@ -512,8 +649,6 @@ def sample_qubo(
         "simulated_annealing",
         "qaoa_statevector",
         "ibm-qpu",
-        "dwave-qpu",
-        "dwave-hybrid",
     ] = "exact",
     num_samples: int = 1000,
     sweeps: int = 500,
@@ -526,13 +661,17 @@ def sample_qubo(
     qaoa_restarts: int = 4,
     qaoa_readout_bitflip_probability: float = 0.0,
     max_feasible_states: int = 65_536,
+    ibm_backend_name: str | None = None,
+    ibm_mitigation_strategy: str = "baseline",
+    ibm_transpiler_optimization_level: int = 3,
+    ibm_transpiler_trials: int = 4,
 ) -> pd.DataFrame:
     """Return sampled bitstrings and energies using one common schema.
 
     Exact enumeration and simulated annealing are reproducible classical
     validation backends. ``qaoa_statevector`` locally simulates a constraint-
-    preserving gate-model circuit. IBM and D-Wave methods are optional execution
-    adapters; none of these backends imply quantum advantage.
+    preserving gate-model circuit. IBM hardware is an optional execution adapter;
+    none of these backends imply quantum advantage.
     """
 
     n = len(model.variable_names)
@@ -612,16 +751,11 @@ def sample_qubo(
             restarts=qaoa_restarts,
             max_feasible_states=max_feasible_states,
             time_limit_seconds=time_limit_seconds,
+            backend_name=ibm_backend_name,
+            mitigation_strategy=ibm_mitigation_strategy,
+            transpiler_optimization_level=ibm_transpiler_optimization_level,
+            transpiler_trials=ibm_transpiler_trials,
         )
-    elif method in {"dwave-qpu", "dwave-hybrid"}:
-        bitstrings, sampler_info = _sample_dwave(
-            model,
-            method=method,
-            num_samples=num_samples,
-            allow_remote=allow_remote,
-            time_limit_seconds=time_limit_seconds,
-        )
-        sampler_info["remote"] = True
     else:
         raise QuantumSolverError(f"Unknown QUBO sampling method {method!r}")
 

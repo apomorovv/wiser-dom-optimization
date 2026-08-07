@@ -8,6 +8,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from .experiments import rank_ibm_hardware_strategies
+
 _METHOD_STYLES = {
     "default": {"marker": "D", "linestyle": ":"},
     "greedy": {"marker": "o", "linestyle": "-"},
@@ -86,6 +88,39 @@ def _solver_comparison(frame: pd.DataFrame, output: Path) -> Path:
         axis.grid(axis="y", alpha=0.2)
         axis.tick_params(axis="x", rotation=20)
     figure.suptitle("Common-objective solver comparison", fontsize=14)
+    figure.tight_layout()
+    return _save(figure, output)
+
+
+def _solver_frontier(frame: pd.DataFrame, output: Path) -> Path:
+    """Plot normalized quality loss against end-to-end runtime."""
+
+    data = _feasible(frame).copy()
+    best_capture = float(data["objective_capture_rate"].max())
+    data["gap_basis_points"] = 10_000.0 * (
+        best_capture - data["objective_capture_rate"].astype(float)
+    )
+    figure, axis = plt.subplots(figsize=(8, 5))
+    for row in data.itertuples(index=False):
+        method = str(row.method)
+        style = _METHOD_STYLES.get(method, {"marker": "o"})
+        axis.scatter(
+            float(row.runtime_seconds),
+            float(row.gap_basis_points),
+            s=85,
+            marker=style.get("marker", "o"),
+            label=method,
+        )
+    axis.set_xscale("log")
+    axis.set_yscale("symlog", linthresh=0.1)
+    axis.set_ylim(bottom=0)
+    axis.set(
+        xlabel="End-to-end runtime (seconds, log scale)",
+        ylabel="Objective-capture gap to best (basis points; lower is better)",
+        title="Validated quality–runtime frontier",
+    )
+    axis.grid(alpha=0.25)
+    axis.legend(ncol=2, fontsize=8, title="Method")
     figure.tight_layout()
     return _save(figure, output)
 
@@ -492,6 +527,7 @@ def plot_challenge_results(
             generated[name] = builder(frame, root / f"{name}.png")
 
     add("solver_comparison", "solver_comparison", _solver_comparison)
+    add("solver_frontier", "solver_comparison", _solver_frontier)
     add("size_scaling", "size_scaling", _size_scaling)
     add("synthetic_scaling", "synthetic_scaling", _size_scaling)
     add(
@@ -596,5 +632,137 @@ def plot_hardware_benchmark(
     axis.set_xscale("log")
     axis.grid(axis="x", alpha=0.25)
     axis.legend(title="Backend")
+    figure.tight_layout()
+    return _save(figure, output_path)
+
+
+def plot_ibm_backend_snapshot(
+    backends: pd.DataFrame,
+    output_path: str | Path,
+) -> Path:
+    """Plot the authenticated IBM queue snapshot used for backend selection."""
+
+    required = {"backend", "pending_jobs", "selected_least_busy"}
+    if missing := required - set(backends.columns):
+        raise ValueError(f"IBM backend snapshot is missing {sorted(missing)}")
+    data = backends.loc[backends["pending_jobs"] >= 0].copy()
+    if data.empty:
+        raise ValueError("IBM backend snapshot has no usable queue values")
+    data = data.sort_values(["pending_jobs", "backend"], kind="mergesort")
+    selection_column = (
+        "selected_for_study" if "selected_for_study" in data else "selected_least_busy"
+    )
+    colors = np.where(data[selection_column], "#16a34a", "#94a3b8")
+    figure, axis = plt.subplots(figsize=(9, max(4, 0.45 * len(data))))
+    axis.barh(data["backend"], data["pending_jobs"], color=colors)
+    axis.invert_yaxis()
+    axis.set(
+        xlabel="Pending jobs at discovery",
+        ylabel="Accessible operational IBM backend",
+        title="IBM backend queue snapshot (green = study backend)",
+    )
+    axis.grid(axis="x", alpha=0.25)
+    figure.tight_layout()
+    return _save(figure, output_path)
+
+
+def plot_ibm_hardware_study(
+    results: pd.DataFrame,
+    output_path: str | Path,
+) -> Path:
+    """Plot hardware feasibility, quality, circuit cost, and timing diagnostics."""
+
+    required = {
+        "sampler_backend",
+        "hardware_mitigation_strategy",
+        "qaoa_layers",
+        "raw_one_hot_rate",
+        "hardware_optimal_hit_rate",
+        "hardware_two_qubit_gates",
+        "runtime_seconds",
+        "search_improvement",
+    }
+    if missing := required - set(results.columns):
+        raise ValueError(f"IBM hardware results are missing {sorted(missing)}")
+    summary = rank_ibm_hardware_strategies(results)
+    display_names = {
+        "baseline": "baseline",
+        "dynamical_decoupling": "DD",
+        "dd_measure_twirling": "DD + measurement twirling",
+    }
+    summary["variant"] = summary.apply(
+        lambda row: (
+            f"p={int(row['qaoa_layers'])} | "
+            f"{display_names.get(str(row['hardware_mitigation_strategy']), row['hardware_mitigation_strategy'])}"
+        ),
+        axis=1,
+    )
+    colors = np.where(summary["selected_best_observed"], "#16a34a", "#2563eb")
+
+    def asymmetric_error(measure: str) -> np.ndarray:
+        center = summary[measure].to_numpy(dtype=float)
+        lower = summary[f"{measure}_q25"].to_numpy(dtype=float)
+        upper = summary[f"{measure}_q75"].to_numpy(dtype=float)
+        return np.vstack([center - lower, upper - center])
+
+    figure, axes = plt.subplots(2, 3, figsize=(16, 8))
+    axes[0, 0].bar(
+        summary["variant"],
+        100 * summary["raw_one_hot_rate"],
+        yerr=100 * asymmetric_error("raw_one_hot_rate"),
+        color=colors,
+        capsize=4,
+    )
+    axes[0, 0].set(title="Raw one-hot feasibility", ylabel="Percent of shots")
+    axes[0, 1].bar(
+        summary["variant"],
+        100 * summary["hardware_optimal_hit_rate"],
+        yerr=100 * asymmetric_error("hardware_optimal_hit_rate"),
+        color=colors,
+        capsize=4,
+    )
+    axes[0, 1].set(title="Exact-optimum raw hit rate", ylabel="Percent of shots")
+    axes[0, 2].bar(
+        summary["variant"], summary["search_improvement"], color=colors
+    )
+    axes[0, 2].set(
+        title="Validated sampler-driven assignment gain",
+        ylabel="Synthetic objective units",
+    )
+    axes[1, 0].bar(
+        summary["variant"], summary["hardware_two_qubit_gates"], color=colors
+    )
+    axes[1, 0].set(title="Transpiled two-qubit gates", ylabel="Gate count")
+    axes[1, 1].bar(
+        summary["variant"],
+        summary.get("hardware_queue_seconds", pd.Series(0.0, index=summary.index)),
+        label="Queue",
+    )
+    axes[1, 1].bar(
+        summary["variant"],
+        summary.get("hardware_execution_seconds", pd.Series(0.0, index=summary.index)),
+        bottom=summary.get(
+            "hardware_queue_seconds", pd.Series(0.0, index=summary.index)
+        ),
+        label="Execution",
+    )
+    axes[1, 1].set(title="IBM job turnaround", ylabel="Seconds")
+    axes[1, 1].legend()
+    axes[1, 2].bar(
+        summary["variant"],
+        summary["runtime_seconds"],
+        yerr=asymmetric_error("runtime_seconds"),
+        color=colors,
+        capsize=4,
+    )
+    axes[1, 2].set(title="End-to-end hybrid runtime", ylabel="Seconds")
+    for axis in axes.flat:
+        axis.grid(axis="y", alpha=0.2)
+        axis.tick_params(axis="x", rotation=28, labelsize=8)
+    best = str(summary.iloc[0]["variant"])
+    figure.suptitle(
+        f"IBM Dicke/XY-QAOA hardware stress test (green = best observed: {best})",
+        fontsize=14,
+    )
     figure.tight_layout()
     return _save(figure, output_path)

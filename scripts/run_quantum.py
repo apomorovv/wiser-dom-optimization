@@ -33,8 +33,6 @@ def build_parser() -> argparse.ArgumentParser:
             "simulated_annealing",
             "qaoa_statevector",
             "ibm-qpu",
-            "dwave-qpu",
-            "dwave-hybrid",
         ],
         default="exact",
     )

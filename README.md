@@ -36,13 +36,14 @@ the returned incumbent.
 - bounded large-neighborhood search with QUBO assignment proposals and exact MILP
   fulfillment recourse;
 - full and feasible-subspace exact enumeration, random sampling, simulated
-  annealing, a local constraint-preserving QAOA statevector simulator, and optional
-  IBM Quantum and D-Wave QPU backends behind an explicit privacy gate;
+  annealing, a local constraint-preserving QAOA statevector simulator, and an optional
+  IBM Quantum backend behind an explicit privacy gate;
 - an independent objective evaluator and feasibility validator;
 - all requested experiments, business- and QUBO-penalty sweeps, and additional
   controls;
-- content-addressed checkpoints and automatically saved tables/PNG figures under
-  `runs/challenge-study/`;
+- content-addressed notebook checkpoints under
+  `results/challenge-study/notebook/` and separate CLI evidence under
+  `results/challenge-study/cli/`;
 - an opt-in synthetic CPU/GPU crossover benchmark and privacy-gated hardware tests; and
 - a runnable Jupyter notebook and aggregate-only Streamlit planner copilot.
 
@@ -99,8 +100,8 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev,notebook,app]"
 ```
 
-Optional extras are `.[gpu]` for CUDA 12 CuPy benchmarking, `.[qpu]` for D-Wave,
-`.[ibm]` for IBM Quantum, and `.[full]` for the complete workstation environment. The default solver remains
+Optional extras are `.[gpu]` for CUDA 12 CuPy benchmarking, `.[ibm]` for IBM
+Quantum, and `.[full]` for the complete workstation environment. The default solver remains
 local and CPU-based because exact recourse and small local QUBOs dominate the current
 workload.
 
@@ -134,14 +135,36 @@ Point the command to the cleaned directory:
 ```bash
 python scripts/run_challenge_study.py \
   --bundle-dir /approved/path/to/challenge-files \
-  --profile full \
-  --output runs/challenge-study/aggregate_results.csv
+  --profile full
 ```
 
 The command first validates every required file and stops on the first missing,
 unreadable, empty, malformed, nonfinite, or structurally invalid artifact. `--profile smoke` runs a short
-development grid; `--profile full` runs the evidence grid. Aggregate CSVs and all
-applicable PNG charts are written below `runs/challenge-study/`.
+development grid; `--profile full` runs the evidence grid. A full run refuses an
+uncommitted worktree by default. CLI tables, manifests, and PNG charts are written
+below `results/challenge-study/cli/<profile>/`; notebook artifacts cannot overwrite
+them.
+
+## Current evidence and solver choice
+
+The supplied full study produced 247 feasible rows across 14 experiment families with
+zero independent-validation violations. Those artifacts were generated from a dirty
+worktree, so their numerical conclusions are provisional until rerun from this branch.
+They nevertheless establish the production hierarchy:
+
+| Method | Observed result on the common real subset | Role |
+|---|---|---|
+| Greedy | Fastest nontrivial method; slightly below the exact objective | Large-scale first incumbent |
+| Polished greedy | Matched the exact MILP in 6.63 seconds | Recommended production default |
+| Exact MILP | Same objective with a zero reported gap | Small-instance certificate |
+| Exact LNS | Same objective but slower on this subset | Assignment-search escalation when coordination exists |
+| Hybrid sampler LNS | Same objective in 28.43 seconds with zero accepted sampler moves | Research comparator only |
+
+On the largest real scaling point, median greedy and polished-greedy runtimes were
+37.5 and 133.4 seconds. Polishing improved normalized objective capture by only 0.0337
+percentage points, so greedy remains the time-critical fallback. Exact LNS now starts
+from that polished incumbent in every scaling study; it can no longer appear worse
+merely because quantity polishing was disabled.
 
 ## Run the notebook
 
@@ -165,9 +188,35 @@ Set `NESTLE_BUNDLE_DIR` before launching Jupyter, or use the default cleaned pat
 10. feasible exact, random, simulated-annealing, and Dicke/XY-QAOA controls;
 11. a synthetic coordination control with a known exact reference;
 12. an optional end-to-end CPU/GPU QUBO-scoring crossover; and
-13. optional synthetic-only IBM Quantum or D-Wave hardware validation.
+13. optional synthetic-only IBM backend discovery and a matched Dicke/XY-QAOA
+    hardware stress test.
 
 All persisted experiment rows are aggregate-only.
+
+Notebook checkpoints, aggregate tables, and figures are written below
+`results/challenge-study/notebook/<profile>/<problem-hash>/<run-hash>/`.
+
+## Run the IBM hardware study
+
+The opt-in hardware study first records all accessible operational backends and uses
+the least-busy eligible device unless a backend is specified. It evaluates a coupled
+synthetic instance with an exact reference, not Nestlé coefficients, and refuses a
+dirty worktree unless the run is explicitly marked provisional.
+
+```bash
+python scripts/run_ibm_hardware_study.py \
+  --allow-remote \
+  --profile presentation \
+  --shots 512
+```
+
+It compares $p=1$ and $p=2$ Dicke/XY-QAOA, baseline execution, dynamical decoupling,
+and measurement twirling. The saved figures report raw one-hot feasibility,
+exact-optimum hit rate, validated assignment gain, circuit depth/two-qubit gates,
+queue time, execution time, quantum usage, and end-to-end runtime. A separate strategy
+ranking identifies the best observed variant from exact raw hit rate and feasibility,
+using validated gain and cost only as tie-breakers. Completed rows are written after
+every variant so a later provider failure does not erase earlier QPU evidence.
 
 ## Run the planner copilot
 

@@ -65,7 +65,7 @@ def answer_experiment_question(question: str, results: pd.DataFrame) -> str:
             "No quantum advantage is established. The suite includes a local "
             "constraint-preserving QAOA statevector simulation; simulated annealing remains "
             "quantum-inspired, and exact recourse/validation remain classical. A hardware "
-            "claim needs approved IBM or D-Wave QPU runs, matched end-to-end budgets, repeated "
+            "claim needs approved IBM QPU runs, matched end-to-end budgets, repeated "
             "trials, and uncertainty bounds."
         )
 

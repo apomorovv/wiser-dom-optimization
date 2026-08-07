@@ -10,7 +10,7 @@ Run the experiment suite first:
 python scripts/run_challenge_study.py \
   --bundle-dir /approved/path/to/challenge-files \
   --profile full \
-  --output runs/challenge-study/aggregate_results.csv
+  --output results/challenge-study/cli/full/aggregate_results.csv
 ```
 
 Then start the app:

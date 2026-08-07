@@ -28,8 +28,8 @@ def read_results(path: str) -> pd.DataFrame:
 
 
 uploaded = st.sidebar.file_uploader("Aggregate experiment CSV", type=["csv"])
-artifact_root = Path("runs/challenge-study")
-aggregate_candidates = list(artifact_root.glob("*/*/*/aggregate_results.csv"))
+artifact_root = Path("results/challenge-study")
+aggregate_candidates = list(artifact_root.rglob("aggregate_results.csv"))
 default_path = (
     max(aggregate_candidates, key=lambda path: path.stat().st_mtime)
     if aggregate_candidates
