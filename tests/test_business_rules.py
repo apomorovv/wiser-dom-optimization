@@ -4,6 +4,7 @@ import pytest
 from domopt.baselines import solve_default_baseline, solve_greedy_baseline
 from domopt.classical import ClassicalSolverError, solve_classical
 from domopt.data import make_tiny_problem_data, normalize_problem_data
+from domopt.experiments import shock_inventory
 from domopt.resources import solution_capacity_usage
 from domopt.rules import minimum_divert_fulfillment
 from domopt.schemas import ProblemData
@@ -15,7 +16,8 @@ def test_projected_atp_may_decrease_over_protection_horizon() -> None:
     later = problem.inventory.iloc[[0]].copy()
     later["date"] = pd.Timestamp("2026-07-15")
     later["cumulative_available_cases"] = 2
-    inventory = pd.concat([problem.inventory, later], ignore_index=True)
+    inventory = problem.inventory.copy()
+    inventory.loc[len(inventory)] = later.iloc[0]
 
     normalized = normalize_problem_data(
         ProblemData(
@@ -29,6 +31,33 @@ def test_projected_atp_may_decrease_over_protection_horizon() -> None:
         )
     )
     assert len(normalized.inventory) == len(problem.inventory) + 1
+
+
+def test_inventory_shock_recomputes_candidate_and_default_fill_estimates() -> None:
+    problem = make_tiny_problem_data()
+    candidates = problem.candidates.copy()
+    candidates["estimated_fill_cases"] = 999
+    candidates["estimated_fulfilled_value"] = 999.0
+    scenario = ProblemData(
+        orders=problem.orders,
+        order_lines=problem.order_lines,
+        inventory=problem.inventory,
+        candidates=candidates,
+        capacities=problem.capacities,
+        calendar=problem.calendar,
+        metadata=problem.metadata,
+    )
+
+    shocked = shock_inventory(scenario, 0.5)
+    defaults = shocked.candidates.loc[shocked.candidates["is_default"]].set_index(
+        "order_id"
+    )["estimated_fill_cases"]
+
+    assert shocked.candidates["estimated_fill_cases"].max() < 999
+    assert shocked.orders.set_index("order_id")["default_fillable_cases"].to_dict() == (
+        defaults.astype(int).to_dict()
+    )
+    assert shocked.metadata["scenario_candidate_estimates_recomputed"] is True
 
 
 def test_five_percent_rule_rejects_insufficient_alternate_fill() -> None:
@@ -92,6 +121,55 @@ def test_exact_model_enforces_assignment_group_cohesion() -> None:
             grouped,
             fixed_assignments={"O1": "O1_D1_T1", "O2": "O2_D2_T1"},
         )
+
+
+@pytest.mark.parametrize(
+    ("fixed", "expected_selected", "expect_reduction"),
+    [
+        (
+            {"O1": "O1_D1_T1", "O2": "O2_D1_T1"},
+            {"O1_D1_T1", "O2_D1_T1"},
+            True,
+        ),
+        ({"O1": "O1_D1_T1"}, {"O1_D1_T1", "O2_D1_T1"}, False),
+        ({"O1": None, "O2": None}, set(), True),
+    ],
+)
+def test_fixed_assignment_presolve_preserves_group_semantics(
+    fixed: dict[str, str | None],
+    expected_selected: set[str],
+    expect_reduction: bool,
+) -> None:
+    problem = make_tiny_problem_data()
+    orders = problem.orders.copy()
+    orders["assignment_group"] = "G1"
+    candidates = problem.candidates.copy()
+    candidates["group_option_id"] = candidates["dc_id"] + "::T1"
+    grouped = normalize_problem_data(
+        ProblemData(
+            orders=orders,
+            order_lines=problem.order_lines,
+            inventory=problem.inventory,
+            candidates=candidates,
+            capacities=problem.capacities,
+            calendar=problem.calendar,
+            metadata={
+                **problem.metadata,
+                "enforce_assignment_group": True,
+                "enforce_min_divert_improvement": False,
+            },
+        )
+    )
+
+    solution = solve_classical(grouped, fixed_assignments=fixed)
+    selected = set(
+        solution.assignments["candidate_id"].dropna().astype(str)
+    )
+
+    assert validate_solution(grouped, solution).is_feasible
+    assert selected == expected_selected
+    removed = int(solution.metadata["fixed_candidate_columns_removed"])
+    assert (removed > 0) is expect_reduction
 
 
 @pytest.mark.parametrize("solver", [solve_default_baseline, solve_greedy_baseline])

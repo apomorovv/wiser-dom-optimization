@@ -1,8 +1,16 @@
 import pandas as pd
 import pytest
 
+from domopt.baselines import solve_greedy_baseline
+from domopt.classical import solve_classical
 from domopt.data import make_tiny_problem_data
-from domopt.hybrid import HybridConfig, _resource_pressure, solve_hybrid
+from domopt.hybrid import (
+    ExactLNSConfig,
+    HybridConfig,
+    _resource_pressure,
+    solve_exact_lns,
+    solve_hybrid,
+)
 from domopt.objective import evaluate_solution
 from domopt.synthetic import make_synthetic_problem
 from domopt.validation import validate_solution
@@ -27,6 +35,10 @@ def test_hybrid_improves_default_and_finds_tiny_optimum() -> None:
     assert validate_solution(problem, solution).is_feasible
     assert evaluate_solution(problem, solution).objective_value == pytest.approx(126.0)
     assert solution.metadata["improvement"] > 0
+    assert solution.metadata["total_improvement"] == pytest.approx(
+        solution.metadata["initial_polish_improvement"]
+        + solution.metadata["improvement"]
+    )
     assert solution.metadata["qpu_calls"] == 0
     assert solution.metadata["maximum_qubo_variables"] <= 8
 
@@ -82,3 +94,56 @@ def test_candidate_reduction_keeps_qubo_within_cap() -> None:
 
     assert validate_solution(problem, solution).is_feasible
     assert solution.metadata["maximum_qubo_variables"] == 3
+
+
+def test_exact_lns_closes_verified_assignment_gap_without_degrading() -> None:
+    problem = make_synthetic_problem(order_count=4, seed=6)
+    solution = solve_exact_lns(
+        problem,
+        config=ExactLNSConfig(
+            iterations=1,
+            initial_neighborhood_groups=4,
+            minimum_neighborhood_groups=2,
+            maximum_neighborhood_groups=4,
+            maximum_neighborhood_orders=4,
+            local_time_limit_seconds=5,
+            mip_relative_gap=0,
+            polish_initial_incumbent=True,
+            seed=6,
+        ),
+    )
+
+    assert validate_solution(problem, solution).is_feasible
+    assert evaluate_solution(problem, solution).objective_value == pytest.approx(-2548.4)
+    assert solution.metadata["search_improvement"] == pytest.approx(197.2)
+    assert solution.metadata["accepted_moves"] == 1
+    assert solution.metadata["assignment_moves"] == 1
+    assert solution.metadata["maximum_local_variables"] > 0
+
+
+def test_exact_lns_matches_tiny_exact_optimum_without_degrading_greedy() -> None:
+    problem = make_tiny_problem_data()
+    greedy = solve_greedy_baseline(problem)
+    exact = solve_classical(problem, time_limit_seconds=5, mip_relative_gap=0)
+    lns = solve_exact_lns(
+        problem,
+        config=ExactLNSConfig(
+            iterations=1,
+            initial_neighborhood_groups=2,
+            minimum_neighborhood_groups=1,
+            maximum_neighborhood_groups=2,
+            maximum_neighborhood_orders=2,
+            maximum_local_fulfillment_variables=100,
+            local_time_limit_seconds=5,
+            mip_relative_gap=0,
+            polish_initial_incumbent=False,
+            seed=5,
+        ),
+    )
+
+    greedy_value = evaluate_solution(problem, greedy).objective_value
+    exact_value = evaluate_solution(problem, exact).objective_value
+    lns_value = evaluate_solution(problem, lns).objective_value
+    assert validate_solution(problem, lns).is_feasible
+    assert lns_value >= greedy_value
+    assert lns_value == pytest.approx(exact_value)

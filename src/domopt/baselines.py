@@ -8,7 +8,7 @@ from time import perf_counter
 import numpy as np
 import pandas as pd
 
-from .penalties import order_penalty
+from .penalties import PenaltyContext, build_penalty_context, order_penalty
 from .resources import (
     candidate_fixed_consumption,
     split_pick_quantities,
@@ -41,6 +41,34 @@ class _DecisionPlan:
     member_plans: tuple[_CandidatePlan, ...]
     score: float
     incremental_score: float
+
+
+@dataclass(frozen=True)
+class _BaselineCache:
+    """Problem-static lookups reused by every residual candidate preview."""
+
+    lines_by_order: dict[str, pd.DataFrame]
+    penalty_context: PenaltyContext
+    unassigned_score_by_order: dict[str, float]
+
+
+def _make_baseline_cache(problem: ProblemData) -> _BaselineCache:
+    lines_by_order = {
+        str(order_id): group.copy()
+        for order_id, group in problem.order_lines.groupby("order_id", sort=False)
+    }
+    context = build_penalty_context(problem)
+    unassigned: dict[str, float] = {}
+    for order_id, lines in lines_by_order.items():
+        quantities = lines.copy()
+        quantities["unfulfilled_cases"] = quantities["demand_cases"]
+        unassigned[order_id] = -order_penalty(
+            problem,
+            order_id,
+            quantities,
+            context=context,
+        )
+    return _BaselineCache(lines_by_order, context, unassigned)
 
 
 class _InventoryState:
@@ -128,11 +156,24 @@ class _CapacityState:
         return clone
 
 
-def _order_lines(problem: ProblemData, order_id: str) -> pd.DataFrame:
+def _order_lines(
+    problem: ProblemData,
+    order_id: str,
+    cache: _BaselineCache | None = None,
+) -> pd.DataFrame:
+    if cache is not None:
+        return cache.lines_by_order[str(order_id)].copy()
     return problem.order_lines.loc[problem.order_lines["order_id"] == order_id].copy()
 
 
-def _unassigned_score(problem: ProblemData, order_id: str, lines: pd.DataFrame) -> float:
+def _unassigned_score(
+    problem: ProblemData,
+    order_id: str,
+    lines: pd.DataFrame,
+    cache: _BaselineCache | None = None,
+) -> float:
+    if cache is not None:
+        return cache.unassigned_score_by_order[str(order_id)]
     quantities = lines.copy()
     quantities["unfulfilled_cases"] = quantities["demand_cases"]
     return -order_penalty(problem, order_id, quantities)
@@ -143,11 +184,12 @@ def _preview_candidate(
     candidate: pd.Series,
     inventory: _InventoryState,
     capacities: _CapacityState,
+    cache: _BaselineCache | None = None,
 ) -> _CandidatePlan | None:
     order_id = str(candidate["order_id"])
     dc_id = str(candidate["dc_id"])
     pgi_date = pd.Timestamp(candidate["pgi_date"])
-    lines = _order_lines(problem, order_id)
+    lines = _order_lines(problem, order_id, cache)
 
     dock_units = candidate_fixed_consumption(candidate, "dock")
     if capacities.remaining(dc_id, pgi_date, "dock") < dock_units - 1e-9:
@@ -228,16 +270,21 @@ def _preview_candidate(
         if unit_volume > 0:
             residual_resources["volume"] -= quantity * unit_volume
 
-    merged = _order_lines(problem, order_id).copy()
+    merged = _order_lines(problem, order_id, cache)
     merged["fulfilled"] = merged["sku_id"].map(quantities).fillna(0).astype(int)
     merged["unfulfilled"] = merged["demand_cases"] - merged["fulfilled"]
     penalty_quantities = merged.rename(columns={"unfulfilled": "unfulfilled_cases"})
     score = float(
         (merged["unit_value"] * merged["fulfilled"]).sum()
-        - order_penalty(problem, order_id, penalty_quantities)
+        - order_penalty(
+            problem,
+            order_id,
+            penalty_quantities,
+            context=None if cache is None else cache.penalty_context,
+        )
         - float(candidate["shipping_cost"])
     )
-    unassigned = _unassigned_score(problem, order_id, merged)
+    unassigned = _unassigned_score(problem, order_id, merged, cache)
     if candidate_is_divert(problem, candidate):
         threshold = minimum_divert_fulfillment(problem, order_id)
         if threshold is not None and int(merged["fulfilled"].sum()) < threshold:
@@ -261,8 +308,9 @@ def _commit_plan(
     plan: _CandidatePlan,
     inventory: _InventoryState,
     capacities: _CapacityState,
+    cache: _BaselineCache | None = None,
 ) -> None:
-    lines = _order_lines(problem, plan.order_id).set_index("sku_id")
+    lines = _order_lines(problem, plan.order_id, cache).set_index("sku_id")
     total_cases = 0
     total_case_picks = 0
     total_pallet_picks = 0
@@ -352,6 +400,7 @@ def _preview_decision(
     option_rows: pd.DataFrame,
     inventory: _InventoryState,
     capacities: _CapacityState,
+    cache: _BaselineCache | None = None,
 ) -> _DecisionPlan | None:
     """Preview all members against private residual states, then commit atomically."""
 
@@ -368,13 +417,14 @@ def _preview_decision(
             candidate_row,
             trial_inventory,
             trial_capacities,
+            cache,
         )
         if plan is None:
             return None
-        _commit_plan(problem, plan, trial_inventory, trial_capacities)
+        _commit_plan(problem, plan, trial_inventory, trial_capacities, cache)
         member_plans.append(plan)
-        lines = _order_lines(problem, order_id)
-        unassigned_score += _unassigned_score(problem, order_id, lines)
+        lines = _order_lines(problem, order_id, cache)
+        unassigned_score += _unassigned_score(problem, order_id, lines, cache)
 
     score = sum(plan.score for plan in member_plans)
     return _DecisionPlan(
@@ -395,6 +445,7 @@ def _feasible_decisions(
     capacities: _CapacityState,
     *,
     default_only: bool = False,
+    cache: _BaselineCache | None = None,
 ) -> list[_DecisionPlan]:
     decisions: list[_DecisionPlan] = []
     for option_id, option_rows in _candidate_options_for_unit(
@@ -410,6 +461,7 @@ def _feasible_decisions(
             option_rows,
             inventory,
             capacities,
+            cache,
         )
         if decision is not None:
             decisions.append(decision)
@@ -432,9 +484,10 @@ def _commit_decision(
     inventory: _InventoryState,
     capacities: _CapacityState,
     selected: dict[str, _CandidatePlan | None],
+    cache: _BaselineCache | None = None,
 ) -> None:
     for plan in decision.member_plans:
-        _commit_plan(problem, plan, inventory, capacities)
+        _commit_plan(problem, plan, inventory, capacities, cache)
         selected[plan.order_id] = plan
 
 
@@ -443,6 +496,7 @@ def _solution_from_plans(
     method: str,
     selected: dict[str, _CandidatePlan | None],
     runtime_seconds: float,
+    cache: _BaselineCache | None = None,
 ) -> Solution:
     default_dc = problem.orders.set_index("order_id")["default_dc"].to_dict()
     assignment_rows: list[dict[str, object]] = []
@@ -475,7 +529,11 @@ def _solution_from_plans(
                 }
             )
 
-        for line in _order_lines(problem, order_id).sort_values("sku_id").itertuples(index=False):
+        for line in (
+            _order_lines(problem, order_id, cache)
+            .sort_values("sku_id")
+            .itertuples(index=False)
+        ):
             fulfilled = 0 if plan is None else int(plan.quantities.get(str(line.sku_id), 0))
             fulfillment_rows.append(
                 {
@@ -507,6 +565,7 @@ def solve_default_baseline(problem: ProblemData) -> Solution:
     inventory = _InventoryState(problem.inventory)
     capacities = _CapacityState(problem.capacities)
     selected: dict[str, _CandidatePlan | None] = {}
+    cache = _make_baseline_cache(problem)
 
     eligible = problem.candidates[problem.candidates["eligible"]].copy()
     units = _assignment_units(problem)
@@ -519,6 +578,7 @@ def solve_default_baseline(problem: ProblemData) -> Solution:
             inventory,
             capacities,
             default_only=True,
+            cache=cache,
         )
         if not decisions:
             selected.update({order_id: None for order_id in members})
@@ -535,10 +595,15 @@ def solve_default_baseline(problem: ProblemData) -> Solution:
             inventory,
             capacities,
             selected,
+            cache,
         )
 
     return _solution_from_plans(
-        problem, "default", selected, runtime_seconds=perf_counter() - start
+        problem,
+        "default",
+        selected,
+        runtime_seconds=perf_counter() - start,
+        cache=cache,
     )
 
 
@@ -556,6 +621,7 @@ def solve_greedy_baseline(problem: ProblemData) -> Solution:
     selected: dict[str, _CandidatePlan | None] = {}
     eligible = problem.candidates[problem.candidates["eligible"]].copy()
     units = _assignment_units(problem)
+    cache = _make_baseline_cache(problem)
 
     # Establish one stable priority from the unconstrained initial previews. The
     # previous implementation rescanned every remaining order after every commit,
@@ -570,6 +636,7 @@ def solve_greedy_baseline(problem: ProblemData) -> Solution:
             eligible,
             inventory,
             capacities,
+            cache=cache,
         )
         positive = [decision for decision in initial if decision.incremental_score > 1e-9]
         if positive:
@@ -587,6 +654,7 @@ def solve_greedy_baseline(problem: ProblemData) -> Solution:
             eligible,
             inventory,
             capacities,
+            cache=cache,
         )
         positive = [decision for decision in decisions if decision.incremental_score > 1e-9]
         if not positive:
@@ -599,10 +667,102 @@ def solve_greedy_baseline(problem: ProblemData) -> Solution:
             inventory,
             capacities,
             selected,
+            cache,
         )
 
     return _solution_from_plans(
-        problem, "greedy", selected, runtime_seconds=perf_counter() - start
+        problem,
+        "greedy",
+        selected,
+        runtime_seconds=perf_counter() - start,
+        cache=cache,
+    )
+
+
+def solve_polished_greedy(
+    problem: ProblemData,
+    *,
+    time_limit_seconds: float = 30.0,
+    mip_relative_gap: float = 0.0,
+    seed: int | None = None,
+) -> Solution:
+    """Polish greedy quantities exactly while preserving its assignment policy.
+
+    This is the strongest low-risk production baseline: greedy chooses the whole-load
+    routing policy, then a structurally reduced MILP reallocates cases and evaluates
+    thresholded penalties exactly.  Failure or degradation falls back to the feasible
+    greedy incumbent.
+    """
+
+    # Local imports keep the elementary default/greedy module independent at import
+    # time while avoiding a circular dependency with hybrid initialization.
+    from .classical import ClassicalSolverError, solve_classical
+    from .objective import evaluate_solution
+    from .validation import validate_solution
+
+    start = perf_counter()
+    raw = solve_greedy_baseline(problem)
+    raw_value = evaluate_solution(problem, raw).objective_value
+    policy = {
+        str(row.order_id): (
+            None if bool(row.is_unassigned) else str(row.candidate_id)
+        )
+        for row in raw.assignments.itertuples(index=False)
+    }
+    polish_start = perf_counter()
+    best = raw
+    best_value = raw_value
+    succeeded = False
+    recourse_metadata: dict[str, object] = {}
+    try:
+        polished = solve_classical(
+            problem,
+            time_limit_seconds=time_limit_seconds,
+            mip_relative_gap=mip_relative_gap,
+            seed=seed,
+            fixed_assignments=policy,
+        )
+        recourse_metadata = dict(polished.metadata)
+        polished_value = evaluate_solution(problem, polished).objective_value
+        if (
+            validate_solution(problem, polished).is_feasible
+            and polished_value >= raw_value - 1e-9
+        ):
+            best = polished
+            best_value = polished_value
+            succeeded = True
+    except ClassicalSolverError as error:
+        recourse_metadata = {"error": str(error)}
+
+    assignments = best.assignments.copy()
+    assignments["method"] = "polished_greedy"
+    runtime = perf_counter() - start
+    return Solution(
+        method="polished_greedy",
+        assignments=assignments,
+        fulfillment=best.fulfillment.copy(),
+        runtime_seconds=runtime,
+        raw_objective=best_value,
+        metadata={
+            "algorithm": "greedy-plus-exact-fixed-assignment-recourse",
+            "execution_class": "classical-matheuristic",
+            "raw_initial_objective": raw_value,
+            "initial_objective": raw_value,
+            "final_objective": best_value,
+            "initial_polish_improvement": best_value - raw_value,
+            "total_improvement": best_value - raw_value,
+            "polish_succeeded": succeeded,
+            "polish_seconds": perf_counter() - polish_start,
+            "greedy_seconds": raw.runtime_seconds,
+            "recourse_metadata": recourse_metadata,
+            "optimality_gap": recourse_metadata.get("optimality_gap"),
+            "best_bound": recourse_metadata.get("best_bound"),
+            "n_variables": recourse_metadata.get("n_variables"),
+            "n_constraints": recourse_metadata.get("n_constraints"),
+            "fixed_candidate_columns_removed": recourse_metadata.get(
+                "fixed_candidate_columns_removed"
+            ),
+        },
     )
 
 

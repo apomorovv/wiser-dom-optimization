@@ -32,6 +32,16 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
         if total_requested_value > 0
         else 1.0
     )
+    lost_value = total_requested_value - objective.fulfilled_value
+    total_business_cost = lost_value + objective.penalty_cost + objective.shipping_cost
+    objective_capture_rate = (
+        objective.objective_value / total_requested_value
+        if total_requested_value > 0
+        else 1.0
+    )
+    assignment_groups = int(
+        problem.orders.get("assignment_group", problem.orders["order_id"]).nunique()
+    )
 
     assignments = solution.assignments
     reassigned = int(
@@ -41,6 +51,22 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
         ).sum()
     )
     unassigned = int(assignments["is_unassigned"].astype(bool).sum())
+    order_to_group = problem.orders.set_index("order_id").get("assignment_group")
+    if order_to_group is None:
+        reassigned_groups = reassigned
+    else:
+        diverted_orders = set(
+            assignments.loc[
+                (~assignments["is_unassigned"].astype(bool))
+                & assignments["is_divert"].astype(bool),
+                "order_id",
+            ].astype(str)
+        )
+        reassigned_groups = int(
+            order_to_group.loc[
+                order_to_group.index.astype(str).isin(diverted_orders)
+            ].nunique()
+        )
 
     metrics: dict[str, Any] = {
         "method": solution.method,
@@ -49,18 +75,60 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
         **objective.to_dict(),
         "fulfilled_cases": fulfilled_cases,
         "requested_cases": total_cases,
+        "requested_value": total_requested_value,
+        "lost_value": float(lost_value),
+        "total_business_cost": float(total_business_cost),
         "case_fill_rate": float(case_fill_rate),
         "value_fill_rate": float(value_fill_rate),
+        "objective_capture_rate": float(objective_capture_rate),
+        "objective_per_requested_case": (
+            float(objective.objective_value / total_cases) if total_cases > 0 else 0.0
+        ),
+        "objective_per_assignment_group": (
+            float(objective.objective_value / assignment_groups)
+            if assignment_groups > 0
+            else 0.0
+        ),
         "reassigned_orders": reassigned,
+        "reassigned_assignment_groups": reassigned_groups,
         "unassigned_orders": unassigned,
         "runtime_seconds": float(solution.runtime_seconds),
         "best_bound": solution.metadata.get("best_bound"),
         "optimality_gap": solution.metadata.get("optimality_gap"),
         "initial_objective": solution.metadata.get("initial_objective"),
-        "hybrid_improvement": solution.metadata.get("improvement"),
+        "hybrid_improvement": (
+            solution.metadata.get("improvement")
+            if solution.method == "hybrid"
+            else None
+        ),
+        "search_improvement": solution.metadata.get(
+            "search_improvement", solution.metadata.get("improvement")
+        ),
+        "lns_improvement": (
+            solution.metadata.get("search_improvement")
+            if solution.method == "exact_lns"
+            else None
+        ),
+        "raw_initial_objective": solution.metadata.get("raw_initial_objective"),
+        "polished_initial_objective": solution.metadata.get(
+            "polished_initial_objective"
+        ),
+        "initial_polish_improvement": solution.metadata.get(
+            "initial_polish_improvement"
+        ),
+        "total_hybrid_improvement": (
+            solution.metadata.get("total_improvement")
+            if solution.method == "hybrid"
+            else None
+        ),
+        "total_search_improvement": solution.metadata.get("total_improvement"),
         "sampler_backend": solution.metadata.get("sampler"),
+        "execution_class": solution.metadata.get("execution_class"),
         "sampler_calls": solution.metadata.get("sampler_calls"),
         "qpu_calls": solution.metadata.get("qpu_calls"),
+        "quantum_simulator_calls": solution.metadata.get(
+            "quantum_simulator_calls"
+        ),
         "qpu_access_time_microseconds": solution.metadata.get(
             "qpu_access_time_microseconds"
         ),
@@ -75,14 +143,42 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
             "maximum_candidates_per_order"
         ),
         "recourse_solves": solution.metadata.get("recourse_solves"),
+        "local_solves": solution.metadata.get("local_solves"),
+        "assignment_moves": solution.metadata.get("assignment_moves"),
+        "maximum_active_groups": solution.metadata.get("maximum_active_groups"),
+        "maximum_active_orders": solution.metadata.get("maximum_active_orders"),
+        "maximum_local_variables": solution.metadata.get("maximum_local_variables"),
+        "maximum_local_constraints": solution.metadata.get(
+            "maximum_local_constraints"
+        ),
+        "maximum_local_mip_nodes": solution.metadata.get(
+            "maximum_local_mip_nodes"
+        ),
+        "model_variables": solution.metadata.get("n_variables"),
+        "model_constraints": solution.metadata.get("n_constraints"),
+        "mip_node_count": solution.metadata.get("mip_node_count"),
         "initialization_seconds": solution.metadata.get("initialization_seconds"),
+        "baseline_initialization_seconds": solution.metadata.get(
+            "baseline_initialization_seconds"
+        ),
+        "initial_polish_seconds": solution.metadata.get("initial_polish_seconds"),
         "qubo_build_seconds": solution.metadata.get("qubo_build_seconds"),
         "sampling_seconds": solution.metadata.get("sampling_seconds"),
         "recourse_seconds": solution.metadata.get("recourse_seconds"),
+        "local_solve_seconds": solution.metadata.get("local_solve_seconds"),
+        "residualization_seconds": solution.metadata.get(
+            "residualization_seconds"
+        ),
+        "global_validation_seconds": solution.metadata.get(
+            "global_validation_seconds"
+        ),
         "other_seconds": solution.metadata.get("other_seconds"),
         "remote_enabled": solution.metadata.get("remote_enabled"),
         "qubo_noise_relative_sigma": solution.metadata.get(
             "qubo_noise_relative_sigma"
+        ),
+        "qaoa_readout_bitflip_probability": solution.metadata.get(
+            "qaoa_readout_bitflip_probability"
         ),
         "violations": validation.to_dict(),
     }

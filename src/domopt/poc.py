@@ -39,6 +39,49 @@ POC_REFERENCE_FILENAMES = {
 # Backward-compatible public name for callers that only need runtime inputs.
 POC_FILENAMES = POC_INPUT_FILENAMES
 
+POC_REQUIRED_COLUMNS = {
+    "orders": {
+        "Group_Flag",
+        "Plant",
+        "MaterialNumber",
+        "ZipCode",
+        "LoadNumber",
+        "transportationplanningdate",
+        "RequestedDeliveryDate",
+        "OrderedQty_converted",
+        "ProductPlanningUnitsPerCase",
+        "ProductCasesPerPallet",
+        "Order_SKU_Revenue",
+        "Penaltyforpotentialcuts",
+        "OrderedWeight",
+        "OrderedVolume",
+        "DeliveryPriority",
+        "IsTopCust",
+        "FillRateThreshold",
+        "FixedPenalty",
+        "FixedPenaltyPerSKU",
+        "MinimumPenalty",
+        "MaximumPenalty",
+        "IsInvAvail",
+    },
+    "inventory": {
+        "LocationID",
+        "MaterialID",
+        "DATE",
+        "Available_inventory",
+        "OpeningStock",
+        "Total_Reserved_Qty",
+    },
+    "shipping": {"Plant", "TargetZip", "Distance", "Shipping_Cost"},
+    "dock": {"Plant", "Date", "Dock_Remaining"},
+    "throughput": {
+        "Plant",
+        "transportationplanningdate",
+        "util_case_picks",
+        "util_pallets",
+    },
+}
+
 
 class PocDataError(DataValidationError):
     """Raised when a supplied POC artifact is missing, unreadable, or inconsistent."""
@@ -56,7 +99,10 @@ class PocConfig:
     enforce_assignment_group: bool = True
     throughput_headroom_fraction: float | None = None
     holidays: tuple[str, ...] = ()
-    pareto_prune: bool = True
+    # Isolated score dominance is not a proof of global dominance when options
+    # consume different inventory or capacity resource vectors.
+    pareto_prune: bool = False
+    candidate_dc_scope: str = "network_intersection"
 
     def validate(self) -> None:
         if self.protection_days < 0:
@@ -72,6 +118,14 @@ class PocConfig:
             and self.throughput_headroom_fraction < 0
         ):
             raise ValueError("throughput_headroom_fraction must be nonnegative")
+        if self.candidate_dc_scope not in {
+            "focus_default_dcs",
+            "network_intersection",
+        }:
+            raise ValueError(
+                "candidate_dc_scope must be 'focus_default_dcs' or "
+                "'network_intersection'"
+            )
 
 
 def _paths(bundle_dir: str | Path) -> dict[str, Path]:
@@ -112,6 +166,15 @@ def prepare_poc_bundle(
     requested = dict(POC_INPUT_FILENAMES)
     if include_reference_outputs:
         requested.update(POC_REFERENCE_FILENAMES)
+    allowed_names = set(requested.values())
+    unexpected = sorted(
+        path.name for path in destination.iterdir() if path.name not in allowed_names
+    )
+    if unexpected:
+        raise PocDataError(
+            "Output directory contains files outside the normalized bundle contract: "
+            f"{unexpected}. Use an empty directory or remove them explicitly."
+        )
     available = [
         path
         for path in source.rglob("*")
@@ -163,6 +226,145 @@ def _read_csv(path: Path, *, dtype: dict[str, str] | None = None) -> pd.DataFram
     return frame
 
 
+def _validated_numeric(
+    frame: pd.DataFrame,
+    column: str,
+    *,
+    role: str,
+    allow_null: bool = False,
+    nonnegative: bool = False,
+    lower: float | None = None,
+    upper: float | None = None,
+) -> pd.Series:
+    source = frame[column]
+    parsed = pd.to_numeric(source, errors="coerce")
+    malformed = source.notna() & parsed.isna()
+    if malformed.any():
+        raise PocDataError(
+            f"{role} column {column!r} contains nonnumeric values at rows "
+            f"{malformed[malformed].index[:5].tolist()}"
+        )
+    if not allow_null and parsed.isna().any():
+        raise PocDataError(f"{role} column {column!r} contains missing values")
+    finite = parsed.dropna().to_numpy(dtype=float)
+    if not np.isfinite(finite).all():
+        raise PocDataError(f"{role} column {column!r} contains nonfinite values")
+    if nonnegative and (parsed.dropna() < 0).any():
+        raise PocDataError(f"{role} column {column!r} must be nonnegative")
+    if lower is not None and (parsed.dropna() < lower).any():
+        raise PocDataError(f"{role} column {column!r} must be at least {lower}")
+    if upper is not None and (parsed.dropna() > upper).any():
+        raise PocDataError(f"{role} column {column!r} must be at most {upper}")
+    return parsed
+
+
+def _validate_source_table(role: str, frame: pd.DataFrame) -> None:
+    """Fail closed on malformed model inputs before default filling or clipping."""
+
+    required = POC_REQUIRED_COLUMNS[role]
+    missing = required - set(frame.columns)
+    if missing:
+        raise PocDataError(f"{role} input is missing columns {sorted(missing)}")
+
+    identifier_columns = {
+        "orders": ["Group_Flag", "Plant", "MaterialNumber", "ZipCode"],
+        "inventory": ["LocationID", "MaterialID"],
+        "shipping": ["Plant", "TargetZip"],
+        "dock": ["Plant"],
+        "throughput": ["Plant"],
+    }[role]
+    for column in identifier_columns:
+        blank = frame[column].isna() | frame[column].astype(str).str.strip().eq("")
+        if blank.any():
+            raise PocDataError(f"{role} column {column!r} contains blank identifiers")
+
+    date_columns = {
+        "orders": ["transportationplanningdate", "RequestedDeliveryDate"],
+        "inventory": ["DATE"],
+        "shipping": [],
+        "dock": ["Date"],
+        "throughput": ["transportationplanningdate"],
+    }[role]
+    for column in date_columns:
+        parsed = pd.to_datetime(frame[column], errors="coerce", format="mixed")
+        if parsed.isna().any():
+            raise PocDataError(f"{role} column {column!r} contains invalid dates")
+
+    if role == "orders":
+        for column in [
+            "OrderedQty_converted",
+            "ProductCasesPerPallet",
+            "Order_SKU_Revenue",
+            "OrderedWeight",
+            "OrderedVolume",
+            "DeliveryPriority",
+        ]:
+            _validated_numeric(frame, column, role=role, nonnegative=True)
+        _validated_numeric(
+            frame,
+            "ProductPlanningUnitsPerCase",
+            role=role,
+            allow_null=True,
+            nonnegative=True,
+        )
+        for column in [
+            "Penaltyforpotentialcuts",
+            "FillRateThreshold",
+            "FixedPenalty",
+            "FixedPenaltyPerSKU",
+            "MinimumPenalty",
+            "MaximumPenalty",
+        ]:
+            _validated_numeric(
+                frame,
+                column,
+                role=role,
+                allow_null=True,
+                nonnegative=True,
+            )
+        _validated_numeric(
+            frame,
+            "FillRateThreshold",
+            role=role,
+            allow_null=True,
+            lower=0.0,
+            upper=1.0,
+        )
+        for column in ["IsInvAvail", "IsTopCust"]:
+            values = set(frame[column].dropna().astype(str).str.upper().str.strip())
+            if not values <= {"Y", "N"}:
+                raise PocDataError(
+                    f"orders column {column!r} has unsupported values {sorted(values)}"
+                )
+    elif role == "inventory":
+        available = _validated_numeric(
+            frame, "Available_inventory", role=role
+        )
+        opening = _validated_numeric(
+            frame, "OpeningStock", role=role, nonnegative=True
+        )
+        reserved = _validated_numeric(
+            frame, "Total_Reserved_Qty", role=role, nonnegative=True
+        )
+        if not np.allclose(
+            available.to_numpy(dtype=float),
+            (opening - reserved).to_numpy(dtype=float),
+            atol=1e-8,
+        ):
+            raise PocDataError(
+                "inventory identity fails: Available_inventory must equal "
+                "OpeningStock - Total_Reserved_Qty"
+            )
+    elif role == "shipping":
+        for column in ["Distance", "Shipping_Cost"]:
+            _validated_numeric(frame, column, role=role, nonnegative=True)
+    elif role == "dock":
+        _validated_numeric(frame, "Dock_Remaining", role=role)
+    elif role == "throughput":
+        for column in ["util_case_picks", "util_pallets"]:
+            _validated_numeric(frame, column, role=role, nonnegative=True)
+
+
 def audit_poc_bundle(
     bundle_dir: str | Path,
     *,
@@ -190,6 +392,8 @@ def audit_poc_bundle(
             frame = pd.read_csv(path, low_memory=False)
             if frame.empty:
                 raise ValueError("no data rows")
+            if key in POC_INPUT_FILENAMES:
+                _validate_source_table(key, frame)
             record.update(rows=len(frame), columns=len(frame.columns))
         except Exception as error:
             raise PocDataError(f"Unreadable challenge file {path.name}: {error}") from error
@@ -257,7 +461,7 @@ def _build_source_tables(bundle_dir: str | Path) -> dict[str, pd.DataFrame]:
         "ZipCode": str,
         "LoadNumber": str,
     }
-    return {
+    tables = {
         "orders": _read_csv(paths["orders"], dtype=ids),
         "inventory": _read_csv(
             paths["inventory"], dtype={"LocationID": str, "MaterialID": str}
@@ -268,6 +472,9 @@ def _build_source_tables(bundle_dir: str | Path) -> dict[str, pd.DataFrame]:
         "dock": _read_csv(paths["dock"], dtype={"Plant": str}),
         "throughput": _read_csv(paths["throughput"], dtype={"Plant": str}),
     }
+    for role, frame in tables.items():
+        _validate_source_table(role, frame)
+    return tables
 
 
 def _build_reference_tables(bundle_dir: str | Path) -> dict[str, pd.DataFrame]:
@@ -460,7 +667,18 @@ def _candidate_and_resource_tables(
     dock["remaining"] = _numeric(dock["Dock_Remaining"]).clip(lower=0)
     dock_lookup = dock.set_index(["dc_id", "date"])["remaining"].to_dict()
 
-    in_scope_dcs = sorted(set(orders["default_dc"].astype(str)))
+    default_dcs = set(orders["default_dc"].astype(str))
+    if config.candidate_dc_scope == "focus_default_dcs":
+        in_scope_dcs = sorted(default_dcs)
+    else:
+        in_scope_dcs = sorted(
+            default_dcs
+            | (
+                set(shipping["dc_id"].astype(str))
+                & set(inventory_source["dc_id"].astype(str))
+                & set(dock["dc_id"].astype(str))
+            )
+        )
     inventory_skus = {
         dc_id: set(group["sku_id"].astype(str))
         for dc_id, group in inventory_source.groupby("dc_id", sort=False)
@@ -721,7 +939,12 @@ def _with_default_reference(problem: ProblemData) -> ProblemData:
 
 
 def prune_pareto_candidates(problem: ProblemData) -> ProblemData:
-    """Remove candidates dominated on estimated fill, value, cost, and lead time."""
+    """Heuristically prune isolated-score-dominated candidate options.
+
+    This reduction is not globally lossless: two options can look dominated in
+    isolation yet use different inventory or capacity buckets. It is disabled
+    by default and retained only as an explicitly labeled ablation.
+    """
 
     candidates = problem.candidates.copy()
     order_group = problem.orders.set_index("order_id").get("assignment_group")
@@ -787,6 +1010,7 @@ def prune_pareto_candidates(problem: ProblemData) -> ProblemData:
     metadata = {
         **problem.metadata,
         "pareto_pruned": True,
+        "pareto_pruning_guarantee": "heuristic; not globally lossless",
         "candidate_rows_before_pruning": len(problem.candidates),
         "candidate_rows_after_pruning": len(retained),
     }
@@ -898,6 +1122,8 @@ def load_poc_problem(
             settings.throughput_headroom_fraction is not None
         ),
         "throughput_headroom_fraction": settings.throughput_headroom_fraction,
+        "candidate_dc_scope": settings.candidate_dc_scope,
+        "candidate_dc_count": int(candidates["dc_id"].nunique()),
         "bundle_sha256": _bundle_hash(_paths(bundle_dir).values()),
         "raw_data_export_permitted": False,
     }

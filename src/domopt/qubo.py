@@ -95,6 +95,13 @@ def build_candidate_qubo(
             "one_hot_penalty": float(one_hot_penalty),
             "conflict_penalty": None if conflict_penalty is None else float(conflict_penalty),
             "plan_count": len(names),
+            # Keep the logical constraint structure with the dense matrix.  Gate-model
+            # simulators can then stay inside the feasible one-choice-per-group
+            # subspace instead of spending shots on penalty-violating bitstrings.
+            "one_hot_groups": tuple(
+                tuple(group["plan_id"].astype(str))
+                for _, group in ordered.groupby("order_id", sort=False)
+            ),
         },
     )
 

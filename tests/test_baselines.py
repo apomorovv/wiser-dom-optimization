@@ -1,6 +1,10 @@
 import pytest
 
-from domopt.baselines import solve_default_baseline, solve_greedy_baseline
+from domopt.baselines import (
+    solve_default_baseline,
+    solve_greedy_baseline,
+    solve_polished_greedy,
+)
 from domopt.data import make_tiny_problem_data
 from domopt.objective import evaluate_solution
 from domopt.validation import validate_solution
@@ -29,5 +33,17 @@ def test_greedy_is_better_than_default_on_tiny_instance() -> None:
     default_value = evaluate_solution(problem, solve_default_baseline(problem)).objective_value
     greedy_value = evaluate_solution(problem, solve_greedy_baseline(problem)).objective_value
     assert greedy_value > default_value
+
+
+def test_polished_greedy_is_feasible_and_never_degrades_greedy() -> None:
+    problem = make_tiny_problem_data()
+    greedy = solve_greedy_baseline(problem)
+    polished = solve_polished_greedy(problem, time_limit_seconds=5)
+
+    assert validate_solution(problem, polished).is_feasible
+    assert evaluate_solution(problem, polished).objective_value >= evaluate_solution(
+        problem, greedy
+    ).objective_value
+    assert polished.metadata["execution_class"] == "classical-matheuristic"
 
 

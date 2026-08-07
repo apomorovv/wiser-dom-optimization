@@ -14,6 +14,26 @@ to Git.
 - Primary keys contain no missing or textual-null values.
 - The current schema is `0.3.0`; the current assumption version is `v2`.
 
+## Strict source gate
+
+The five runtime CSVs are validated before canonical defaults, clipping, or type
+coercion are applied. `src/domopt/poc.py:POC_REQUIRED_COLUMNS` is the executable
+required-column contract. The audit rejects missing/empty files, missing columns,
+blank required identifiers, invalid dates, malformed or nonfinite required numerics,
+negative quantities/costs where prohibited, unsupported `Y`/`N` values, and fill
+thresholds outside `[0, 1]`. It also verifies, within numeric tolerance,
+
+$$
+\texttt{Available_inventory}
+=\texttt{OpeningStock}-\texttt{Total_Reserved_Qty}.
+$$
+
+Optional nulls are allowed only for fields whose transformation defines an explicit
+fallback. Failure raises `PocDataError`; malformed required business values are not
+silently converted to zero. Bundle normalization also refuses unrelated stale files in
+the destination directory so an old document or table cannot be mistaken for part of
+the current input contract.
+
 ## `orders`
 
 One row per order.
@@ -97,6 +117,14 @@ One row per order-DC-PGI option.
 Primary key: `candidate_id`; natural key: `(order_id, dc_id, pgi_date)`. The
 unassigned outcome is created by the solver and is not represented as a fake DC.
 
+Candidate DC breadth is explicit configuration, not inferred silently. The default
+`network_intersection` scope considers DCs present in shipping, inventory, and dock
+sources; `focus_default_dcs` restricts the universe to DCs that are defaults in the
+focus population. Lane, forecast/inventory, calendar, group compatibility, delivery,
+and diversion checks still filter both scopes. The sensitivity experiment compares the
+two policies; operational permission for every connected DC still requires owner
+confirmation.
+
 ## `capacities`
 
 One row per DC-date-resource limit.
@@ -138,7 +166,7 @@ One row per order.
 | `selected_pgi_date` | date/null | Selected PGI date. |
 | `is_unassigned` | boolean | Explicit no-assignment outcome. |
 | `is_divert` | boolean | Selected DC differs from default. |
-| `method` | string | `default`, `greedy`, `classical`, or `hybrid`. |
+| `method` | string | `default`, `greedy`, `polished_greedy`, `exact_lns`, `classical`, or `hybrid`. |
 
 ## Fulfillment output
 
@@ -171,16 +199,37 @@ Every method is evaluated independently into the following common fields.
   "fulfilled_value": 0.0,
   "penalty_cost": 0.0,
   "shipping_cost": 0.0,
+  "requested_value": 0.0,
+  "objective_capture_rate": 0.0,
+  "objective_per_assignment_group": 0.0,
   "case_fill_rate": 0.0,
   "value_fill_rate": 0.0,
   "reassigned_orders": 0,
+  "reassigned_assignment_groups": 0,
   "runtime_seconds": 0.0,
   "optimality_gap": null,
+  "raw_initial_objective": null,
+  "polished_initial_objective": null,
+  "initial_polish_improvement": null,
   "hybrid_improvement": null,
+  "search_improvement": null,
+  "lns_improvement": null,
+  "total_hybrid_improvement": null,
   "maximum_qubo_variables": null,
+  "maximum_active_groups": null,
+  "maximum_local_variables": null,
+  "maximum_local_constraints": null,
+  "assignment_moves": null,
   "accepted_moves": null
 }
 ```
+
+Aggregate experiment rows additionally carry `experiment_schema_version`,
+`bundle_sha256`, `problem_sha256`, `objective_version`, `git_commit`, `git_dirty`,
+`source_state_sha256`, and the serialized method configuration. These fields are part
+of reproducibility identity, not business features. Exact source-scale values remain
+restricted even when aggregated; public artifacts require approval or
+normalized/indexed values.
 
 ## Metadata
 
@@ -199,6 +248,7 @@ Every method is evaluated independently into the following common fields.
 | `min_divert_improvement_cases` | no | POC value `100`. |
 | `pick_capacity_mode` | no | `auto`, `cases`, or `pallet_case`. |
 | `throughput_capacity_is_scenario` | no | Distinguishes assumed headroom from source limits. |
+| `candidate_dc_scope` | yes for POC | `network_intersection` or `focus_default_dcs`. |
+| `candidate_dc_count` | yes for POC | Number of DCs retained after candidate construction, for audit only. |
 | `source_fingerprint` or `bundle_sha256` | recommended | Reproducibility hash; never a restricted path. |
 | `raw_data_export_permitted` | recommended | Privacy guard. |
-

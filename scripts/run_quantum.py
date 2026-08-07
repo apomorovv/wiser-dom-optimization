@@ -28,8 +28,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--method",
         choices=[
             "exact",
+            "exact_feasible",
             "random",
             "simulated_annealing",
+            "qaoa_statevector",
+            "ibm-qpu",
             "dwave-qpu",
             "dwave-hybrid",
         ],

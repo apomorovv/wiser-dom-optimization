@@ -5,14 +5,18 @@ from __future__ import annotations
 import pandas as pd
 
 SAFE_REQUIRED_COLUMNS = {"experiment", "method", "feasible"}
-FORBIDDEN_IDENTIFIER_COLUMNS = {
-    "order_id",
-    "sku_id",
-    "dc_id",
+FORBIDDEN_IDENTIFIER_FRAGMENTS = {
+    "address",
     "candidate_id",
-    "customer_number",
-    "customer_name",
-    "zip_code",
+    "customer",
+    "dc_id",
+    "delivery_number",
+    "load_id",
+    "material",
+    "order_id",
+    "plant",
+    "sku_id",
+    "zip",
 }
 
 
@@ -21,8 +25,14 @@ def validate_copilot_data(results: pd.DataFrame) -> None:
     if missing:
         raise ValueError(f"Experiment results are missing columns: {sorted(missing)}")
     forbidden = {
-        column for column in results.columns if column.lower() in FORBIDDEN_IDENTIFIER_COLUMNS
-    }
+        column
+        for column in results.columns
+        if column.lower().endswith("_id")
+        or any(
+            fragment in column.lower()
+            for fragment in FORBIDDEN_IDENTIFIER_FRAGMENTS
+        )
+    } - {"dataset_id", "experiment_id"}
     if forbidden:
         raise ValueError(
             "The copilot accepts aggregate results only; remove identifier columns: "
@@ -41,36 +51,72 @@ def answer_experiment_question(question: str, results: pd.DataFrame) -> str:
 
     validate_copilot_data(results)
     text = question.strip().lower()
-    feasible = results.loc[results["feasible"].fillna(False).astype(bool)].copy()
+    feasibility = results["feasible"]
+    if feasibility.dtype == bool:
+        feasible_mask = feasibility.fillna(False)
+    else:
+        feasible_mask = feasibility.astype(str).str.lower().isin({"true", "1"})
+    feasible = results.loc[feasible_mask].copy()
     if feasible.empty:
         return "No feasible run is available, so the copilot cannot compare methods."
 
     if any(term in text for term in ["quantum advantage", "qpu", "is it quantum"]):
         return (
-            "No quantum advantage is established. The current quantum-labelled study uses "
-            "local QUBO coefficient perturbations and simulated annealing; exact MILP recourse "
-            "and the validator remain classical. A QPU claim needs approved hardware runs, "
-            "embedding overhead, matched time budgets, repeated trials, and uncertainty bounds."
+            "No quantum advantage is established. The suite includes a local "
+            "constraint-preserving QAOA statevector simulation; simulated annealing remains "
+            "quantum-inspired, and exact recourse/validation remain classical. A hardware "
+            "claim needs approved IBM or D-Wave QPU runs, matched end-to-end budgets, repeated "
+            "trials, and uncertainty bounds."
         )
 
     if any(term in text for term in ["best", "recommend", "winner"]):
-        comparable = feasible.dropna(subset=["objective_value"])
+        # Raw objective totals are comparable only on an identical instance and
+        # economic scale. The common solver comparison is the sole default scope.
+        comparable = feasible.loc[
+            feasible["experiment"] == "solver_comparison"
+        ].dropna(subset=["objective_value"])
         if comparable.empty:
-            return "Feasible runs exist, but none reports a comparable objective value."
-        best = comparable.sort_values(
+            return (
+                "No common-instance solver comparison is loaded. Choose one experiment "
+                "and level before asking for a winner; raw objectives across subset sizes "
+                "or penalty scales are not comparable."
+            )
+        quality_leader = comparable.sort_values(
             ["objective_value", "runtime_seconds"],
             ascending=[False, True],
             kind="mergesort",
         ).iloc[0]
+        best_objective = float(quality_leader["objective_value"])
+        tolerance = 1e-8 * max(1.0, abs(best_objective))
+        competitive = comparable.loc[
+            comparable["objective_value"].astype(float) >= best_objective - tolerance
+        ]
+        operational = competitive.sort_values(
+            "runtime_seconds", kind="mergesort"
+        ).iloc[0]
+        certificate = comparable.loc[
+            comparable["method"].eq("classical")
+            & comparable.get(
+                "optimality_gap", pd.Series(index=comparable.index, dtype=float)
+            ).fillna(float("inf"))
+            .le(1e-9)
+        ]
+        proof = (
+            " The full MILP supplies a zero-gap certificate on this instance."
+            if not certificate.empty
+            else " No zero-gap full-MILP certificate is loaded for this instance."
+        )
         return (
-            f"The highest recorded feasible objective is {_number(best['objective_value'])}, "
-            f"from {best['method']} in {best['experiment']} ({best.get('level', '')}). "
-            "Treat exact MILP as the proof benchmark when its gap is zero; use hybrid when a "
-            "bounded-time, feasibility-preserving search is the operational goal."
+            f"On the common solver-comparison instance, the highest feasible objective is "
+            f"{_number(quality_leader['objective_value'])}, from "
+            f"{quality_leader['method']} ({quality_leader.get('level', '')}). "
+            f"Among methods tied within numerical tolerance, {operational['method']} is "
+            f"fastest at {_number(operational['runtime_seconds'])} s and is the evidence-based "
+            f"operational choice.{proof}"
         )
 
     if any(term in text for term in ["noise", "seed", "robust"]):
-        rows = feasible.loc[feasible["experiment"] == "quantum_seed_noise"]
+        rows = feasible.loc[feasible["experiment"] == "qubo_coefficient_noise"]
         if rows.empty:
             return "No seed/noise experiment rows are loaded."
         improvement = rows["hybrid_improvement"].dropna()
@@ -84,27 +130,47 @@ def answer_experiment_question(question: str, results: pd.DataFrame) -> str:
         rows = feasible.loc[feasible["experiment"] == "pareto_pruning_ablation"]
         if rows.empty:
             return "No Pareto-pruning ablation rows are loaded."
-        summary = "; ".join(
-            f"{row.level}: {int(row.candidate_count)} candidates, "
-            f"objective {_number(row.objective_value)}, {_number(row.runtime_seconds)} s"
-            for row in rows.itertuples(index=False)
-        )
+        if "pareto_pruning" in rows:
+            grouped = rows.groupby("pareto_pruning", as_index=False).agg(
+                candidate_count=("candidate_count", "median"),
+                objective_value=("objective_value", "median"),
+                runtime_seconds=("runtime_seconds", "median"),
+            )
+            summary = "; ".join(
+                f"{'with' if row.pareto_pruning else 'without'} pruning: "
+                f"{int(row.candidate_count)} candidates, median objective "
+                f"{_number(row.objective_value)}, {_number(row.runtime_seconds)} s"
+                for row in grouped.itertuples(index=False)
+            )
+        else:
+            summary = "; ".join(
+                f"{row.level}: {int(row.candidate_count)} candidates, "
+                f"objective {_number(row.objective_value)}, "
+                f"{_number(row.runtime_seconds)} s"
+                for row in rows.itertuples(index=False)
+            )
         return (
             f"Pareto ablation — {summary}. Pruning is beneficial only when it reduces search "
-            "width/runtime without lowering the validated objective."
+            "width/runtime without lowering the validated objective on that instance. It is "
+            "a heuristic, not a globally lossless dominance rule."
         )
 
     if any(term in text for term in ["batch", "conflict", "random"]):
         rows = feasible.loc[feasible["experiment"] == "batch_strategy_ablation"]
         if rows.empty:
             return "No batching ablation rows are loaded."
-        best = rows.sort_values(
+        strategy_column = "batch_strategy" if "batch_strategy" in rows else "level"
+        summary = rows.groupby(strategy_column, as_index=False).agg(
+            objective_value=("objective_value", "median"),
+            runtime_seconds=("runtime_seconds", "median"),
+        )
+        best = summary.sort_values(
             ["objective_value", "runtime_seconds"], ascending=[False, True]
         ).iloc[0]
         return (
-            f"The stronger loaded batching result is {best['level']}: objective "
-            f"{_number(best['objective_value'])} in {_number(best['runtime_seconds'])} s. "
-            "Use multiple seeds before treating a small one-run difference as stable."
+            f"The stronger median loaded batching result is {best[strategy_column]}: "
+            f"objective {_number(best['objective_value'])} in "
+            f"{_number(best['runtime_seconds'])} s across the loaded seeds."
         )
 
     if any(term in text for term in ["inventory", "shock", "shortage"]):
@@ -116,18 +182,26 @@ def answer_experiment_question(question: str, results: pd.DataFrame) -> str:
         return (
             f"Across the loaded inventory shocks, case fill ranges from "
             f"{minimum_fill:.2%} to {maximum_fill:.2%}. Compare methods at each identical "
-            "shock level; do not compare raw objectives across different penalty scales."
+            "shock level, and distinguish fixed-routing recourse from post-shock "
+            "reoptimization; do not compare raw objectives across different penalty scales."
         )
 
     if any(term in text for term in ["scale", "runtime", "large"]):
         rows = feasible.loc[feasible["experiment"] == "size_scaling"]
         if rows.empty:
             return "No size-scaling rows are loaded."
-        largest = rows.sort_values("order_count").iloc[-1]
+        largest_count = int(rows["order_count"].max())
+        largest = rows.loc[rows["order_count"].eq(largest_count)]
+        summaries = []
+        for method, group in largest.groupby("method", sort=True):
+            summaries.append(
+                f"{method}: median {_number(group['runtime_seconds'].median())} s"
+            )
         return (
-            f"The largest loaded run contains {int(largest['order_count'])} actual orders. "
-            f"Its {largest['method']} runtime is {_number(largest['runtime_seconds'])} s and "
-            f"the maximum local QUBO width is {_number(largest.get('maximum_qubo_variables'))}."
+            f"The largest loaded scale contains {largest_count} actual orders. "
+            + "; ".join(summaries)
+            + ". Compare medians across repeated rows and do not infer missing methods failed; "
+            "some methods are intentionally capped below the largest scale."
         )
 
     return (

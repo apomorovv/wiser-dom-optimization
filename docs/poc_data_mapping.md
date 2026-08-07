@@ -76,6 +76,14 @@ The default DC/date is always represented when its shipping lane exists. A defau
 SKU absent from inventory receives a zero-fill preview rather than causing the
 candidate to disappear.
 
+The DC universe is controlled explicitly by `PocConfig.candidate_dc_scope`.
+`network_intersection` (the default) starts from DCs represented in shipping,
+inventory, and dock sources; `focus_default_dcs` starts only from DCs used as defaults
+by the focus population. Lane, group compatibility, SKU presence, calendar, delivery,
+and diversion checks then filter either universe. The broader technical intersection
+does not itself establish operational authorization, so the experiment suite reports a
+scope sensitivity pending owner confirmation.
+
 ## Assignment groups
 
 Orders sharing `LoadNumber` are one routing decision. They must select the same
@@ -93,7 +101,7 @@ $F_o^{\mathrm{def}}$, a non-default candidate must fulfill at least
 
 $$
 L_o^{\mathrm{div}}=
-\min\left{Q_o,F_o^{\mathrm{def}}+
+\min\left\{Q_o,F_o^{\mathrm{def}}+
 \max\left(\lceil0.05Q_o\rceil,100\right)\right\}.
 $$
 
@@ -109,4 +117,3 @@ experiment configuration label these as scenarios.
 
 Configured holidays beyond weekends are also explicit assumptions; the supplied
 bundle does not provide a complete holiday calendar.
-

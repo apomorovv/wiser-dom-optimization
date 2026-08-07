@@ -3,11 +3,14 @@
 This branch is the experiment-ready implementation for the 2026 WISER–Nestlé
 Distributed Order Management (DOM) challenge. It reads the supplied proof-of-concept
 data, constructs a validated optimization instance, compares transparent classical
-baselines with an exact solver and a hybrid quantum-classical search, and persists
+baselines with exact MILP, adaptive exact-MILP neighborhood search, and an
+experimental hybrid quantum-classical search, and persists
 aggregate tables and figures. Final reports, planner PDFs, and slides are deliberately
 deferred until the full experiment profile has produced reviewed results.
 
-The central safety rule is simple: a QUBO sample is only a proposal. Exact
+The production path is adaptive exact large-neighborhood search (LNS): assignment
+groups and quantity recourse are optimized jointly in bounded MILPs. In the
+experimental quantum path, a QUBO sample is only a proposal. Exact
 mixed-integer recourse rebuilds SKU quantities, an independent validator checks all
 hard constraints, and a move is accepted only when it is feasible and improves the
 current solution. A weak or noisy sampler can consume runtime, but it cannot worsen
@@ -15,7 +18,8 @@ the returned incumbent.
 
 ## What is implemented
 
-- strict readability checks for the five runtime input CSVs;
+- fail-closed file, schema, type, domain, date, and inventory-identity checks for
+  the five runtime input CSVs;
 - a cleanup command that removes numbered-upload names and retains only runtime
   inputs plus two optional recommendation outputs;
 - a real-data adapter for orders, inventory, lanes, dock availability, and throughput
@@ -23,43 +27,38 @@ the returned incumbent.
 - source-accurate case conversion and thresholded order-penalty logic;
 - load-cohesive candidate generation, five-day protected ATP, shipping lead times,
   working-day PGI adjustment, forecast eligibility, and dock usage;
-- deterministic load-atomic default and sequential-greedy baselines;
+- deterministic load-atomic default, sequential-greedy, and polished-greedy
+  baselines;
 - an exact SciPy/HiGHS mixed-integer linear program (MILP);
+- adaptive conflict-graph exact LNS with a precomputed group index, resource-
+  residualized local models, joint assignment/quantity optimization, variable
+  budgets, and independently validated strict-improvement acceptance;
 - bounded large-neighborhood search with QUBO assignment proposals and exact MILP
   fulfillment recourse;
-- exact enumeration, random sampling, simulated annealing, and optional D-Wave
-  backends behind an explicit privacy gate;
+- full and feasible-subspace exact enumeration, random sampling, simulated
+  annealing, a local constraint-preserving QAOA statevector simulator, and optional
+  IBM Quantum and D-Wave QPU backends behind an explicit privacy gate;
 - an independent objective evaluator and feasibility validator;
 - all requested experiments, business- and QUBO-penalty sweeps, and additional
   controls;
-- automatically saved tables and PNG figures under `runs/challenge-study/`;
-- an opt-in synthetic CPU/GPU crossover benchmark and privacy-gated D-Wave test; and
+- content-addressed checkpoints and automatically saved tables/PNG figures under
+  `runs/challenge-study/`;
+- an opt-in synthetic CPU/GPU crossover benchmark and privacy-gated hardware tests; and
 - a runnable Jupyter notebook and aggregate-only Streamlit planner copilot.
 
 No QPU experiment has been run and no quantum advantage is claimed.
 
-## Verified supplied-data audit
+The implementation audit, unresolved owner decisions, and method comparison are in
+[the results audit](docs/results_audit.md).
 
-The repository intentionally publishes only non-identifying aggregates.
+## Supplied-data audit boundary
 
-| Measure | Verified value |
-|---|---:|
-| Required runtime CSVs opened | 5 of 5 |
-| Order-level output rows | 1,109 |
-| Order-SKU output rows | 25,193 |
-| Named loads | 614 |
-| Assignment groups after singleton handling | 631 |
-| Diverted orders in supplied output | 3 |
-| Requested cases | 2,554,440 |
-| Selected fulfilled cases | 2,413,937 |
-| Selected case fill | 94.4997% |
-
-The input order table contains 25,193 order-SKU rows. The capacity-planning table
-contains 377,504 DC-SKU-date rows, shipping contains 12,922 lanes, dock contains 480
-rows, and throughput contains 530 observed-utilization rows. The optional output
-files are used only for reconciliation; they are never treated as labels for
-optimization. The challenge PDF, equations document, and worked workbook are source
-references, not runtime solver inputs.
+The strict loader verifies all five required runtime files, their required fields and
+domains, their cross-table model invariants, and the inventory reconciliation before
+solving. Optional recommendation outputs are used only for reconciliation and never
+as optimization labels. Exact source-scale totals remain in ignored local artifacts;
+the public repository reports only reviewed normalized/indexed evidence. The
+challenge PDF, equations document, and workbook are references, not runtime inputs.
 
 ## Solver architecture
 
@@ -67,12 +66,12 @@ references, not runtime solver inputs.
 flowchart TD
     A["Readable challenge bundle"] --> B["Canonical orders, lines, candidates, resources"]
     B --> C["Feasible default or greedy incumbent"]
-    C --> D["Conflict-aware bounded neighborhood"]
-    D --> E["QUBO assignment sampler"]
-    E --> F["One-hot repair and exact MILP recourse"]
-    F --> G{"Validated strict improvement?"}
-    G -->|Yes| C
-    G -->|No| D
+    C --> D["Precomputed conflict neighborhood"]
+    D --> E["Joint exact local MILP"]
+    E --> F{"Validated strict improvement?"}
+    F -->|Yes| C
+    F -->|No| D
+    D -. research comparator .-> G["QUBO sampler plus exact recourse"]
 ```
 
 The exact model assigns each order to one eligible DC/PGI option or leaves it
@@ -101,7 +100,7 @@ python -m pip install -e ".[dev,notebook,app]"
 ```
 
 Optional extras are `.[gpu]` for CUDA 12 CuPy benchmarking, `.[qpu]` for D-Wave,
-and `.[full]` for the complete workstation environment. The default solver remains
+`.[ibm]` for IBM Quantum, and `.[full]` for the complete workstation environment. The default solver remains
 local and CPU-based because exact recourse and small local QUBOs dominate the current
 workload.
 
@@ -139,8 +138,8 @@ python scripts/run_challenge_study.py \
   --output runs/challenge-study/aggregate_results.csv
 ```
 
-The command first opens every required file and stops on the first missing,
-unreadable, empty, or structurally invalid artifact. `--profile smoke` runs a short
+The command first validates every required file and stops on the first missing,
+unreadable, empty, malformed, nonfinite, or structurally invalid artifact. `--profile smoke` runs a short
 development grid; `--profile full` runs the evidence grid. Aggregate CSVs and all
 applicable PNG charts are written below `runs/challenge-study/`.
 
@@ -154,19 +153,19 @@ Set `NESTLE_BUNDLE_DIR` before launching Jupyter, or use the default cleaned pat
 `data/raw/nestle_challenge`. The notebook performs and checkpoints:
 
 1. strict bundle and output reconciliation audits;
-2. default, greedy, exact MILP, and hybrid comparison;
-3. size scaling;
-4. business penalty-weight sensitivity;
-5. QUBO one-hot and conflict-penalty calibration;
-6. candidate-count sensitivity;
-7. inventory shocks;
-8. sampler seed and local coefficient-noise sensitivity;
-9. Pareto-pruning ablation;
-10. random-versus-conflict batching ablation;
-11. random-versus-simulated-annealing sampler ablation;
-12. a synthetic coordination control with a known exact reference;
-13. an optional CPU/GPU QUBO-scoring crossover; and
-14. an optional synthetic-only D-Wave hardware validation.
+2. default, greedy, polished greedy, exact LNS, exact MILP, and hybrid comparison;
+3. repeated real assignment-group scaling;
+4. repeated controlled synthetic scaling;
+5. candidate-DC universe sensitivity;
+6. business and QUBO penalty sensitivity;
+7. candidate-count sensitivity and inventory shocks;
+8. sampler seed/local coefficient sensitivity, a QAOA readout-noise proxy, and
+   algorithm ablations;
+9. Pareto-pruning and random-versus-conflict batching ablations;
+10. feasible exact, random, simulated-annealing, and Dicke/XY-QAOA controls;
+11. a synthetic coordination control with a known exact reference;
+12. an optional end-to-end CPU/GPU QUBO-scoring crossover; and
+13. optional synthetic-only IBM Quantum or D-Wave hardware validation.
 
 All persisted experiment rows are aggregate-only.
 
@@ -189,7 +188,7 @@ the evidence. See [app instructions](apps/README.md).
 python scripts/make_tiny_instance.py
 python scripts/run_experiment.py \
   --data-dir data/synthetic/tiny \
-  --methods default greedy classical hybrid \
+  --methods default greedy polished_greedy exact_lns classical hybrid \
   --hybrid-config configs/hybrid_tiny.yaml \
   --output-dir runs/tiny-comparison \
   --experiment-id tiny-comparison
@@ -205,7 +204,8 @@ hybrid exact-QUBO configuration both reproduce it.
 |---|---|
 | `src/domopt/poc.py` | runtime-bundle cleanup, audit, and source adapter |
 | `src/domopt/classical.py` | exact MILP and fixed-assignment recourse |
-| `src/domopt/hybrid.py` | conflict batching, QUBO search, repair, and acceptance |
+| `src/domopt/hybrid.py` | adaptive exact LNS plus sampler-assisted LNS |
+| `src/domopt/checkpoints.py` | content-addressed experiment checkpoint manifests |
 | `src/domopt/validation.py` | independent feasibility authority |
 | `src/domopt/experiments.py` | complete experiment matrix |
 | `src/domopt/hardware.py` | privacy-safe hardware discovery and GPU benchmark |
@@ -218,7 +218,7 @@ hybrid exact-QUBO configuration both reproduce it.
 ## Deferred submission artifacts
 
 The requirement matrix, experiment protocol, and literature basis are available now.
-The final report, data-specific planner view, and presentation are intentionally
+The separate two-page summary, final report, data-specific planner view, and presentation are intentionally
 absent and must not be rendered or described as final until the full profile and any
 approved hardware runs have been reviewed.
 
@@ -232,4 +232,5 @@ requires explicit approval. See [privacy policy](docs/privacy.md).
 The supplied throughput file reports observed utilization rather than a documented
 maximum. It is not enforced as a real hard limit. Experiments may add explicit
 scenario headroom, and those rows are labeled as scenarios. Likewise, local QUBO
-coefficient perturbation is a robustness test, not physical QPU noise.
+coefficient perturbation is a ranking-robustness test, while the local QAOA bit-flip
+control covers only readout; neither is a complete physical QPU noise model.

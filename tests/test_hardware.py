@@ -13,3 +13,7 @@ def test_cpu_qubo_scoring_benchmark_is_privacy_safe_and_executable() -> None:
     assert "logical_cpu_count" in capabilities
     assert benchmark.to_dict("records")[0]["backend"] == "numpy_cpu"
     assert benchmark.to_dict("records")[0]["samples_per_second"] > 0
+    assert benchmark.to_dict("records")[0]["end_to_end_samples_per_second"] > 0
+    assert benchmark.to_dict("records")[0]["end_to_end_seconds"] == benchmark.to_dict(
+        "records"
+    )[0]["compute_seconds"]

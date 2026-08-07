@@ -1,4 +1,9 @@
-# Synthetic scaling and coefficient-noise study
+# Historical synthetic scaling snapshot (not current evidence)
+
+This file and its companion CSV predate polished greedy, adaptive exact LNS, repeated
+generator seeds, and source-state checkpointing. They are retained only for provenance
+and must not be cited as current performance. Regenerate them with the revised command
+below before any report uses the results.
 
 Generated with:
 
@@ -7,11 +12,12 @@ python scripts/run_scaling_study.py \
   --sizes 8,20,50 \
   --noise 0,0.02 \
   --classical-max-orders 20 \
+  --repetitions 3 \
   --output results/scaling_synthetic.csv \
   --seed 7
 ```
 
-The hybrid used six iterations, at most eight active orders, a 40-variable configured
+The historical hybrid used six iterations, at most eight active orders, a 40-variable configured
 QUBO cap, at most five retained assignment candidates per order, 32 reads, 100
 sweeps, and four exact-recourse candidates per iteration. Actual maximum QUBO size
 was 32 variables. Results are a single deterministic

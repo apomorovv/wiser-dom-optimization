@@ -28,7 +28,13 @@ def read_results(path: str) -> pd.DataFrame:
 
 
 uploaded = st.sidebar.file_uploader("Aggregate experiment CSV", type=["csv"])
-default_path = Path("runs/challenge-study/aggregate_results.csv")
+artifact_root = Path("runs/challenge-study")
+aggregate_candidates = list(artifact_root.glob("*/*/*/aggregate_results.csv"))
+default_path = (
+    max(aggregate_candidates, key=lambda path: path.stat().st_mtime)
+    if aggregate_candidates
+    else artifact_root / "no-verified-aggregate.csv"
+)
 if uploaded is not None:
     results = pd.read_csv(uploaded)
     source_label = uploaded.name
@@ -60,7 +66,12 @@ overview, explorer, copilot, methodology = st.tabs(
 )
 
 with overview:
-    feasible = visible["feasible"].fillna(False).astype(bool)
+    feasible_values = visible["feasible"].fillna(False)
+    feasible = (
+        feasible_values
+        if feasible_values.dtype == bool
+        else feasible_values.astype(str).str.lower().isin({"true", "1"})
+    )
     columns = st.columns(4)
     columns[0].metric("Runs", len(visible))
     columns[1].metric("Feasible", f"{feasible.mean():.1%}" if len(visible) else "—")
@@ -96,10 +107,12 @@ with explorer:
         for column in [
             "objective_value",
             "case_fill_rate",
+            "search_improvement",
             "hybrid_improvement",
             "runtime_seconds",
             "candidate_count",
             "maximum_qubo_variables",
+            "maximum_local_variables",
         ]
         if column in subset.columns
     ]

@@ -1,6 +1,10 @@
 # Results
 
-This directory contains final aggregate tables, figures, and planner-facing summaries selected from validated runs. Raw per-run artifacts belong in `runs/`.
+This directory is reserved for reviewed aggregate tables, figures, and planner-facing
+summaries selected from validated runs. Raw per-run artifacts belong in `runs/`.
+The existing `scaling_synthetic.*` pair is a historical development snapshot from the
+pre-LNS experiment schema; it is not current challenge evidence and must be regenerated
+before inclusion in a report.
 
 ## Suggested structure
 
@@ -65,6 +69,6 @@ A planner-facing recommendation should state:
 
 Use synthetic or approved anonymized examples only.
 
-`scripts/run_scaling_study.py` creates `scaling_synthetic.csv` from independently
-generated data. Do not mix those objective values with the challenge incumbent audit.
+`scripts/run_scaling_study.py` creates a repeated `scaling_synthetic.csv` from
+independently generated data. Do not mix those objectives with real challenge evidence.
 

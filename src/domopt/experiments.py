@@ -11,12 +11,20 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .baselines import solve_default_baseline, solve_greedy_baseline
+from .baselines import (
+    _InventoryState,
+    solve_default_baseline,
+    solve_greedy_baseline,
+    solve_polished_greedy,
+)
 from .classical import ClassicalSolverError, solve_classical
-from .hybrid import HybridConfig, solve_hybrid
+from .hybrid import ExactLNSConfig, HybridConfig, solve_exact_lns, solve_hybrid
 from .metrics import compute_metrics
+from .pipeline import current_source_state, problem_fingerprint
 from .poc import (
+    PocConfig,
     limit_candidates,
+    load_poc_problem,
     prune_pareto_candidates,
     select_penalty_subset,
     select_shortage_subset,
@@ -30,17 +38,22 @@ class ExperimentProfile:
     """A complete grid; ``smoke`` is for CI and ``full`` for submission evidence."""
 
     sizes: tuple[int, ...]
+    synthetic_sizes: tuple[int, ...]
     penalty_scales: tuple[float, ...]
     candidate_counts: tuple[int, ...]
     inventory_shocks: tuple[float, ...]
     seeds: tuple[int, ...]
     noise_levels: tuple[float, ...]
+    readout_noise_levels: tuple[float, ...]
     qubo_one_hot_multipliers: tuple[float, ...]
     qubo_pair_multipliers: tuple[float, ...]
     base_orders: int
     exact_max_orders: int
     hybrid_max_orders: int
+    lns_max_orders: int
+    scaling_repetitions: int
     hybrid: HybridConfig
+    exact_lns: ExactLNSConfig
 
 
 def experiment_profile(name: str = "full") -> ExperimentProfile:
@@ -48,16 +61,20 @@ def experiment_profile(name: str = "full") -> ExperimentProfile:
     if normalized == "smoke":
         return ExperimentProfile(
             sizes=(4, 8),
+            synthetic_sizes=(10, 25),
             penalty_scales=(0.75, 1.25),
             candidate_counts=(1, 3),
             inventory_shocks=(0.0, 0.2),
             seeds=(3, 11),
             noise_levels=(0.0, 0.02),
+            readout_noise_levels=(0.0, 0.02),
             qubo_one_hot_multipliers=(1.05, 1.5),
             qubo_pair_multipliers=(0.0, 1.0),
-            base_orders=4,
+            base_orders=8,
             exact_max_orders=8,
             hybrid_max_orders=8,
+            lns_max_orders=8,
+            scaling_repetitions=1,
             hybrid=HybridConfig(
                 iterations=1,
                 neighborhood_orders=4,
@@ -70,21 +87,36 @@ def experiment_profile(name: str = "full") -> ExperimentProfile:
                 initial_method="greedy",
                 seed=3,
             ),
+            exact_lns=ExactLNSConfig(
+                iterations=1,
+                initial_neighborhood_groups=4,
+                minimum_neighborhood_groups=2,
+                maximum_neighborhood_groups=6,
+                maximum_neighborhood_orders=12,
+                maximum_local_fulfillment_variables=3_000,
+                local_time_limit_seconds=5,
+                mip_relative_gap=0.01,
+                seed=3,
+            ),
         )
     if normalized != "full":
         raise ValueError("profile must be 'smoke' or 'full'")
     return ExperimentProfile(
         sizes=(8, 20, 50, 100, 250, 372),
+        synthetic_sizes=(20, 50, 100, 250, 500),
         penalty_scales=(0.25, 0.5, 1.0, 2.0, 4.0),
         candidate_counts=(1, 2, 4, 6),
         inventory_shocks=(0.0, 0.1, 0.25, 0.4),
         seeds=(3, 11, 29, 47),
         noise_levels=(0.0, 0.01, 0.03, 0.05),
+        readout_noise_levels=(0.0, 0.005, 0.01, 0.02),
         qubo_one_hot_multipliers=(1.05, 1.25, 1.5, 2.0),
         qubo_pair_multipliers=(0.0, 0.5, 1.0, 2.0),
         base_orders=20,
         exact_max_orders=20,
         hybrid_max_orders=50,
+        lns_max_orders=372,
+        scaling_repetitions=3,
         hybrid=HybridConfig(
             iterations=3,
             neighborhood_orders=8,
@@ -95,6 +127,17 @@ def experiment_profile(name: str = "full") -> ExperimentProfile:
             top_k_recourse=2,
             recourse_time_limit_seconds=8,
             initial_method="greedy",
+            seed=11,
+        ),
+        exact_lns=ExactLNSConfig(
+            iterations=4,
+            initial_neighborhood_groups=6,
+            minimum_neighborhood_groups=4,
+            maximum_neighborhood_groups=12,
+            maximum_neighborhood_orders=32,
+            maximum_local_fulfillment_variables=6_000,
+            local_time_limit_seconds=6,
+            mip_relative_gap=0.01,
             seed=11,
         ),
     )
@@ -129,11 +172,58 @@ def shock_inventory(problem: ProblemData, fraction: float) -> ProblemData:
     inventory["cumulative_available_cases"] = np.floor(
         inventory["cumulative_available_cases"].astype(float) * (1.0 - fraction)
     ).astype(int)
-    return replace(
+    shocked = replace(
         problem,
         inventory=inventory,
         metadata={**problem.metadata, "inventory_shock_fraction": float(fraction)},
     )
+    if {
+        "estimated_fill_cases",
+        "estimated_fulfilled_value",
+    } <= set(problem.candidates.columns):
+        state = _InventoryState(inventory)
+        lines_by_order = {
+            str(order_id): group
+            for order_id, group in problem.order_lines.groupby("order_id", sort=False)
+        }
+        candidates = problem.candidates.copy()
+        estimated_cases: list[int] = []
+        estimated_values: list[float] = []
+        for candidate in candidates.itertuples(index=False):
+            total_cases = 0
+            total_value = 0.0
+            for line in lines_by_order[str(candidate.order_id)].itertuples(index=False):
+                available = state.available(
+                    str(candidate.dc_id),
+                    str(line.sku_id),
+                    pd.Timestamp(candidate.pgi_date),
+                )
+                quantity = min(int(line.demand_cases), int(available))
+                total_cases += quantity
+                total_value += quantity * float(line.unit_value)
+            estimated_cases.append(total_cases)
+            estimated_values.append(total_value)
+        candidates["estimated_fill_cases"] = estimated_cases
+        candidates["estimated_fulfilled_value"] = estimated_values
+        orders = problem.orders.copy()
+        default_fill = (
+            candidates.loc[candidates["is_default"].astype(bool)]
+            .set_index("order_id")["estimated_fill_cases"]
+            .to_dict()
+        )
+        orders["default_fillable_cases"] = (
+            orders["order_id"].astype(str).map(default_fill).fillna(0).astype(int)
+        )
+        shocked = replace(
+            shocked,
+            orders=orders,
+            candidates=candidates,
+            metadata={
+                **shocked.metadata,
+                "scenario_candidate_estimates_recomputed": True,
+            },
+        )
+    return shocked
 
 
 def _record(
@@ -173,6 +263,13 @@ def _record(
         "validation_violation_count": len(validation.get("violations", [])),
         "validation_categories": ",".join(sorted(violation_categories)),
         "configuration": json.dumps(settings, sort_keys=True),
+        "experiment_schema_version": "3",
+        "schema_version": problem.metadata.get("schema_version", "unknown"),
+        "assumption_version": problem.metadata.get("assumption_version", "unknown"),
+        "bundle_sha256": problem.metadata.get("bundle_sha256"),
+        "problem_sha256": problem_fingerprint(problem),
+        "objective_version": "fulfilled-value-minus-thresholded-penalty-minus-shipping-v2",
+        **current_source_state(),
         **{
             key: value
             for key, value in settings.items()
@@ -221,16 +318,75 @@ def _attempt(
 EXPERIMENT_NAMES = (
     "solver_comparison",
     "size_scaling",
+    "synthetic_scaling",
+    "candidate_dc_scope_sensitivity",
     "penalty_weight_sensitivity",
     "candidate_count_sensitivity",
     "inventory_shock",
-    "quantum_seed_noise",
+    "qubo_coefficient_noise",
+    "qaoa_readout_noise",
     "qubo_penalty_sensitivity",
     "pareto_pruning_ablation",
     "batch_strategy_ablation",
     "sampler_ablation",
     "synthetic_coordination_control",
 )
+
+
+def _coordination_control(
+    settings: ExperimentProfile,
+) -> tuple[ProblemData, HybridConfig]:
+    """Return a small control with a verified greedy-assignment gap.
+
+    Seed 6 has a 197.2 objective-unit gap after exact fixed-assignment polish,
+    so sampler gains cannot be manufactured by the classical quantity recourse.
+    Four groups also keep the feasible gate-model statevector at only 4^4 states.
+    """
+
+    problem = make_synthetic_problem(order_count=4, seed=6)
+    config = replace(
+        settings.hybrid,
+        iterations=max(3, settings.hybrid.iterations),
+        neighborhood_orders=4,
+        max_qubo_variables=24,
+        max_candidates_per_order=5,
+        # The p=1 Dicke/XY control needs enough finite shots to expose its
+        # low-probability improving assignment. Hold the same read budget for
+        # every stochastic sampler in this coupled-control family.
+        num_reads=max(128, settings.hybrid.num_reads),
+        sweeps=max(100, settings.hybrid.sweeps),
+        top_k_recourse=max(6, settings.hybrid.top_k_recourse),
+        recourse_time_limit_seconds=max(
+            5.0, settings.hybrid.recourse_time_limit_seconds
+        ),
+        seed=6,
+        qubo_noise_relative_sigma=0.0,
+        qaoa_restarts=max(6, settings.hybrid.qaoa_restarts),
+    )
+    return problem, config
+
+
+def _assignment_policy(solution: Solution) -> dict[str, str | None]:
+    return {
+        str(row.order_id): (
+            None if bool(row.is_unassigned) else str(row.candidate_id)
+        )
+        for row in solution.assignments.itertuples(index=False)
+    }
+
+
+def _solve_fixed_routing_recourse(
+    problem: ProblemData,
+    policy: dict[str, str | None],
+) -> Solution:
+    solution = solve_classical(
+        problem,
+        time_limit_seconds=60,
+        fixed_assignments=policy,
+    )
+    solution.method = "fixed_routing_recourse"
+    solution.assignments["method"] = solution.method
+    return solution
 
 
 def run_challenge_experiments(
@@ -253,10 +409,11 @@ def run_challenge_experiments(
         raise ValueError(f"Unknown experiments: {sorted(unknown)}")
 
     rows: list[dict[str, Any]] = []
-    pruned = prune_pareto_candidates(problem)
-    base = select_shortage_subset(pruned, settings.base_orders)
+    # Common-objective evidence uses the unpruned universe. The score-based
+    # Pareto reduction is deliberately isolated to its own heuristic ablation.
+    base = select_shortage_subset(problem, settings.base_orders)
     penalty_base = (
-        select_penalty_subset(pruned, settings.base_orders)
+        select_penalty_subset(problem, settings.base_orders)
         if "penalty_weight_sensitivity" in selected
         else None
     )
@@ -265,6 +422,19 @@ def run_challenge_experiments(
         for method, solver in [
             ("default", lambda: solve_default_baseline(base)),
             ("greedy", lambda: solve_greedy_baseline(base)),
+            (
+                "polished_greedy",
+                lambda: solve_polished_greedy(
+                    base,
+                    time_limit_seconds=30,
+                    mip_relative_gap=0.01,
+                    seed=settings.exact_lns.seed,
+                ),
+            ),
+            (
+                "exact_lns",
+                lambda: solve_exact_lns(base, config=settings.exact_lns),
+            ),
             (
                 "classical",
                 lambda: solve_classical(
@@ -285,44 +455,189 @@ def run_challenge_experiments(
     if "size_scaling" in selected:
         seen_group_counts: set[int] = set()
         for size in settings.sizes:
-            instance = select_shortage_subset(pruned, size)
+            instance = select_shortage_subset(problem, size)
             actual_groups = int(instance.orders["assignment_group"].nunique())
             if actual_groups in seen_group_counts:
                 continue
             seen_group_counts.add(actual_groups)
-            common = {
-                "requested_assignment_groups": size,
-                "actual_assignment_groups": actual_groups,
-            }
-            _attempt(
-                rows,
-                instance,
-                lambda instance=instance: solve_greedy_baseline(instance),
-                experiment="size_scaling",
-                level=f"groups={actual_groups}:greedy",
-                configuration={**common, "method": "greedy"},
-            )
-            if size <= settings.hybrid_max_orders:
+            for repetition in range(settings.scaling_repetitions):
+                common = {
+                    "requested_assignment_groups": size,
+                    "actual_assignment_groups": actual_groups,
+                    "repetition": repetition + 1,
+                }
                 _attempt(
                     rows,
                     instance,
-                    lambda instance=instance: solve_hybrid(
-                        instance, config=settings.hybrid
-                    ),
+                    lambda instance=instance: solve_greedy_baseline(instance),
                     experiment="size_scaling",
-                    level=f"groups={actual_groups}:hybrid",
-                    configuration={**common, "method": "hybrid"},
+                    level=f"groups={actual_groups}:greedy:rep={repetition + 1}",
+                    configuration={**common, "method": "greedy"},
                 )
-            if size <= settings.exact_max_orders:
                 _attempt(
                     rows,
                     instance,
-                    lambda instance=instance: solve_classical(
-                        instance, time_limit_seconds=60, mip_relative_gap=0.01
+                    lambda instance=instance, repetition=repetition: solve_polished_greedy(
+                        instance,
+                        time_limit_seconds=30,
+                        mip_relative_gap=0.01,
+                        seed=settings.exact_lns.seed + repetition,
                     ),
                     experiment="size_scaling",
-                    level=f"groups={actual_groups}:classical",
-                    configuration={**common, "method": "classical"},
+                    level=(
+                        f"groups={actual_groups}:polished_greedy:rep={repetition + 1}"
+                    ),
+                    configuration={**common, "method": "polished_greedy"},
+                )
+                if size <= settings.lns_max_orders:
+                    lns = replace(
+                        settings.exact_lns,
+                        seed=settings.exact_lns.seed + repetition,
+                        polish_initial_incumbent=False,
+                    )
+                    _attempt(
+                        rows,
+                        instance,
+                        lambda instance=instance, lns=lns: solve_exact_lns(
+                            instance, config=lns
+                        ),
+                        experiment="size_scaling",
+                        level=f"groups={actual_groups}:exact_lns:rep={repetition + 1}",
+                        configuration={**common, "method": "exact_lns"},
+                    )
+                if size <= settings.hybrid_max_orders:
+                    hybrid = replace(
+                        settings.hybrid,
+                        seed=settings.hybrid.seed + repetition,
+                    )
+                    _attempt(
+                        rows,
+                        instance,
+                        lambda instance=instance, hybrid=hybrid: solve_hybrid(
+                            instance, config=hybrid
+                        ),
+                        experiment="size_scaling",
+                        level=f"groups={actual_groups}:hybrid:rep={repetition + 1}",
+                        configuration={**common, "method": "hybrid"},
+                    )
+                if size <= settings.exact_max_orders:
+                    _attempt(
+                        rows,
+                        instance,
+                        lambda instance=instance: solve_classical(
+                            instance, time_limit_seconds=60, mip_relative_gap=0.01
+                        ),
+                        experiment="size_scaling",
+                        level=f"groups={actual_groups}:classical:rep={repetition + 1}",
+                        configuration={**common, "method": "classical"},
+                    )
+
+    if "synthetic_scaling" in selected:
+        for size in settings.synthetic_sizes:
+            for repetition in range(settings.scaling_repetitions):
+                generator_seed = 10_000 + 97 * size + repetition
+                instance = make_synthetic_problem(
+                    order_count=size,
+                    seed=generator_seed,
+                )
+                common = {
+                    "requested_assignment_groups": size,
+                    "actual_assignment_groups": size,
+                    "repetition": repetition + 1,
+                    "generator_seed": generator_seed,
+                    "data_scope": "independently generated synthetic scaling control",
+                }
+                for method, solver in [
+                    ("greedy", lambda instance=instance: solve_greedy_baseline(instance)),
+                    (
+                        "exact_lns",
+                        lambda instance=instance, repetition=repetition: solve_exact_lns(
+                            instance,
+                            config=replace(
+                                settings.exact_lns,
+                                seed=settings.exact_lns.seed + repetition,
+                                polish_initial_incumbent=False,
+                            ),
+                        ),
+                    ),
+                ]:
+                    _attempt(
+                        rows,
+                        instance,
+                        solver,
+                        experiment="synthetic_scaling",
+                        level=f"orders={size}:{method}:rep={repetition + 1}",
+                        configuration={**common, "method": method},
+                    )
+                if size <= settings.hybrid_max_orders:
+                    hybrid = replace(
+                        settings.hybrid,
+                        seed=settings.hybrid.seed + repetition,
+                    )
+                    _attempt(
+                        rows,
+                        instance,
+                        lambda instance=instance, hybrid=hybrid: solve_hybrid(
+                            instance, config=hybrid
+                        ),
+                        experiment="synthetic_scaling",
+                        level=f"orders={size}:hybrid:rep={repetition + 1}",
+                        configuration={**common, "method": "hybrid"},
+                    )
+                if size <= settings.exact_max_orders:
+                    _attempt(
+                        rows,
+                        instance,
+                        lambda instance=instance: solve_classical(
+                            instance, time_limit_seconds=60, mip_relative_gap=0.01
+                        ),
+                        experiment="synthetic_scaling",
+                        level=f"orders={size}:classical:rep={repetition + 1}",
+                        configuration={**common, "method": "classical"},
+                    )
+
+    if "candidate_dc_scope_sensitivity" in selected:
+        if problem.source_dir is None:
+            raise ValueError(
+                "candidate_dc_scope_sensitivity requires a POC problem with source_dir"
+            )
+        for scope in ["focus_default_dcs", "network_intersection"]:
+            scoped_problem = load_poc_problem(
+                problem.source_dir,
+                config=PocConfig(
+                    pareto_prune=False,
+                    candidate_dc_scope=scope,
+                ),
+                strict_bundle_audit=False,
+            )
+            instance = select_shortage_subset(scoped_problem, settings.base_orders)
+            for method, solver in [
+                (
+                    "polished_greedy",
+                    lambda instance=instance: solve_polished_greedy(
+                        instance,
+                        time_limit_seconds=30,
+                        mip_relative_gap=0.01,
+                        seed=settings.exact_lns.seed,
+                    ),
+                ),
+                (
+                    "exact_lns",
+                    lambda instance=instance: solve_exact_lns(
+                        instance, config=settings.exact_lns
+                    ),
+                ),
+            ]:
+                _attempt(
+                    rows,
+                    instance,
+                    solver,
+                    experiment="candidate_dc_scope_sensitivity",
+                    level=f"scope={scope}:{method}",
+                    configuration={
+                        "candidate_dc_scope": scope,
+                        "method": method,
+                    },
                 )
 
     if "penalty_weight_sensitivity" in selected:
@@ -331,6 +646,21 @@ def run_challenge_experiments(
             instance = scale_penalties(penalty_base, scale)
             for method, solver in [
                 ("greedy", lambda instance=instance: solve_greedy_baseline(instance)),
+                (
+                    "polished_greedy",
+                    lambda instance=instance: solve_polished_greedy(
+                        instance,
+                        time_limit_seconds=30,
+                        mip_relative_gap=0.01,
+                        seed=settings.exact_lns.seed,
+                    ),
+                ),
+                (
+                    "exact_lns",
+                    lambda instance=instance: solve_exact_lns(
+                        instance, config=settings.exact_lns
+                    ),
+                ),
                 (
                     "hybrid",
                     lambda instance=instance: solve_hybrid(
@@ -357,6 +687,21 @@ def run_challenge_experiments(
             for method, solver in [
                 ("greedy", lambda instance=instance: solve_greedy_baseline(instance)),
                 (
+                    "polished_greedy",
+                    lambda instance=instance: solve_polished_greedy(
+                        instance,
+                        time_limit_seconds=30,
+                        mip_relative_gap=0.01,
+                        seed=settings.exact_lns.seed,
+                    ),
+                ),
+                (
+                    "exact_lns",
+                    lambda instance=instance: solve_exact_lns(
+                        instance, config=settings.exact_lns
+                    ),
+                ),
+                (
                     "hybrid",
                     lambda instance=instance: solve_hybrid(
                         instance, config=settings.hybrid
@@ -373,11 +718,24 @@ def run_challenge_experiments(
                 )
 
     if "inventory_shock" in selected:
+        nominal_policy = _assignment_policy(solve_greedy_baseline(base))
         for shock in settings.inventory_shocks:
             instance = shock_inventory(base, shock)
             for method, solver in [
                 ("default", lambda instance=instance: solve_default_baseline(instance)),
                 ("greedy", lambda instance=instance: solve_greedy_baseline(instance)),
+                (
+                    "fixed_routing_recourse",
+                    lambda instance=instance: _solve_fixed_routing_recourse(
+                        instance, nominal_policy
+                    ),
+                ),
+                (
+                    "exact_lns",
+                    lambda instance=instance: solve_exact_lns(
+                        instance, config=settings.exact_lns
+                    ),
+                ),
                 (
                     "hybrid",
                     lambda instance=instance: solve_hybrid(
@@ -394,104 +752,170 @@ def run_challenge_experiments(
                     configuration={"inventory_shock": shock, "method": method},
                 )
 
-    if "quantum_seed_noise" in selected:
+    if "qubo_coefficient_noise" in selected:
+        control, control_hybrid = _coordination_control(settings)
         for seed in settings.seeds:
             for noise in settings.noise_levels:
                 hybrid = replace(
-                    settings.hybrid,
+                    control_hybrid,
                     seed=seed,
                     qubo_noise_relative_sigma=noise,
                 )
                 _attempt(
                     rows,
-                    base,
-                    lambda hybrid=hybrid: solve_hybrid(base, config=hybrid),
-                    experiment="quantum_seed_noise",
+                    control,
+                    lambda hybrid=hybrid: solve_hybrid(control, config=hybrid),
+                    experiment="qubo_coefficient_noise",
                     level=f"seed={seed}:noise={noise:g}",
                     configuration={
                         "seed": seed,
                         "coefficient_noise_relative_sigma": noise,
                         "noise_scope": "local QUBO coefficient perturbation; not QPU noise",
+                        "data_scope": "independently generated coupled synthetic control",
+                    },
+                )
+
+    if "qaoa_readout_noise" in selected:
+        control, control_hybrid = _coordination_control(settings)
+        for seed in settings.seeds:
+            for probability in settings.readout_noise_levels:
+                hybrid = replace(
+                    control_hybrid,
+                    sampler="qaoa_statevector",
+                    iterations=1,
+                    seed=seed,
+                    qaoa_readout_bitflip_probability=probability,
+                )
+                _attempt(
+                    rows,
+                    control,
+                    lambda hybrid=hybrid: solve_hybrid(control, config=hybrid),
+                    experiment="qaoa_readout_noise",
+                    level=f"seed={seed}:readout={probability:g}",
+                    configuration={
+                        "seed": seed,
+                        "qaoa_readout_bitflip_probability": probability,
+                        "noise_scope": (
+                            "independent symmetric measurement bit flips after "
+                            "ideal local QAOA; not gate/decoherence/hardware noise"
+                        ),
+                        "data_scope": (
+                            "independently generated coupled synthetic control"
+                        ),
                     },
                 )
 
     if "qubo_penalty_sensitivity" in selected:
+        control, control_hybrid = _coordination_control(settings)
         for one_hot in settings.qubo_one_hot_multipliers:
             for pair in settings.qubo_pair_multipliers:
                 hybrid = replace(
-                    settings.hybrid,
+                    control_hybrid,
                     one_hot_penalty_multiplier=one_hot,
                     pair_penalty_multiplier=pair,
                 )
                 _attempt(
                     rows,
-                    base,
-                    lambda hybrid=hybrid: solve_hybrid(base, config=hybrid),
+                    control,
+                    lambda hybrid=hybrid: solve_hybrid(control, config=hybrid),
                     experiment="qubo_penalty_sensitivity",
                     level=f"one_hot={one_hot:g}:pair={pair:g}",
                     configuration={
                         "one_hot_penalty_multiplier": one_hot,
                         "pair_penalty_multiplier": pair,
+                        "data_scope": "independently generated coupled synthetic control",
                     },
                 )
 
     if "pareto_pruning_ablation" in selected:
         unpruned_base = select_shortage_subset(problem, settings.base_orders)
-        for label, instance in [
-            ("without_pruning", unpruned_base),
-            ("with_pruning", prune_pareto_candidates(unpruned_base)),
-        ]:
-            _attempt(
-                rows,
-                instance,
-                lambda instance=instance: solve_hybrid(
-                    instance, config=settings.hybrid
-                ),
-                experiment="pareto_pruning_ablation",
-                level=label,
-                configuration={"pareto_pruning": label == "with_pruning"},
-            )
+        for seed in settings.seeds:
+            for label, instance in [
+                ("without_pruning", unpruned_base),
+                ("with_pruning", prune_pareto_candidates(unpruned_base)),
+            ]:
+                hybrid = replace(settings.hybrid, seed=seed)
+                _attempt(
+                    rows,
+                    instance,
+                    lambda instance=instance, hybrid=hybrid: solve_hybrid(
+                        instance, config=hybrid
+                    ),
+                    experiment="pareto_pruning_ablation",
+                    level=f"{label}:seed={seed}",
+                    configuration={
+                        "pareto_pruning": label == "with_pruning",
+                        "seed": seed,
+                    },
+                )
 
     if "batch_strategy_ablation" in selected:
-        for strategy in ["random", "conflict"]:
-            hybrid = replace(settings.hybrid, batch_strategy=strategy)
-            _attempt(
-                rows,
-                base,
-                lambda hybrid=hybrid: solve_hybrid(base, config=hybrid),
-                experiment="batch_strategy_ablation",
-                level=strategy,
-                configuration={"batch_strategy": strategy},
-            )
+        for seed in settings.seeds:
+            for strategy in ["random", "conflict"]:
+                hybrid = replace(
+                    settings.hybrid,
+                    batch_strategy=strategy,
+                    seed=seed,
+                )
+                _attempt(
+                    rows,
+                    base,
+                    lambda hybrid=hybrid: solve_hybrid(base, config=hybrid),
+                    experiment="batch_strategy_ablation",
+                    level=f"{strategy}:seed={seed}",
+                    configuration={"batch_strategy": strategy, "seed": seed},
+                )
 
     if "sampler_ablation" in selected:
-        for sampler in ["random", "simulated_annealing"]:
-            hybrid = replace(settings.hybrid, sampler=sampler)
+        control, control_hybrid = _coordination_control(settings)
+        for sampler in [
+            "exact_feasible",
+            "random",
+            "simulated_annealing",
+            "qaoa_statevector",
+        ]:
+            hybrid = replace(control_hybrid, sampler=sampler)
             _attempt(
                 rows,
-                base,
-                lambda hybrid=hybrid: solve_hybrid(base, config=hybrid),
+                control,
+                lambda hybrid=hybrid: solve_hybrid(control, config=hybrid),
                 experiment="sampler_ablation",
                 level=sampler,
-                configuration={"sampler": sampler},
+                configuration={
+                    "sampler": sampler,
+                    "data_scope": "independently generated coupled synthetic control",
+                },
             )
 
     if "synthetic_coordination_control" in selected:
-        stress = make_synthetic_problem(order_count=8, seed=2)
-        stress_hybrid = HybridConfig(
-            iterations=4,
-            neighborhood_orders=8,
-            max_qubo_variables=40,
-            max_candidates_per_order=5,
-            num_reads=16,
-            sweeps=80,
-            top_k_recourse=4,
-            recourse_time_limit_seconds=8,
-            initial_method="greedy",
-            seed=2,
-        )
+        stress, stress_hybrid = _coordination_control(settings)
         for method, solver in [
             ("greedy", lambda: solve_greedy_baseline(stress)),
+            (
+                "polished_greedy",
+                lambda: solve_polished_greedy(
+                    stress,
+                    time_limit_seconds=30,
+                    mip_relative_gap=0,
+                    seed=6,
+                ),
+            ),
+            (
+                "exact_lns",
+                lambda: solve_exact_lns(
+                    stress,
+                    config=ExactLNSConfig(
+                        iterations=1,
+                        initial_neighborhood_groups=4,
+                        minimum_neighborhood_groups=2,
+                        maximum_neighborhood_groups=4,
+                        maximum_neighborhood_orders=4,
+                        local_time_limit_seconds=5,
+                        mip_relative_gap=0,
+                        seed=6,
+                    ),
+                ),
+            ),
             (
                 "classical",
                 lambda: solve_classical(
@@ -509,7 +933,7 @@ def run_challenge_experiments(
                 configuration={
                     "method": method,
                     "data_scope": "independently generated synthetic control",
-                    "generator_seed": 2,
+                    "generator_seed": 6,
                 },
             )
 
@@ -524,16 +948,41 @@ def run_challenge_experiments(
         "order_line_count",
         "candidate_count",
         "objective_value",
+        "requested_value",
+        "objective_capture_rate",
+        "objective_per_assignment_group",
         "case_fill_rate",
         "penalty_cost",
         "shipping_cost",
         "reassigned_orders",
+        "reassigned_assignment_groups",
         "runtime_seconds",
         "optimality_gap",
         "initial_objective",
+        "raw_initial_objective",
+        "polished_initial_objective",
+        "initial_polish_improvement",
         "hybrid_improvement",
+        "search_improvement",
+        "lns_improvement",
+        "total_hybrid_improvement",
+        "total_search_improvement",
         "maximum_qubo_variables",
         "accepted_moves",
+        "assignment_moves",
+        "local_solves",
+        "maximum_active_groups",
+        "maximum_local_variables",
+        "maximum_local_constraints",
+        "maximum_local_mip_nodes",
+        "experiment_schema_version",
+        "schema_version",
+        "assumption_version",
+        "bundle_sha256",
+        "problem_sha256",
+        "git_commit",
+        "git_dirty",
+        "source_state_sha256",
         "configuration",
     ]
     return result.reindex(columns=ordered + [c for c in result if c not in ordered])
@@ -555,8 +1004,10 @@ def run_remote_qpu_validation(
 
     if not allow_remote:
         raise ValueError("Remote QPU validation requires allow_remote=True")
-    if sampler not in {"dwave-qpu", "dwave-hybrid"}:
-        raise ValueError("sampler must be 'dwave-qpu' or 'dwave-hybrid'")
+    if sampler not in {"dwave-qpu", "dwave-hybrid", "ibm-qpu"}:
+        raise ValueError(
+            "sampler must be 'dwave-qpu', 'dwave-hybrid', or 'ibm-qpu'"
+        )
     problem = make_synthetic_problem(
         order_count=4,
         dc_count=3,
@@ -607,8 +1058,29 @@ def run_remote_qpu_validation(
 def write_experiment_results(results: pd.DataFrame, path: str | Path) -> Path:
     """Write aggregate experiment evidence; reject identifier-like columns."""
 
-    forbidden = {"order_id", "sku_id", "dc_id", "candidate_id", "customer", "zip"}
-    bad = [column for column in results.columns if column.lower() in forbidden]
+    forbidden_fragments = {
+        "address",
+        "candidate_id",
+        "customer",
+        "dc_id",
+        "delivery_number",
+        "load_id",
+        "material",
+        "order_id",
+        "plant",
+        "sku_id",
+        "zip",
+    }
+    allowed_identifiers = {"dataset_id", "experiment_id"}
+    bad = []
+    for column in results.columns:
+        normalized = column.lower()
+        if normalized in allowed_identifiers:
+            continue
+        if normalized.endswith("_id") or any(
+            fragment in normalized for fragment in forbidden_fragments
+        ):
+            bad.append(column)
     if bad:
         raise ValueError(f"Aggregate experiment output contains forbidden columns: {bad}")
     output = Path(path)

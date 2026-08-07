@@ -13,9 +13,26 @@ _TOL = 1e-8
 
 
 def _date(value: object) -> pd.Timestamp | pd.NaT:
-    if value is None or (isinstance(value, float) and np.isnan(value)) or pd.isna(value):
+    try:
+        if value is None or pd.isna(value):
+            return pd.NaT
+        return pd.Timestamp(value)
+    except (TypeError, ValueError, OverflowError):
         return pd.NaT
-    return pd.Timestamp(value)
+
+
+def _strict_bool(value: object) -> bool:
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, np.integer)) and int(value) in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1"}:
+            return True
+        if normalized in {"false", "0"}:
+            return False
+    raise ValueError(f"expected a boolean value, received {value!r}")
 
 
 def validate_solution(problem: ProblemData, solution: Solution) -> ValidationResult:
@@ -28,9 +45,14 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
 
     assignments = solution.assignments.copy()
     fulfillment = solution.fulfillment.copy()
-    order_ids = set(problem.orders["order_id"])
+    order_ids = set(problem.orders["order_id"].astype(str))
     line_keys = set(
-        map(tuple, problem.order_lines[["order_id", "sku_id"]].itertuples(index=False, name=None))
+        map(
+            tuple,
+            problem.order_lines[["order_id", "sku_id"]]
+            .astype(str)
+            .itertuples(index=False, name=None),
+        )
     )
 
     required_assignment_columns = {
@@ -63,6 +85,18 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
             is_feasible=False,
             schema_violations=schema_violations,
         )
+
+    for column in ["is_unassigned", "is_divert"]:
+        parsed: list[bool] = []
+        for index, value in assignments[column].items():
+            try:
+                parsed.append(_strict_bool(value))
+            except ValueError as error:
+                schema_violations.append(
+                    f"assignments row {index} column {column}: {error}"
+                )
+                parsed.append(False)
+        assignments[column] = parsed
 
     if assignments["order_id"].duplicated().any():
         duplicates = assignments.loc[
@@ -225,6 +259,10 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
             demand_violations.append(f"nonnumeric quantities for line {key}")
             continue
 
+        if not np.isfinite(fulfilled) or not np.isfinite(unfulfilled):
+            demand_violations.append(f"nonfinite quantities for line {key}")
+            continue
+
         if fulfilled < -_TOL or unfulfilled < -_TOL:
             demand_violations.append(f"negative quantities for line {key}")
         if not np.isclose(fulfilled, round(fulfilled), atol=_TOL):
@@ -349,9 +387,17 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
 
     capacities = problem.capacities
     if not capacities.empty:
+        sanitized_solution = Solution(
+            method=solution.method,
+            assignments=assignments,
+            fulfillment=fulfillment,
+            runtime_seconds=solution.runtime_seconds,
+            raw_objective=solution.raw_objective,
+            metadata=solution.metadata,
+        )
         try:
-            capacity_usage = solution_capacity_usage(problem, solution)
-        except ValueError as error:
+            capacity_usage = solution_capacity_usage(problem, sanitized_solution)
+        except (TypeError, ValueError, OverflowError) as error:
             schema_violations.append(str(error))
             capacity_usage = {}
         for cap in capacities.itertuples(index=False):

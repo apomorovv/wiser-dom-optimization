@@ -66,8 +66,15 @@ def main() -> int:
         print(f"figure {name:>32}: {path}")
     infeasible = results.loc[~results["feasible"].fillna(False)]
     if not infeasible.empty:
+        diagnostic_columns = [
+            "experiment",
+            "level",
+            "validation_categories",
+            "validation_violation_count",
+            "error_type",
+        ]
         details = infeasible[
-            ["experiment", "level", "validation_categories", "validation_violation_count"]
+            [column for column in diagnostic_columns if column in infeasible]
         ].to_dict("records")
         raise RuntimeError(f"Experiment suite returned infeasible rows: {details}")
     return 0

@@ -11,6 +11,8 @@ import pandas as pd
 _METHOD_STYLES = {
     "default": {"marker": "D", "linestyle": ":"},
     "greedy": {"marker": "o", "linestyle": "-"},
+    "polished_greedy": {"marker": "P", "linestyle": "-"},
+    "exact_lns": {"marker": "X", "linestyle": "-"},
     "classical": {"marker": "^", "linestyle": "-."},
     "hybrid": {"marker": "s", "linestyle": "--"},
 }
@@ -54,9 +56,12 @@ def plot_method_objectives(metrics: pd.DataFrame, output_path: str | Path) -> Pa
 def _solver_comparison(frame: pd.DataFrame, output: Path) -> Path:
     data = _feasible(frame).sort_values("objective_value", ascending=False)
     figure, axes = plt.subplots(2, 2, figsize=(11, 8))
-    colors = ["#64748b", "#0ea5e9", "#16a34a", "#7c3aed"][: len(data)]
-    axes[0, 0].bar(data["method"], data["objective_value"], color=colors)
-    axes[0, 0].set(title="Validated objective", ylabel="Source currency")
+    palette = ["#64748b", "#0ea5e9", "#14b8a6", "#16a34a", "#7c3aed", "#e11d48"]
+    colors = [palette[index % len(palette)] for index in range(len(data))]
+    axes[0, 0].bar(
+        data["method"], 100 * data["objective_capture_rate"], color=colors
+    )
+    axes[0, 0].set(title="Objective capture", ylabel="Percent of requested value")
     axes[0, 1].bar(data["method"], 100 * data["case_fill_rate"], color=colors)
     axes[0, 1].set(title="Case fill rate", ylabel="Percent")
     axes[1, 0].bar(data["method"], data["runtime_seconds"], color=colors)
@@ -87,25 +92,64 @@ def _solver_comparison(frame: pd.DataFrame, output: Path) -> Path:
 
 def _size_scaling(frame: pd.DataFrame, output: Path) -> Path:
     data = _feasible(frame).copy()
-    x_column = "actual_assignment_groups" if "actual_assignment_groups" in data else "assignment_group_count"
+    x_column = (
+        "actual_assignment_groups"
+        if "actual_assignment_groups" in data
+        else "assignment_group_count"
+    )
+    measures = [
+        "runtime_seconds",
+        "objective_capture_rate",
+        "candidate_count",
+        "maximum_qubo_variables",
+        "maximum_local_variables",
+    ]
+    numeric = [column for column in measures if column in data]
+    summary = (
+        data.groupby(["method", x_column], as_index=False)[numeric]
+        .median(numeric_only=True)
+        .sort_values(["method", x_column])
+    )
     figure, axes = plt.subplots(1, 3, figsize=(15, 4.5))
-    for method, group in data.groupby("method", sort=True):
-        group = group.sort_values(x_column)
+    for method, group in summary.groupby("method", sort=True):
         style = _METHOD_STYLES.get(method, {"marker": "o", "linestyle": "-"})
+        raw = data.loc[data["method"] == method]
         axes[0].plot(
             group[x_column], group["runtime_seconds"], label=method, **style
         )
         axes[1].plot(
-            group[x_column], group["objective_value"], label=method, **style
+            group[x_column], 100 * group["objective_capture_rate"], label=method, **style
         )
-    greedy = data.loc[data["method"] == "greedy"].sort_values(x_column)
+        if raw.groupby(x_column).size().max() > 1:
+            runtime_quantiles = raw.groupby(x_column)["runtime_seconds"].quantile(
+                [0.25, 0.75]
+            ).unstack()
+            quality_quantiles = raw.groupby(x_column)[
+                "objective_capture_rate"
+            ].quantile([0.25, 0.75]).unstack()
+            x_values = group[x_column].to_numpy(dtype=float)
+            axes[0].fill_between(
+                x_values,
+                runtime_quantiles.loc[group[x_column], 0.25].to_numpy(dtype=float),
+                runtime_quantiles.loc[group[x_column], 0.75].to_numpy(dtype=float),
+                alpha=0.12,
+            )
+            axes[1].fill_between(
+                x_values,
+                100
+                * quality_quantiles.loc[group[x_column], 0.25].to_numpy(dtype=float),
+                100
+                * quality_quantiles.loc[group[x_column], 0.75].to_numpy(dtype=float),
+                alpha=0.12,
+            )
+    greedy = summary.loc[summary["method"] == "greedy"]
     axes[2].plot(
         greedy[x_column],
         greedy["candidate_count"],
         marker="o",
         label="Candidate rows",
     )
-    hybrid = data.loc[data["method"] == "hybrid"].sort_values(x_column)
+    hybrid = summary.loc[summary["method"] == "hybrid"]
     if not hybrid.empty:
         axes[2].plot(
             hybrid[x_column],
@@ -113,13 +157,60 @@ def _size_scaling(frame: pd.DataFrame, output: Path) -> Path:
             marker="s",
             label="Maximum local QUBO variables",
         )
-    axes[0].set(title="Runtime scaling", xlabel="Assignment groups", ylabel="Seconds")
+    exact_lns = summary.loc[summary["method"] == "exact_lns"]
+    if not exact_lns.empty and "maximum_local_variables" in exact_lns:
+        axes[2].plot(
+            exact_lns[x_column],
+            exact_lns["maximum_local_variables"],
+            marker="X",
+            label="Maximum exact-LNS variables",
+        )
+    axes[0].set(
+        title="Runtime scaling (median and IQR)",
+        xlabel="Assignment groups",
+        ylabel="Seconds",
+    )
     axes[0].set_yscale("log")
-    axes[1].set(title="Objective scaling", xlabel="Assignment groups", ylabel="Objective")
+    axes[1].set(
+        title="Normalized quality (median and IQR)",
+        xlabel="Assignment groups",
+        ylabel="Objective capture (%)",
+    )
     axes[2].set(title="Model-size growth", xlabel="Assignment groups", ylabel="Count")
     for axis in axes:
         axis.grid(alpha=0.25)
         axis.legend()
+    figure.tight_layout()
+    return _save(figure, output)
+
+
+def _candidate_scope(frame: pd.DataFrame, output: Path) -> Path:
+    data = _feasible(frame).copy()
+    data["scope"] = data["candidate_dc_scope"].replace(
+        {
+            "focus_default_dcs": "Focus DCs",
+            "network_intersection": "Network intersection",
+        }
+    )
+    figure, axes = plt.subplots(1, 3, figsize=(14, 4.3))
+    measures = [
+        ("candidate_count", "Candidate rows", 1.0),
+        ("objective_capture_rate", "Objective capture (%)", 100.0),
+        ("runtime_seconds", "Runtime (seconds)", 1.0),
+    ]
+    for axis, (column, label, multiplier) in zip(axes, measures):
+        table = data.pivot_table(
+            index="scope",
+            columns="method",
+            values=column,
+            aggfunc="median",
+        )
+        (multiplier * table).plot.bar(ax=axis)
+        axis.set(xlabel="Candidate DC universe", ylabel=label)
+        axis.tick_params(axis="x", rotation=15)
+        axis.grid(axis="y", alpha=0.25)
+        axis.legend(title="Method", fontsize=8)
+    figure.suptitle("Candidate-universe sensitivity", fontsize=14)
     figure.tight_layout()
     return _save(figure, output)
 
@@ -135,7 +226,7 @@ def _line_sensitivity(
     data = _feasible(frame)
     figure, axes = plt.subplots(1, 3, figsize=(15, 4.3))
     measures = [
-        ("objective_value", "Validated objective"),
+        ("objective_capture_rate", "Objective capture (%)"),
         ("case_fill_rate", "Case fill rate"),
         ("runtime_seconds", "Runtime (seconds)"),
     ]
@@ -143,7 +234,11 @@ def _line_sensitivity(
         group = group.sort_values(x)
         style = _METHOD_STYLES.get(method, {"marker": "o", "linestyle": "-"})
         for axis, (column, label) in zip(axes, measures):
-            values = 100 * group[column] if column == "case_fill_rate" else group[column]
+            values = (
+                100 * group[column]
+                if column in {"case_fill_rate", "objective_capture_rate"}
+                else group[column]
+            )
             axis.plot(group[x], values, label=method, **style)
             axis.set(xlabel=x_label, ylabel=label)
     axes[2].set_yscale("log")
@@ -212,7 +307,7 @@ def _heatmap(
     axis.figure.colorbar(image, ax=axis, fraction=0.046, pad=0.04)
 
 
-def _quantum_noise(frame: pd.DataFrame, output: Path) -> Path:
+def _qubo_coefficient_noise(frame: pd.DataFrame, output: Path) -> Path:
     data = _feasible(frame)
     improvement = data.pivot_table(
         index="seed",
@@ -244,6 +339,43 @@ def _quantum_noise(frame: pd.DataFrame, output: Path) -> Path:
         value_format=".2f",
     )
     figure.suptitle("Local QUBO robustness (not physical QPU noise)", fontsize=14)
+    figure.tight_layout()
+    return _save(figure, output)
+
+
+def _qaoa_readout_noise(frame: pd.DataFrame, output: Path) -> Path:
+    data = _feasible(frame)
+    probability = "qaoa_readout_bitflip_probability"
+    one_hot = data.pivot_table(
+        index="seed",
+        columns=probability,
+        values="raw_one_hot_rate",
+        aggfunc="mean",
+    )
+    improvement = data.pivot_table(
+        index="seed",
+        columns=probability,
+        values="hybrid_improvement",
+        aggfunc="mean",
+    )
+    figure, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    _heatmap(
+        axes[0],
+        one_hot,
+        title="Raw one-hot rate",
+        x_label="Independent readout bit-flip probability",
+        y_label="Seed",
+        value_format=".2f",
+    )
+    _heatmap(
+        axes[1],
+        improvement,
+        title="Validated search improvement",
+        x_label="Independent readout bit-flip probability",
+        y_label="Seed",
+        value_format=".1f",
+    )
+    figure.suptitle("Local QAOA measurement-noise proxy", fontsize=14)
     figure.tight_layout()
     return _save(figure, output)
 
@@ -324,7 +456,8 @@ def _hybrid_timing(frame: pd.DataFrame, output: Path) -> Path:
         axis=1,
     )
     stages = [
-        ("initialization_seconds", "Initial greedy", "#64748b"),
+        ("baseline_initialization_seconds", "Greedy", "#64748b"),
+        ("initial_polish_seconds", "Initial exact polish", "#14b8a6"),
         ("qubo_build_seconds", "QUBO build", "#0ea5e9"),
         ("sampling_seconds", "Sampling", "#7c3aed"),
         ("recourse_seconds", "Exact recourse", "#16a34a"),
@@ -360,6 +493,12 @@ def plot_challenge_results(
 
     add("solver_comparison", "solver_comparison", _solver_comparison)
     add("size_scaling", "size_scaling", _size_scaling)
+    add("synthetic_scaling", "synthetic_scaling", _size_scaling)
+    add(
+        "candidate_dc_scope_sensitivity",
+        "candidate_dc_scope_sensitivity",
+        _candidate_scope,
+    )
     add(
         "business_penalty_sensitivity",
         "penalty_weight_sensitivity",
@@ -387,7 +526,12 @@ def plot_challenge_results(
             title="Inventory-shock robustness",
         ),
     )
-    add("quantum_noise", "quantum_seed_noise", _quantum_noise)
+    add(
+        "qubo_coefficient_noise",
+        "qubo_coefficient_noise",
+        _qubo_coefficient_noise,
+    )
+    add("qaoa_readout_noise", "qaoa_readout_noise", _qaoa_readout_noise)
     add("qubo_penalty_sensitivity", "qubo_penalty_sensitivity", _qubo_penalties)
 
     ablation_names = {
@@ -424,7 +568,12 @@ def plot_hardware_benchmark(
 ) -> Path:
     """Plot synthetic QUBO-scoring throughput by workload and backend."""
 
-    required = {"backend", "variables", "samples", "samples_per_second"}
+    required = {
+        "backend",
+        "variables",
+        "samples",
+        "end_to_end_samples_per_second",
+    }
     if missing := required - set(benchmark.columns):
         raise ValueError(f"benchmark is missing {sorted(missing)}")
     data = benchmark.copy()
@@ -432,13 +581,17 @@ def plot_hardware_benchmark(
         lambda row: f"n={int(row['variables'])}, reads={int(row['samples'])}",
         axis=1,
     )
-    pivot = data.pivot(index="workload", columns="backend", values="samples_per_second")
+    pivot = data.pivot(
+        index="workload",
+        columns="backend",
+        values="end_to_end_samples_per_second",
+    )
     figure, axis = plt.subplots(figsize=(10, max(4, 0.55 * len(pivot))))
     pivot.plot.barh(ax=axis)
     axis.set(
-        xlabel="QUBO samples scored per second",
+        xlabel="End-to-end QUBO samples scored per second",
         ylabel="Synthetic workload",
-        title="CPU/GPU QUBO scoring crossover",
+        title="CPU/GPU QUBO scoring crossover (including transfer)",
     )
     axis.set_xscale("log")
     axis.grid(axis="x", alpha=0.25)

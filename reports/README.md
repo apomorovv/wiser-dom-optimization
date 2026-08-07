@@ -1,8 +1,9 @@
 # Submission materials — deferred
 
-The final summary, 6–10 page report, and slide presentation are intentionally not
-generated on this experiment branch. They must be built only after the full study
-has completed and its aggregate results have passed validation.
+The separate two-page business/technical summary, 6–10 page report, 5–7 slide
+presentation, and reviewed data-specific one-page planner view are intentionally not
+generated on this experiment branch. They must be built only after the full study has
+completed and its aggregate results have passed validation and privacy review.
 
 The material that can be prepared before results is stored elsewhere:
 

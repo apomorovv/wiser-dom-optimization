@@ -29,6 +29,12 @@ def hardware_capabilities() -> dict[str, object]:
         "cuda_device_name": None,
         "cuda_memory_gib": None,
         "cuopt_available": _module_available("cuopt"),
+        "qiskit_available": _module_available("qiskit"),
+        "qiskit_ibm_runtime_available": _module_available("qiskit_ibm_runtime"),
+        "ibm_credentials_environment_configured": bool(
+            os.environ.get("QISKIT_IBM_TOKEN")
+            or os.environ.get("QISKIT_IBM_INSTANCE")
+        ),
         "dwave_system_available": _module_available("dwave.system"),
         "dwave_credentials_configured": bool(
             os.environ.get("DWAVE_API_TOKEN") or os.environ.get("DWAVE_CONFIG_FILE")
@@ -126,6 +132,8 @@ def benchmark_qubo_batch_scoring(
                     "compute_seconds": cpu_seconds,
                     "transfer_seconds": 0.0,
                     "samples_per_second": samples_count / cpu_seconds,
+                    "end_to_end_seconds": cpu_seconds,
+                    "end_to_end_samples_per_second": samples_count / cpu_seconds,
                 }
             )
             if gpu_available:
@@ -138,6 +146,9 @@ def benchmark_qubo_batch_scoring(
                         "compute_seconds": gpu_seconds,
                         "transfer_seconds": transfer_seconds,
                         "samples_per_second": samples_count / gpu_seconds,
+                        "end_to_end_seconds": gpu_seconds + transfer_seconds,
+                        "end_to_end_samples_per_second": samples_count
+                        / (gpu_seconds + transfer_seconds),
                     }
                 )
     return pd.DataFrame(rows)

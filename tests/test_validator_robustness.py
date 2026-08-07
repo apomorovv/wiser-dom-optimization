@@ -1,5 +1,6 @@
 import pandas as pd
 
+from domopt.baselines import solve_default_baseline
 from domopt.data import make_tiny_problem_data
 from domopt.schemas import Solution
 from domopt.validation import validate_solution
@@ -63,3 +64,35 @@ def test_validator_reports_unknown_candidate_with_capacities() -> None:
     assert not result.is_feasible
     assert result.eligibility_violations
     assert result.schema_violations
+
+
+def test_validator_parses_explicit_boolean_strings_without_truthiness_bug() -> None:
+    problem = make_tiny_problem_data()
+    solution = solve_default_baseline(problem)
+    solution.assignments["is_unassigned"] = solution.assignments[
+        "is_unassigned"
+    ].map({True: "True", False: "False"})
+    solution.assignments["is_divert"] = solution.assignments["is_divert"].map(
+        {True: "True", False: "False"}
+    )
+
+    assert validate_solution(problem, solution).is_feasible
+
+
+def test_validator_rejects_invalid_booleans_and_nonfinite_quantities() -> None:
+    problem = make_tiny_problem_data()
+    solution = solve_default_baseline(problem)
+    solution.assignments["is_unassigned"] = solution.assignments[
+        "is_unassigned"
+    ].astype(object)
+    solution.fulfillment["fulfilled_cases"] = solution.fulfillment[
+        "fulfilled_cases"
+    ].astype(float)
+    solution.assignments.loc[0, "is_unassigned"] = "not-a-boolean"
+    solution.fulfillment.loc[0, "fulfilled_cases"] = float("inf")
+
+    result = validate_solution(problem, solution)
+
+    assert not result.is_feasible
+    assert any("expected a boolean" in item for item in result.schema_violations)
+    assert any("nonfinite quantities" in item for item in result.demand_violations)

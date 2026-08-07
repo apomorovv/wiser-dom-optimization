@@ -63,6 +63,11 @@ class HybridConfig:
     remote_time_limit_seconds: float | None = None
     qubo_noise_relative_sigma: float = 0.0
     batch_strategy: str = "conflict"
+    polish_initial_incumbent: bool = True
+    qaoa_layers: int = 1
+    qaoa_restarts: int = 4
+    qaoa_readout_bitflip_probability: float = 0.0
+    max_feasible_states: int = 65_536
 
     def validate(self) -> None:
         if self.iterations <= 0:
@@ -90,6 +95,74 @@ class HybridConfig:
             raise ValueError("initial_method must be 'default' or 'greedy'")
         if self.batch_strategy not in {"conflict", "random"}:
             raise ValueError("batch_strategy must be 'conflict' or 'random'")
+        if self.qaoa_layers <= 0 or self.qaoa_restarts <= 0:
+            raise ValueError("QAOA layers and restarts must be positive")
+        if not 0 <= self.qaoa_readout_bitflip_probability <= 1:
+            raise ValueError(
+                "qaoa_readout_bitflip_probability must be between zero and one"
+            )
+        if self.max_feasible_states <= 0:
+            raise ValueError("max_feasible_states must be positive")
+
+
+@dataclass(frozen=True)
+class ExactLNSConfig:
+    """Configuration for the adaptive exact-MILP neighborhood search.
+
+    The method is the production classical comparator for the sampler-assisted
+    path.  Each neighborhood leaves assignment decisions free and solves the
+    detailed quantity/penalty recourse jointly in one bounded MILP.
+    """
+
+    iterations: int = 6
+    initial_neighborhood_groups: int = 8
+    minimum_neighborhood_groups: int = 4
+    maximum_neighborhood_groups: int = 16
+    maximum_neighborhood_orders: int = 40
+    maximum_local_fulfillment_variables: int = 6_000
+    local_time_limit_seconds: float = 8.0
+    mip_relative_gap: float = 0.01
+    diversification_interval: int = 3
+    initial_method: str = "greedy"
+    polish_initial_incumbent: bool = True
+    adaptive: bool = True
+    seed: int = 0
+
+    def validate(self) -> None:
+        if self.iterations <= 0:
+            raise ValueError("iterations must be positive")
+        if self.minimum_neighborhood_groups <= 0:
+            raise ValueError("minimum_neighborhood_groups must be positive")
+        if not (
+            self.minimum_neighborhood_groups
+            <= self.initial_neighborhood_groups
+            <= self.maximum_neighborhood_groups
+        ):
+            raise ValueError(
+                "neighborhood group limits must satisfy minimum <= initial <= maximum"
+            )
+        if self.maximum_neighborhood_orders <= 0:
+            raise ValueError("maximum_neighborhood_orders must be positive")
+        if self.maximum_local_fulfillment_variables <= 0:
+            raise ValueError("maximum_local_fulfillment_variables must be positive")
+        if self.local_time_limit_seconds <= 0:
+            raise ValueError("local_time_limit_seconds must be positive")
+        if not 0 <= self.mip_relative_gap < 1:
+            raise ValueError("mip_relative_gap must be in [0, 1)")
+        if self.diversification_interval <= 0:
+            raise ValueError("diversification_interval must be positive")
+        if self.initial_method not in {"default", "greedy"}:
+            raise ValueError("initial_method must be 'default' or 'greedy'")
+
+
+@dataclass(frozen=True)
+class _NeighborhoodIndex:
+    """Problem-static assignment-group conflicts reused across iterations."""
+
+    members_by_unit: dict[str, frozenset[str]]
+    adjacency: dict[str, frozenset[str]]
+    candidate_count: dict[str, int]
+    fulfillment_variable_estimate: dict[str, int]
 
 
 def _solution_for_orders(solution: Solution, order_ids: set[str], method: str) -> Solution:
@@ -139,24 +212,68 @@ def residualize_problem(
     if not capacities.empty:
         capacities["capacity"] = residual_capacity
 
+    local_orders = problem.orders.loc[
+        problem.orders["order_id"].astype(str).isin(active_orders)
+    ].copy()
+    local_lines = problem.order_lines.loc[
+        problem.order_lines["order_id"].astype(str).isin(active_orders)
+    ].copy()
+    local_candidates = problem.candidates.loc[
+        problem.candidates["order_id"].astype(str).isin(active_orders)
+    ].copy()
+
+    # Keep only resource rows reachable by an eligible local assignment.  Earlier
+    # versions passed every global ATP checkpoint and capacity row into each local
+    # MILP, producing thousands of coefficient-empty constraints.  Frozen use has
+    # already been subtracted above, so this projection is lossless for the active
+    # orders and benefits both sampler recourse and exact LNS.
+    eligible_local = local_candidates.loc[
+        local_candidates["eligible"].astype(bool)
+    ]
+    reachable_inventory = (
+        eligible_local[["order_id", "dc_id"]]
+        .merge(local_lines[["order_id", "sku_id"]], on="order_id", how="inner")
+        [["dc_id", "sku_id"]]
+        .drop_duplicates()
+    )
+    inventory = inventory.merge(
+        reachable_inventory,
+        on=["dc_id", "sku_id"],
+        how="inner",
+        validate="many_to_one",
+    )
+    reachable_dates = (
+        eligible_local[["dc_id", "pgi_date"]]
+        .rename(columns={"pgi_date": "date"})
+        .drop_duplicates()
+    )
+    capacities = capacities.merge(
+        reachable_dates,
+        on=["dc_id", "date"],
+        how="inner",
+        validate="many_to_one",
+    )
+    calendar = problem.calendar.merge(
+        reachable_dates,
+        on=["dc_id", "date"],
+        how="inner",
+        validate="many_to_one",
+    )
+
     local = ProblemData(
-        orders=problem.orders.loc[
-            problem.orders["order_id"].astype(str).isin(active_orders)
-        ].copy(),
-        order_lines=problem.order_lines.loc[
-            problem.order_lines["order_id"].astype(str).isin(active_orders)
-        ].copy(),
+        orders=local_orders,
+        order_lines=local_lines,
         inventory=inventory,
-        candidates=problem.candidates.loc[
-            problem.candidates["order_id"].astype(str).isin(active_orders)
-        ].copy(),
+        candidates=local_candidates,
         capacities=capacities,
-        calendar=problem.calendar.copy(),
+        calendar=calendar,
         metadata={
             **problem.metadata,
             "parent_dataset_id": problem.metadata.get("dataset_id", "unknown"),
             "dataset_id": f"{problem.metadata.get('dataset_id', 'unknown')}::local",
             "active_order_count": len(active_orders),
+            "local_inventory_rows": len(inventory),
+            "local_capacity_rows": len(capacities),
         },
     )
     return normalize_problem_data(local)
@@ -500,22 +617,26 @@ def _resource_signatures(problem: ProblemData) -> dict[str, set[tuple[Any, ...]]
     return dict(signatures)
 
 
-def _select_neighborhood(
-    problem: ProblemData,
-    incumbent: Solution,
-    config: HybridConfig,
-    iteration: int,
-) -> set[str]:
+def _build_neighborhood_index(problem: ProblemData) -> _NeighborhoodIndex:
+    """Build the static conflict graph once for a complete search run."""
+
     signatures = _resource_signatures(problem)
     if bool(problem.metadata.get("enforce_assignment_group", False)):
-        unit_for_order = problem.orders.set_index("order_id")[
-            "assignment_group"
-        ].astype(str).to_dict()
+        if "assignment_group" not in problem.orders.columns:
+            raise ValueError("Group cohesion requires orders.assignment_group")
+        if "group_option_id" not in problem.candidates.columns:
+            raise ValueError("Group cohesion requires candidates.group_option_id")
+        unit_for_order = (
+            problem.orders.set_index("order_id")["assignment_group"]
+            .astype(str)
+            .to_dict()
+        )
     else:
         unit_for_order = {
             str(order_id): str(order_id)
             for order_id in problem.orders["order_id"].astype(str)
         }
+
     members_by_unit: defaultdict[str, set[str]] = defaultdict(set)
     unit_signatures: defaultdict[str, set[tuple[Any, ...]]] = defaultdict(set)
     for order_id in problem.orders["order_id"].astype(str):
@@ -524,61 +645,119 @@ def _select_neighborhood(
         unit_signatures[unit].update(signatures.get(order_id, set()))
 
     inverted: defaultdict[tuple[Any, ...], set[str]] = defaultdict(set)
-    for order_id, keys in unit_signatures.items():
+    for unit, keys in unit_signatures.items():
         for key in keys:
-            inverted[key].add(order_id)
+            inverted[key].add(unit)
     adjacency: defaultdict[str, set[str]] = defaultdict(set)
-    for order_ids in inverted.values():
-        for order_id in order_ids:
-            adjacency[order_id].update(order_ids - {order_id})
+    for units in inverted.values():
+        for unit in units:
+            adjacency[unit].update(units - {unit})
 
-    unfilled = (
-        incumbent.fulfillment.assign(
-            weighted_unfilled=lambda frame: frame["unfulfilled_cases"].astype(float)
-        )
-        .groupby("order_id")["weighted_unfilled"]
-        .sum()
-        .to_dict()
-    )
-    eligible_candidates = problem.candidates.loc[
+    eligible = problem.candidates.loc[
         problem.candidates["eligible"].astype(bool)
     ].copy()
     if bool(problem.metadata.get("enforce_assignment_group", False)):
-        eligible_candidates["decision_unit"] = eligible_candidates["order_id"].map(
+        eligible["decision_unit"] = eligible["order_id"].astype(str).map(
             unit_for_order
         )
         candidate_count = (
-            eligible_candidates.groupby("decision_unit")["group_option_id"]
-            .nunique()
-            .to_dict()
+            eligible.groupby("decision_unit")["group_option_id"].nunique().to_dict()
         )
     else:
         candidate_count = (
-            eligible_candidates.groupby("order_id")["candidate_id"]
+            eligible.groupby(eligible["order_id"].astype(str))["candidate_id"]
             .nunique()
             .to_dict()
         )
-    unit_unfilled = {
-        unit: sum(float(unfilled.get(order_id, 0.0)) for order_id in members)
+
+    line_count = problem.order_lines.groupby(
+        problem.order_lines["order_id"].astype(str)
+    ).size().to_dict()
+    candidates_per_order = eligible.groupby(
+        eligible["order_id"].astype(str)
+    )["candidate_id"].nunique().to_dict()
+    fulfillment_variable_estimate = {
+        unit: sum(
+            int(line_count.get(order_id, 0))
+            * int(candidates_per_order.get(order_id, 0))
+            for order_id in members
+        )
         for unit, members in members_by_unit.items()
     }
+
+    return _NeighborhoodIndex(
+        members_by_unit={
+            unit: frozenset(members) for unit, members in members_by_unit.items()
+        },
+        adjacency={
+            unit: frozenset(adjacency.get(unit, set())) for unit in members_by_unit
+        },
+        candidate_count={str(unit): int(count) for unit, count in candidate_count.items()},
+        fulfillment_variable_estimate={
+            str(unit): int(count)
+            for unit, count in fulfillment_variable_estimate.items()
+        },
+    )
+
+
+def _unit_priority(
+    problem: ProblemData,
+    incumbent: Solution,
+    index: _NeighborhoodIndex,
+) -> tuple[list[str], dict[str, float]]:
+    """Rank atomic groups by approximate recoverable business loss and conflict."""
+
+    fulfillment = incumbent.fulfillment.merge(
+        problem.order_lines[
+            ["order_id", "sku_id", "unit_value", "penalty_per_unfilled_case"]
+        ],
+        on=["order_id", "sku_id"],
+        how="left",
+        validate="one_to_one",
+    )
+    fulfillment["weighted_unfilled"] = fulfillment["unfulfilled_cases"].astype(
+        float
+    ) * (
+        fulfillment["unit_value"].astype(float)
+        + fulfillment["penalty_per_unfilled_case"].astype(float)
+    )
+    by_order = fulfillment.groupby("order_id")["weighted_unfilled"].sum().to_dict()
+    loss_by_unit = {
+        unit: sum(float(by_order.get(order_id, 0.0)) for order_id in members)
+        for unit, members in index.members_by_unit.items()
+    }
+    ranked = sorted(
+        index.members_by_unit,
+        key=lambda unit: (
+            -loss_by_unit.get(unit, 0.0),
+            -len(index.adjacency.get(unit, frozenset())),
+            -len(index.members_by_unit[unit]),
+            unit,
+        ),
+    )
+    return ranked, loss_by_unit
+
+
+def _select_neighborhood(
+    problem: ProblemData,
+    incumbent: Solution,
+    config: HybridConfig,
+    iteration: int,
+    *,
+    index: _NeighborhoodIndex | None = None,
+) -> set[str]:
+    neighborhood_index = index or _build_neighborhood_index(problem)
+    members_by_unit = neighborhood_index.members_by_unit
+    adjacency = neighborhood_index.adjacency
+    ranked, unit_unfilled = _unit_priority(problem, incumbent, neighborhood_index)
     unit_variables = {
         unit: min(
-            int(candidate_count.get(unit, 0)),
+            int(neighborhood_index.candidate_count.get(unit, 0)),
             config.max_candidates_per_order,
         )
         + 1
         for unit in members_by_unit
     }
-    ranked = sorted(
-        members_by_unit,
-        key=lambda unit: (
-            -unit_unfilled.get(unit, 0.0),
-            -len(adjacency.get(unit, set())),
-            -len(members_by_unit[unit]),
-            unit,
-        ),
-    )
     if config.batch_strategy == "random":
         generator = np.random.default_rng(config.seed + iteration)
         ranked = [ranked[index] for index in generator.permutation(len(ranked))]
@@ -638,12 +817,87 @@ def _select_neighborhood(
     return set().union(*(members_by_unit[unit] for unit in selected_units))
 
 
+def _select_exact_lns_neighborhood(
+    problem: ProblemData,
+    incumbent: Solution,
+    config: ExactLNSConfig,
+    iteration: int,
+    target_groups: int,
+    index: _NeighborhoodIndex,
+) -> tuple[set[str], tuple[str, ...], str]:
+    """Select a bounded whole-group neighborhood for one exact local solve."""
+
+    ranked, unit_loss = _unit_priority(problem, incumbent, index)
+    diversify = (iteration + 1) % config.diversification_interval == 0
+    strategy = "random" if diversify else "conflict"
+    if diversify:
+        generator = np.random.default_rng(config.seed + iteration)
+        ranked = [ranked[i] for i in generator.permutation(len(ranked))]
+
+    seed_unit = ranked[iteration % len(ranked)]
+    queue: deque[str] = deque([seed_unit] if not diversify else ranked)
+    selected: list[str] = []
+    visited: set[str] = set()
+    active_order_count = 0
+    fulfillment_variables = 0
+
+    while queue and len(selected) < target_groups:
+        unit = queue.popleft()
+        if unit in visited:
+            continue
+        visited.add(unit)
+        member_count = len(index.members_by_unit[unit])
+        unit_variables = index.fulfillment_variable_estimate.get(unit, 0)
+        if (
+            active_order_count + member_count > config.maximum_neighborhood_orders
+            or fulfillment_variables + unit_variables
+            > config.maximum_local_fulfillment_variables
+        ):
+            continue
+        selected.append(unit)
+        active_order_count += member_count
+        fulfillment_variables += unit_variables
+        if not diversify:
+            neighbors = sorted(
+                index.adjacency.get(unit, frozenset()),
+                key=lambda neighbor: (
+                    -unit_loss.get(neighbor, 0.0),
+                    -len(index.adjacency.get(neighbor, frozenset())),
+                    neighbor,
+                ),
+            )
+            queue.extend(neighbors)
+
+    for unit in ranked:
+        if len(selected) >= target_groups:
+            break
+        if unit in selected:
+            continue
+        member_count = len(index.members_by_unit[unit])
+        unit_variables = index.fulfillment_variable_estimate.get(unit, 0)
+        if (
+            active_order_count + member_count > config.maximum_neighborhood_orders
+            or fulfillment_variables + unit_variables
+            > config.maximum_local_fulfillment_variables
+        ):
+            continue
+        selected.append(unit)
+        active_order_count += member_count
+        fulfillment_variables += unit_variables
+
+    if not selected:
+        raise ValueError("No complete assignment group fits the exact-LNS limits")
+    active_orders = set().union(*(index.members_by_unit[unit] for unit in selected))
+    return active_orders, tuple(selected), strategy
+
+
 def _merge_local_solution(
     incumbent: Solution,
     local: Solution,
     active_orders: set[str],
     *,
     runtime_seconds: float,
+    method: str = "hybrid",
 ) -> Solution:
     outside_assignments = incumbent.assignments.loc[
         ~incumbent.assignments["order_id"].astype(str).isin(active_orders)
@@ -651,17 +905,27 @@ def _merge_local_solution(
     outside_fulfillment = incumbent.fulfillment.loc[
         ~incumbent.fulfillment["order_id"].astype(str).isin(active_orders)
     ]
-    assignments = pd.concat(
-        [outside_assignments, local.assignments],
-        ignore_index=True,
+    assignments = (
+        local.assignments.copy()
+        if outside_assignments.empty
+        else pd.DataFrame.from_records(
+            outside_assignments.to_dict("records")
+            + local.assignments.to_dict("records"),
+            columns=incumbent.assignments.columns,
+        )
     ).sort_values("order_id", kind="mergesort")
-    fulfillment = pd.concat(
-        [outside_fulfillment, local.fulfillment],
-        ignore_index=True,
+    fulfillment = (
+        local.fulfillment.copy()
+        if outside_fulfillment.empty
+        else pd.DataFrame.from_records(
+            outside_fulfillment.to_dict("records")
+            + local.fulfillment.to_dict("records"),
+            columns=incumbent.fulfillment.columns,
+        )
     ).sort_values(["order_id", "sku_id"], kind="mergesort")
-    assignments["method"] = "hybrid"
+    assignments["method"] = method
     return Solution(
-        method="hybrid",
+        method=method,
         assignments=assignments.reset_index(drop=True),
         fulfillment=fulfillment.reset_index(drop=True),
         runtime_seconds=runtime_seconds,
@@ -689,6 +953,282 @@ def _sample_to_fixed_assignments(
     return fixed
 
 
+def _solution_fixed_assignments(solution: Solution) -> dict[str, str | None]:
+    """Extract a complete assignment policy for exact quantity recourse."""
+
+    return {
+        str(row.order_id): (
+            None if bool(row.is_unassigned) else str(row.candidate_id)
+        )
+        for row in solution.assignments.itertuples(index=False)
+    }
+
+
+def solve_exact_lns(
+    problem: ProblemData,
+    *,
+    config: ExactLNSConfig | None = None,
+) -> Solution:
+    """Run adaptive conflict-aware exact-MILP large-neighborhood search.
+
+    Unlike the sampler-assisted path, each neighborhood solves assignment and
+    fulfillment decisions jointly.  Frozen global consumption is residualized,
+    and no move is accepted without an independent full-problem validation.
+    """
+
+    settings = config or ExactLNSConfig()
+    settings.validate()
+    start = perf_counter()
+    raw_incumbent = (
+        solve_default_baseline(problem)
+        if settings.initial_method == "default"
+        else solve_greedy_baseline(problem)
+    )
+    baseline_initialization_seconds = perf_counter() - start
+    raw_initial_value = evaluate_solution(problem, raw_incumbent).objective_value
+    if not validate_solution(problem, raw_incumbent).is_feasible:
+        raise ValueError("The initial classical solution is infeasible")
+
+    incumbent = raw_incumbent
+    incumbent_value = raw_initial_value
+    polish_start = perf_counter()
+    polish_succeeded = False
+    if settings.polish_initial_incumbent:
+        try:
+            polished = solve_classical(
+                problem,
+                time_limit_seconds=settings.local_time_limit_seconds,
+                mip_relative_gap=settings.mip_relative_gap,
+                seed=settings.seed,
+                fixed_assignments=_solution_fixed_assignments(raw_incumbent),
+            )
+            polished_value = evaluate_solution(problem, polished).objective_value
+            if (
+                validate_solution(problem, polished).is_feasible
+                and polished_value >= incumbent_value - 1e-9
+            ):
+                incumbent = polished
+                incumbent_value = polished_value
+                polish_succeeded = True
+        except ClassicalSolverError:
+            pass
+    initial_polish_seconds = perf_counter() - polish_start
+    polished_initial_value = incumbent_value
+
+    index_start = perf_counter()
+    neighborhood_index = _build_neighborhood_index(problem)
+    neighborhood_index_seconds = perf_counter() - index_start
+    total_units = len(neighborhood_index.members_by_unit)
+    target_groups = min(settings.initial_neighborhood_groups, total_units)
+    minimum_groups = min(settings.minimum_neighborhood_groups, total_units)
+    maximum_groups = min(settings.maximum_neighborhood_groups, total_units)
+
+    accepted_moves = 0
+    assignment_moves = 0
+    local_solves = 0
+    local_solve_seconds = 0.0
+    residualization_seconds = 0.0
+    global_validation_seconds = 0.0
+    maximum_local_variables = 0
+    maximum_local_constraints = 0
+    maximum_local_mip_nodes = 0
+    maximum_active_orders = 0
+    maximum_active_groups = 0
+    history: list[dict[str, Any]] = []
+
+    for iteration in range(settings.iterations):
+        active_orders, active_units, strategy = _select_exact_lns_neighborhood(
+            problem,
+            incumbent,
+            settings,
+            iteration,
+            target_groups,
+            neighborhood_index,
+        )
+        maximum_active_orders = max(maximum_active_orders, len(active_orders))
+        maximum_active_groups = max(maximum_active_groups, len(active_units))
+
+        residual_start = perf_counter()
+        local_problem = residualize_problem(problem, incumbent, active_orders)
+        local_incumbent = _solution_for_orders(
+            incumbent, active_orders, "exact_lns_incumbent"
+        )
+        local_incumbent_value = evaluate_solution(
+            local_problem, local_incumbent
+        ).objective_value
+        residualization_seconds += perf_counter() - residual_start
+
+        solve_start = perf_counter()
+        local_solution: Solution | None = None
+        solve_error: str | None = None
+        try:
+            local_solution = solve_classical(
+                local_problem,
+                time_limit_seconds=settings.local_time_limit_seconds,
+                mip_relative_gap=settings.mip_relative_gap,
+                seed=settings.seed + iteration,
+            )
+            local_solves += 1
+        except ClassicalSolverError as error:
+            solve_error = str(error)
+        solve_seconds = perf_counter() - solve_start
+        local_solve_seconds += solve_seconds
+
+        improved = False
+        assignment_changed = False
+        local_delta = 0.0
+        global_delta = 0.0
+        gap: float | None = None
+        local_variables = 0
+        local_constraints = 0
+        local_best_bound: float | None = None
+        local_mip_nodes = 0
+        if local_solution is not None:
+            gap_value = local_solution.metadata.get("optimality_gap")
+            gap = None if gap_value is None else float(gap_value)
+            local_variables = int(local_solution.metadata.get("n_variables", 0))
+            local_constraints = int(local_solution.metadata.get("n_constraints", 0))
+            bound_value = local_solution.metadata.get("best_bound")
+            local_best_bound = (
+                None if bound_value is None else float(bound_value)
+            )
+            node_value = local_solution.metadata.get("mip_node_count")
+            local_mip_nodes = 0 if node_value is None else int(node_value)
+            maximum_local_variables = max(maximum_local_variables, local_variables)
+            maximum_local_constraints = max(
+                maximum_local_constraints, local_constraints
+            )
+            maximum_local_mip_nodes = max(
+                maximum_local_mip_nodes, local_mip_nodes
+            )
+            local_value = evaluate_solution(
+                local_problem, local_solution
+            ).objective_value
+            local_delta = local_value - local_incumbent_value
+            tolerance = 1e-9 * max(1.0, abs(local_incumbent_value))
+
+            # Global concatenation and validation are relatively expensive on the
+            # full POC.  The local objective is exactly additive after residualizing
+            # frozen consumption, so a non-improving local solution cannot improve
+            # the global incumbent and is rejected before that work.
+            if local_delta > tolerance:
+                incumbent_policy = _solution_fixed_assignments(local_incumbent)
+                proposal_policy = _solution_fixed_assignments(local_solution)
+                assignment_changed = proposal_policy != incumbent_policy
+                validation_start = perf_counter()
+                merged = _merge_local_solution(
+                    incumbent,
+                    local_solution,
+                    active_orders,
+                    runtime_seconds=perf_counter() - start,
+                    method="exact_lns",
+                )
+                validation = validate_solution(problem, merged)
+                merged_value = evaluate_solution(problem, merged).objective_value
+                global_validation_seconds += perf_counter() - validation_start
+                global_delta = merged_value - incumbent_value
+                if validation.is_feasible and global_delta > tolerance:
+                    incumbent = merged
+                    incumbent_value = merged_value
+                    accepted_moves += 1
+                    assignment_moves += int(assignment_changed)
+                    improved = True
+
+        expensive = (
+            local_solution is None
+            or solve_seconds >= 0.9 * settings.local_time_limit_seconds
+            or (
+                gap is not None
+                and gap > max(0.05, 2.0 * settings.mip_relative_gap)
+            )
+        )
+        if settings.adaptive:
+            if expensive and target_groups > minimum_groups:
+                target_groups -= 1
+            elif (
+                solve_seconds <= 0.5 * settings.local_time_limit_seconds
+                and len(active_units) >= target_groups
+                and target_groups < maximum_groups
+            ):
+                target_groups += 1
+
+        history.append(
+            {
+                "iteration": iteration,
+                "strategy": strategy,
+                "active_groups": len(active_units),
+                "active_orders": len(active_orders),
+                "local_variables": local_variables,
+                "local_constraints": local_constraints,
+                "local_runtime_seconds": solve_seconds,
+                "local_optimality_gap": gap,
+                "local_best_bound": local_best_bound,
+                "local_mip_node_count": local_mip_nodes,
+                "local_objective_delta": local_delta,
+                "global_objective_delta": global_delta,
+                "assignment_changed": assignment_changed,
+                "accepted": improved,
+                "next_target_groups": target_groups,
+                "error": solve_error,
+            }
+        )
+
+    runtime = perf_counter() - start
+    assignments = incumbent.assignments.copy()
+    assignments["method"] = "exact_lns"
+    initialization_seconds = (
+        baseline_initialization_seconds
+        + initial_polish_seconds
+        + neighborhood_index_seconds
+    )
+    return Solution(
+        method="exact_lns",
+        assignments=assignments,
+        fulfillment=incumbent.fulfillment.copy(),
+        runtime_seconds=runtime,
+        raw_objective=incumbent_value,
+        metadata={
+            "algorithm": "adaptive-exact-milp-large-neighborhood-search",
+            "execution_class": "classical-matheuristic",
+            "initial_method": settings.initial_method,
+            "raw_initial_objective": raw_initial_value,
+            "polished_initial_objective": polished_initial_value,
+            "initial_objective": polished_initial_value,
+            "search_improvement": incumbent_value - polished_initial_value,
+            "total_improvement": incumbent_value - raw_initial_value,
+            "initial_polish_improvement": polished_initial_value - raw_initial_value,
+            "initial_polish_succeeded": polish_succeeded,
+            "polish_initial_incumbent": settings.polish_initial_incumbent,
+            "iterations": settings.iterations,
+            "accepted_moves": accepted_moves,
+            "assignment_moves": assignment_moves,
+            "local_solves": local_solves,
+            "maximum_active_groups": maximum_active_groups,
+            "maximum_active_orders": maximum_active_orders,
+            "maximum_local_variables": maximum_local_variables,
+            "maximum_local_constraints": maximum_local_constraints,
+            "maximum_local_mip_nodes": maximum_local_mip_nodes,
+            "initialization_seconds": initialization_seconds,
+            "baseline_initialization_seconds": baseline_initialization_seconds,
+            "initial_polish_seconds": initial_polish_seconds,
+            "neighborhood_index_seconds": neighborhood_index_seconds,
+            "residualization_seconds": residualization_seconds,
+            "local_solve_seconds": local_solve_seconds,
+            "global_validation_seconds": global_validation_seconds,
+            "other_seconds": max(
+                0.0,
+                runtime
+                - initialization_seconds
+                - residualization_seconds
+                - local_solve_seconds
+                - global_validation_seconds,
+            ),
+            "history": history,
+            "claim": "No quantum advantage is inferred from this classical run.",
+        },
+    )
+
+
 def solve_hybrid(
     problem: ProblemData,
     *,
@@ -699,16 +1239,46 @@ def solve_hybrid(
     settings = config or HybridConfig()
     settings.validate()
     start = perf_counter()
-    incumbent = (
+    raw_incumbent = (
         solve_default_baseline(problem)
         if settings.initial_method == "default"
         else solve_greedy_baseline(problem)
     )
-    initialization_seconds = perf_counter() - start
-    initial_value = evaluate_solution(problem, incumbent).objective_value
-    incumbent_value = initial_value
-    if not validate_solution(problem, incumbent).is_feasible:
+    baseline_initialization_seconds = perf_counter() - start
+    raw_initial_value = evaluate_solution(problem, raw_incumbent).objective_value
+    if not validate_solution(problem, raw_incumbent).is_feasible:
         raise ValueError("The initial classical solution is infeasible")
+
+    # Greedy assignment and greedy quantity allocation are separate components.
+    # Polish the quantities once with assignments held fixed so subsequent gains
+    # measure sampler-driven assignment changes, not hidden classical recourse.
+    incumbent = raw_incumbent
+    incumbent_value = raw_initial_value
+    polish_start = perf_counter()
+    polish_succeeded = False
+    if settings.polish_initial_incumbent:
+        try:
+            polished = solve_classical(
+                problem,
+                time_limit_seconds=settings.recourse_time_limit_seconds,
+                seed=settings.seed,
+                fixed_assignments=_solution_fixed_assignments(raw_incumbent),
+            )
+            polished_value = evaluate_solution(problem, polished).objective_value
+            if (
+                validate_solution(problem, polished).is_feasible
+                and polished_value >= incumbent_value - 1e-9
+            ):
+                incumbent = polished
+                incumbent_value = polished_value
+                polish_succeeded = True
+        except ClassicalSolverError:
+            # The feasible raw incumbent remains a valid fallback.  The metadata
+            # makes a failed or disabled polish visible to experiment consumers.
+            pass
+    initial_polish_seconds = perf_counter() - polish_start
+    polished_initial_value = incumbent_value
+    initialization_seconds = baseline_initialization_seconds + initial_polish_seconds
 
     history: list[dict[str, Any]] = []
     accepted_moves = 0
@@ -722,6 +1292,7 @@ def solve_hybrid(
     recourse_seconds = 0.0
     hardware_runs: list[dict[str, object]] = []
 
+    neighborhood_index = _build_neighborhood_index(problem)
     for iteration in range(settings.iterations):
         build_start = perf_counter()
         active_orders = _select_neighborhood(
@@ -729,6 +1300,7 @@ def solve_hybrid(
             incumbent,
             settings,
             iteration,
+            index=neighborhood_index,
         )
         local_problem = residualize_problem(problem, incumbent, active_orders)
         local_incumbent = _solution_for_orders(incumbent, active_orders, "local_incumbent")
@@ -761,6 +1333,12 @@ def solve_hybrid(
             initial_sample=warm_start,
             allow_remote=settings.allow_remote,
             time_limit_seconds=settings.remote_time_limit_seconds,
+            qaoa_layers=settings.qaoa_layers,
+            qaoa_restarts=settings.qaoa_restarts,
+            qaoa_readout_bitflip_probability=(
+                settings.qaoa_readout_bitflip_probability
+            ),
+            max_feasible_states=settings.max_feasible_states,
         )
         sampling_seconds += perf_counter() - sampling_start
         sampler_info = samples.attrs.get("sampler_info")
@@ -847,6 +1425,14 @@ def solve_hybrid(
     runtime = perf_counter() - start
     assignments = incumbent.assignments.copy()
     assignments["method"] = "hybrid"
+    if settings.sampler in {"dwave-qpu", "dwave-hybrid", "ibm-qpu"}:
+        execution_class = "quantum-assisted-hardware"
+    elif settings.sampler == "qaoa_statevector":
+        execution_class = "quantum-algorithm-simulation"
+    elif settings.sampler == "simulated_annealing":
+        execution_class = "quantum-inspired-classical"
+    else:
+        execution_class = "classical-control"
     return Solution(
         method="hybrid",
         assignments=assignments,
@@ -854,17 +1440,31 @@ def solve_hybrid(
         runtime_seconds=runtime,
         raw_objective=incumbent_value,
         metadata={
-            "algorithm": "quantum-assisted-large-neighborhood-search",
+            "algorithm": "sampler-assisted-large-neighborhood-search",
+            "execution_class": execution_class,
             "sampler": settings.sampler,
             "initial_method": settings.initial_method,
-            "initial_objective": initial_value,
+            "raw_initial_objective": raw_initial_value,
+            "polished_initial_objective": polished_initial_value,
+            # Backward-compatible name now means the incumbent at sampler entry.
+            "initial_objective": polished_initial_value,
             "final_objective": incumbent_value,
-            "improvement": incumbent_value - initial_value,
+            # Sampler attribution excludes the exact fixed-assignment polish.
+            "improvement": incumbent_value - polished_initial_value,
+            "total_improvement": incumbent_value - raw_initial_value,
+            "initial_polish_improvement": polished_initial_value - raw_initial_value,
+            "initial_polish_succeeded": polish_succeeded,
+            "polish_initial_incumbent": settings.polish_initial_incumbent,
             "iterations": settings.iterations,
             "accepted_moves": accepted_moves,
             "sampler_calls": sampler_calls,
             "qpu_calls": (
-                sampler_calls if settings.sampler in {"dwave-qpu", "dwave-hybrid"} else 0
+                sampler_calls
+                if settings.sampler in {"dwave-qpu", "dwave-hybrid", "ibm-qpu"}
+                else 0
+            ),
+            "quantum_simulator_calls": (
+                sampler_calls if settings.sampler == "qaoa_statevector" else 0
             ),
             "qpu_access_time_microseconds": sum(
                 float(run.get("timing", {}).get("qpu_access_time", 0.0))
@@ -891,6 +1491,8 @@ def solve_hybrid(
             "maximum_qubo_variables": maximum_qubo_variables,
             "maximum_candidates_per_order": settings.max_candidates_per_order,
             "initialization_seconds": initialization_seconds,
+            "baseline_initialization_seconds": baseline_initialization_seconds,
+            "initial_polish_seconds": initial_polish_seconds,
             "qubo_build_seconds": qubo_build_seconds,
             "sampling_seconds": sampling_seconds,
             "recourse_seconds": recourse_seconds,
@@ -907,6 +1509,9 @@ def solve_hybrid(
             ),
             "remote_enabled": settings.allow_remote,
             "qubo_noise_relative_sigma": settings.qubo_noise_relative_sigma,
+            "qaoa_readout_bitflip_probability": (
+                settings.qaoa_readout_bitflip_probability
+            ),
             "batch_strategy": settings.batch_strategy,
             "history": history,
             "hardware_runs": hardware_runs,

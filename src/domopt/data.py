@@ -82,6 +82,10 @@ def _as_numeric(
         if values.isna().any():
             bad = frame.loc[values.isna(), column].head().tolist()
             raise DataValidationError(f"Invalid numeric values in {column!r}: {bad}")
+        finite = np.isfinite(values.to_numpy(dtype=float))
+        if not finite.all():
+            bad = frame.loc[~finite, column].head().tolist()
+            raise DataValidationError(f"Nonfinite numeric values in {column!r}: {bad}")
         if nonnegative and (values < 0).any():
             raise DataValidationError(f"Column {column!r} contains negative values")
         if integer:
@@ -228,6 +232,17 @@ def validate_problem_data(problem: ProblemData) -> None:
         raise DataValidationError(
             f"candidates references unknown orders: {unknown_candidates[:5]}"
         )
+    missing_line_orders = sorted(order_ids - set(lines["order_id"]))
+    if missing_line_orders:
+        raise DataValidationError(
+            f"Every order must have at least one line; missing for {missing_line_orders[:5]}"
+        )
+    if (lines["demand_cases"].astype(int) <= 0).any():
+        raise DataValidationError("order_lines.demand_cases must be positive")
+    if "cases_per_pallet" in lines and (
+        lines["cases_per_pallet"].astype(int) <= 0
+    ).any():
+        raise DataValidationError("order_lines.cases_per_pallet must be positive")
 
     eligible_candidates = candidates[candidates["eligible"]]
     missing_candidate_orders = sorted(order_ids - set(eligible_candidates["order_id"]))
@@ -238,6 +253,19 @@ def validate_problem_data(problem: ProblemData) -> None:
             "Every order must have at least one eligible assignment candidate; "
             "missing for "
             f"{missing_candidate_orders[:5]}"
+        )
+
+    eligible_default_counts = (
+        eligible_candidates.loc[eligible_candidates["is_default"]]
+        .groupby("order_id")
+        .size()
+        .reindex(sorted(order_ids), fill_value=0)
+    )
+    if not eligible_default_counts.eq(1).all():
+        bad = eligible_default_counts.loc[~eligible_default_counts.eq(1)].index.tolist()
+        raise DataValidationError(
+            "Every order must have exactly one eligible default candidate; "
+            f"invalid for {bad[:5]}"
         )
 
     default_map = orders.set_index("order_id")["default_dc"].to_dict()
@@ -262,6 +290,22 @@ def validate_problem_data(problem: ProblemData) -> None:
         if closed_selected:
             raise DataValidationError(
                 "Eligible candidates occur on closed dates: " f"{closed_selected[:5]}"
+            )
+
+    if "arrival_date" in eligible_candidates:
+        requested = eligible_candidates["order_id"].map(
+            orders.set_index("order_id")["requested_delivery_date"]
+        )
+        late_alternates = eligible_candidates.loc[
+            ~eligible_candidates["is_default"]
+            & eligible_candidates["arrival_date"].notna()
+            & eligible_candidates["arrival_date"].gt(requested),
+            "candidate_id",
+        ]
+        if not late_alternates.empty:
+            raise DataValidationError(
+                "Eligible alternate candidates arrive after requested delivery: "
+                f"{late_alternates.head().tolist()}"
             )
 
     inventory_policy = str(
@@ -326,6 +370,24 @@ def validate_problem_data(problem: ProblemData) -> None:
             raise DataValidationError(
                 "Group cohesion requires candidates.group_option_id"
             )
+        order_group = orders.set_index("order_id")["assignment_group"].astype(str)
+        option_sets = {
+            str(order_id): frozenset(group["group_option_id"].astype(str))
+            for order_id, group in eligible_candidates.groupby("order_id", sort=False)
+        }
+        for group_id, members in orders.groupby("assignment_group", sort=False):
+            member_ids = members["order_id"].astype(str).tolist()
+            reference = option_sets[member_ids[0]]
+            if any(option_sets[member] != reference for member in member_ids[1:]):
+                raise DataValidationError(
+                    "All orders in an assignment group must expose identical eligible "
+                    f"group options; mismatch in group {group_id!r}"
+                )
+            for member in member_ids:
+                if str(order_group.loc[member]) != str(group_id):
+                    raise DataValidationError(
+                        f"Inconsistent assignment-group mapping for order {member!r}"
+                    )
 
 
 def load_problem_data(data_dir: str | Path) -> ProblemData:

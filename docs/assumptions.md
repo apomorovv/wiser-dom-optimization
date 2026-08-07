@@ -67,11 +67,13 @@ $$
 utilization rather than a maximum, so it is not treated as a real constraint.
 Analyses may create explicitly labeled case/pallet headroom scenarios.
 
-### A11. Pareto pruning preserves default options
+### A11. Pareto pruning is an opt-in heuristic
 
-An alternate option is removed only when another group option has no worse estimated
-fill and fulfilled value, no higher shipping cost and lead time, and is strictly
-better in at least one dimension. The default option is always retained.
+The pruning ablation removes an alternate when another group option has no worse
+isolated estimated fill/value, no higher shipping cost/lead time, and is strictly
+better in at least one dimension. The default is retained. This is not a globally
+lossless dominance proof because options can consume different inventory and capacity
+buckets, so common-objective experiments leave it disabled by default.
 
 ### A12. Independent validation is authoritative
 
@@ -79,15 +81,35 @@ Solver-native objective and QUBO energy are diagnostics. A recommendation is
 reportable only after independent demand, assignment, group, eligibility, inventory,
 capacity, diversion, and objective recomputation.
 
-### A13. Hybrid search cannot degrade the incumbent
+### A13. Bounded local search cannot degrade the incumbent
 
-Exact local recourse and global validation precede acceptance. Only a strict feasible
-improvement replaces the incumbent.
+For both exact LNS and sampler-assisted hybrid search, residualized local optimization
+and independent global validation precede acceptance. Only a strict feasible
+improvement replaces the incumbent. Polished greedy likewise falls back to its feasible
+raw greedy solution if fixed-assignment recourse fails or degrades the objective.
 
 ### A14. Remote quantum execution is opt-in
 
 Local exact, random, and simulated-annealing samplers are the default. Remote QPU or
 managed-hybrid execution requires explicit approval and `allow_remote=true`.
+
+### A15. Required source fields fail closed
+
+The adapter validates the five runtime tables before transformation. Missing columns,
+blank required identifiers, invalid dates, malformed or nonfinite required numerics,
+invalid domains, and a failed inventory reconciliation stop the load with
+`PocDataError`. Required economics or resources are not silently replaced with zero.
+Only explicitly documented optional nulls may use a fallback.
+
+### A16. Candidate-DC scope is explicit
+
+The default technical candidate universe is `network_intersection`: DCs represented in
+the shipping, inventory, and dock source tables. `focus_default_dcs` is retained as a
+narrow comparison policy. Both scopes still require a lane, group-compatible option,
+SKU presence, an open PGI date, on-time arrival, and the diversion-improvement rule.
+This technical intersection does not prove that every connected DC is operationally
+authorized; the scope sensitivity experiment quantifies the decision pending owner
+sign-off.
 
 ## Remaining decisions for production deployment
 
@@ -118,6 +140,14 @@ The repository provides adapters but has not sent the restricted QUBO to hardwar
 Any claim needs organizer approval, matched timing, embedding statistics, repeated
 trials, and uncertainty intervals.
 
+### U6. Operational candidate-DC authorization
+
+Nestlé must confirm whether all DCs in the shipping/inventory/dock intersection are
+allowed alternatives for each customer/load, or whether an explicit allowlist,
+region/service rule, or the narrower focus-default set is required. Until then,
+`candidate_dc_scope` is reported with every scope-sensitive result and neither policy
+is presented as a production fact.
+
 ## Change checklist
 
 When resolving an assumption, update:
@@ -127,4 +157,3 @@ When resolving an assumption, update:
 3. loader, baseline, exact MILP, hybrid preview/recourse, and validator;
 4. at least one positive and one negative automated test; and
 5. every affected experiment and report.
-

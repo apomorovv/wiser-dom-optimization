@@ -74,7 +74,7 @@ def solve_classical(
     start = perf_counter()
     fixed = {str(key): value for key, value in (fixed_assignments or {}).items()}
 
-    candidates = (
+    all_candidates = (
         problem.candidates.loc[problem.candidates["eligible"].astype(bool)]
         .sort_values(["order_id", "pgi_date", "candidate_id"], kind="mergesort")
         .reset_index(drop=True)
@@ -92,6 +92,78 @@ def solve_classical(
         raise ClassicalSolverError(
             f"Fixed assignments reference unknown orders: {unknown_fixed}"
         )
+
+    # Validate fixed candidate IDs before structural presolve removes unused rows.
+    # The previous recourse path constructed variables for every eligible candidate
+    # and then fixed one binary per order.  On the POC data that made a quantity-only
+    # recourse solve almost as large as the unrestricted assignment MILP.  Filtering
+    # fully fixed decisions here is mathematically equivalent and reduces variables,
+    # constraints, and Python model-construction work before HiGHS is called.
+    full_candidate_lookup = all_candidates.set_index("candidate_id", drop=False)
+    for order_id, candidate_id in fixed.items():
+        if candidate_id is None:
+            continue
+        candidate_key = str(candidate_id)
+        if candidate_key not in full_candidate_lookup.index:
+            raise ClassicalSolverError(
+                f"Fixed candidate {candidate_key!r} is not eligible in this problem"
+            )
+        candidate = full_candidate_lookup.loc[candidate_key]
+        if isinstance(candidate, pd.DataFrame):
+            candidate = candidate.iloc[0]
+        if str(candidate["order_id"]) != order_id:
+            raise ClassicalSolverError(
+                f"Fixed candidate {candidate_key!r} does not belong to order {order_id!r}"
+            )
+
+    structurally_fixed = set(fixed)
+    if bool(problem.metadata.get("enforce_assignment_group", False)):
+        if "assignment_group" not in orders.columns:
+            raise ClassicalSolverError(
+                "Group cohesion requires orders.assignment_group"
+            )
+        # A partially fixed assignment group must retain every option because the
+        # unfixed members still need the original cohesion equations.  A fully fixed
+        # group can be reduced only after checking that all members select the same
+        # group option (or are all unassigned).
+        structurally_fixed = set()
+        candidate_options = full_candidate_lookup.get("group_option_id")
+        if candidate_options is None:
+            raise ClassicalSolverError(
+                "Group cohesion requires candidates.group_option_id"
+            )
+        for group_id, group in orders.groupby("assignment_group", sort=False):
+            members = set(group["order_id"].astype(str))
+            fixed_members = members & set(fixed)
+            if fixed_members != members:
+                continue
+            choices = {fixed[order_id] for order_id in members}
+            if choices == {None}:
+                structurally_fixed.update(members)
+                continue
+            if None in choices:
+                raise ClassicalSolverError(
+                    f"Fixed assignments split assignment group {group_id!r}"
+                )
+            option_ids = {
+                str(candidate_options.loc[str(candidate_id)])
+                for candidate_id in choices
+            }
+            if len(option_ids) != 1:
+                raise ClassicalSolverError(
+                    f"Fixed assignments split assignment group {group_id!r}"
+                )
+            structurally_fixed.update(members)
+
+    keep_candidate_ids = {
+        str(candidate_id)
+        for order_id, candidate_id in fixed.items()
+        if order_id in structurally_fixed and candidate_id is not None
+    }
+    candidates = all_candidates.loc[
+        ~all_candidates["order_id"].astype(str).isin(structurally_fixed)
+        | all_candidates["candidate_id"].astype(str).isin(keep_candidate_ids)
+    ].reset_index(drop=True)
 
     candidates_by_order: dict[str, list[pd.Series]] = {
         str(order_id): [row for _, row in group.iterrows()]
@@ -198,17 +270,38 @@ def solve_classical(
     for index in z_index.values():
         upper_bounds[index] = 1.0
 
+    inventory_last_checkpoint = {
+        (str(dc_id), str(sku_id)): pd.Timestamp(group["date"].max())
+        for (dc_id, sku_id), group in problem.inventory.groupby(
+            ["dc_id", "sku_id"], sort=False
+        )
+    }
     for line_id, line in lines.iterrows():
         demand = int(line["demand_cases"])
         for candidate in candidates_by_order.get(str(line["order_id"]), []):
             candidate_id = str(candidate["candidate_id"])
             key = (int(line_id), candidate_id)
             objective[f_index[key]] = -float(line["unit_value"])
-            upper_bounds[f_index[key]] = demand
+            last_checkpoint = inventory_last_checkpoint.get(
+                (str(candidate["dc_id"]), str(line["sku_id"]))
+            )
+            has_covering_checkpoint = (
+                last_checkpoint is not None
+                and pd.Timestamp(candidate["pgi_date"]) <= last_checkpoint
+            )
+            # Without a checkpoint at or after shipment, the cumulative-ATP
+            # constraints contain no row that can cover this fulfillment. Such
+            # a line has zero modeled availability (matching the validator and
+            # greedy inventory state), rather than unbounded free inventory.
+            upper_bounds[f_index[key]] = demand if has_covering_checkpoint else 0
             if split_picks:
                 per_pallet = int(line["cases_per_pallet"])
-                upper_bounds[p_index[key]] = demand // per_pallet
-                upper_bounds[k_index[key]] = per_pallet - 1
+                upper_bounds[p_index[key]] = (
+                    demand // per_pallet if has_covering_checkpoint else 0
+                )
+                upper_bounds[k_index[key]] = (
+                    per_pallet - 1 if has_covering_checkpoint else 0
+                )
         if not thresholded_penalties:
             objective[u_index[int(line_id)]] = float(
                 line["penalty_per_unfilled_case"]
@@ -473,13 +566,13 @@ def solve_classical(
                 )
                 constraints.add(
                     {value: 1.0, floor_value: -1.0, cap_binary: -big_m},
-                    -big_m,
+                    -np.inf,
                     0.0,
                 )
                 constraints.add(
                     {value: 1.0, floor_value: -1.0, cap_binary: big_m},
                     0.0,
-                    big_m,
+                    np.inf,
                 )
                 constraints.add(
                     {value: 1.0, active: -maximum, cap_binary: big_m},
@@ -511,11 +604,12 @@ def solve_classical(
                 ):
                     index = f_index[(line_id, str(candidate["candidate_id"]))]
                     coefficients[index] = coefficients.get(index, 0.0) + 1.0
-        constraints.add(
-            coefficients,
-            -np.inf,
-            float(inventory.cumulative_available_cases),
-        )
+        if coefficients:
+            constraints.add(
+                coefficients,
+                -np.inf,
+                float(inventory.cumulative_available_cases),
+            )
 
     # Optional exact-date resources.
     if not problem.capacities.empty:
@@ -581,7 +675,8 @@ def solve_classical(
                     "Add its exact linear consumption rule before enabling it."
                 )
 
-            constraints.add(coefficients, -np.inf, float(capacity.capacity))
+            if coefficients:
+                constraints.add(coefficients, -np.inf, float(capacity.capacity))
 
     # Nestle's minimum alternate-fill improvement rule.
     for _, candidate in candidates.iterrows():
@@ -725,6 +820,9 @@ def solve_classical(
             "n_pick_variables": len(p_index) + len(k_index),
             "n_constraints": constraints.row_count,
             "fixed_assignment_count": len(fixed),
+            "eligible_candidates_before_fixed_presolve": len(all_candidates),
+            "eligible_candidates_after_fixed_presolve": len(candidates),
+            "fixed_candidate_columns_removed": len(all_candidates) - len(candidates),
             "seed": recorded_seed,
         },
     )

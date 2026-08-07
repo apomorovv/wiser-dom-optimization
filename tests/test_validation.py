@@ -1,6 +1,13 @@
-import pandas as pd
+from dataclasses import replace
 
-from domopt.data import make_tiny_problem_data
+import pandas as pd
+import pytest
+
+from domopt.data import (
+    DataValidationError,
+    make_tiny_problem_data,
+    normalize_problem_data,
+)
 from domopt.schemas import Solution
 from domopt.validation import validate_solution
 
@@ -37,5 +44,17 @@ def test_validator_detects_demand_and_inventory_violation() -> None:
     assert not validation.is_feasible
     assert validation.demand_violations
     assert validation.inventory_violations
+
+
+def test_canonical_gate_rejects_nonfinite_numbers_and_orders_without_lines() -> None:
+    problem = make_tiny_problem_data()
+    candidates = problem.candidates.copy()
+    candidates.loc[0, "shipping_cost"] = float("inf")
+    with pytest.raises(DataValidationError, match="Nonfinite"):
+        normalize_problem_data(replace(problem, candidates=candidates))
+
+    lines = problem.order_lines.loc[problem.order_lines["order_id"] != "O2"]
+    with pytest.raises(DataValidationError, match="at least one line"):
+        normalize_problem_data(replace(problem, order_lines=lines))
 
 

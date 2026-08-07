@@ -13,3 +13,6 @@ def test_planner_view_explains_tiny_diversion() -> None:
     assert len(table) == 2
     assert len(diverted) == 1
     assert diverted.iloc[0]["fill_uplift_cases"] > 0
+    assert diverted.iloc[0]["screened_alternative_dc"] is not None
+    assert "modeled resource" in diverted.iloc[0]["binding_constraint_note"].lower()
+    assert "reoptimize" in diverted.iloc[0]["alternative_review_note"].lower()

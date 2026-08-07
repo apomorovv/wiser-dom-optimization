@@ -8,13 +8,18 @@ import subprocess
 from collections.abc import Iterable
 from dataclasses import asdict
 from datetime import datetime, timezone
+from functools import cache
 from pathlib import Path
 
 import pandas as pd
 
-from .baselines import solve_default_baseline, solve_greedy_baseline
+from .baselines import (
+    solve_default_baseline,
+    solve_greedy_baseline,
+    solve_polished_greedy,
+)
 from .classical import solve_classical
-from .hybrid import HybridConfig, solve_hybrid
+from .hybrid import ExactLNSConfig, HybridConfig, solve_exact_lns, solve_hybrid
 from .metrics import compute_metrics
 from .schemas import ASSUMPTION_VERSION, SCHEMA_VERSION, ProblemData, Solution
 from .validation import validate_solution
@@ -57,6 +62,12 @@ def problem_fingerprint(problem: ProblemData) -> str:
     ]:
         digest.update(name.encode())
         canonical = _csv_ready(frame).sort_index(axis=1)
+        if not canonical.empty:
+            canonical = canonical.sort_values(
+                list(canonical.columns),
+                kind="mergesort",
+                na_position="first",
+            ).reset_index(drop=True)
         digest.update(canonical.to_csv(index=False).encode())
     digest.update(json.dumps(problem.metadata, sort_keys=True, default=str).encode())
     return digest.hexdigest()
@@ -73,6 +84,60 @@ def current_git_commit() -> str | None:
         return result.stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return None
+
+
+@cache
+def current_source_state() -> dict[str, object]:
+    """Return commit, dirty flag, and a content hash for reproducible checkpoints."""
+
+    commit = current_git_commit()
+    try:
+        root_result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        root = Path(root_result.stdout.strip())
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=normal"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        diff = subprocess.run(
+            ["git", "diff", "--binary", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        ).stdout.split(b"\0")
+        digest = hashlib.sha256()
+        digest.update((commit or "no-commit").encode())
+        digest.update(diff)
+        for raw_name in sorted(name for name in untracked if name):
+            relative = raw_name.decode("utf-8", errors="surrogateescape")
+            path = root / relative
+            if not path.is_file():
+                continue
+            digest.update(raw_name)
+            digest.update(path.read_bytes())
+        return {
+            "git_commit": commit,
+            "git_dirty": bool(status.strip()),
+            "source_state_sha256": digest.hexdigest(),
+        }
+    except (OSError, subprocess.CalledProcessError):
+        return {
+            "git_commit": commit,
+            "git_dirty": None,
+            "source_state_sha256": None,
+        }
 
 
 def write_solution_artifacts(
@@ -99,7 +164,7 @@ def write_solution_artifacts(
             "assumption_version": problem.metadata.get(
                 "assumption_version", ASSUMPTION_VERSION
             ),
-            "git_commit": current_git_commit(),
+            **current_source_state(),
         }
     )
 
@@ -179,22 +244,44 @@ def run_methods(
     time_limit_seconds: float = 60.0,
     registry_path: str | Path | None = None,
     hybrid_config: HybridConfig | None = None,
+    exact_lns_config: ExactLNSConfig | None = None,
 ) -> pd.DataFrame:
     """Run requested methods and return a comparable metrics table."""
 
     requested = [str(method).strip().lower() for method in methods]
-    unknown = sorted(set(requested) - {"default", "greedy", "classical", "hybrid"})
+    supported = {
+        "default",
+        "greedy",
+        "polished_greedy",
+        "exact_lns",
+        "classical",
+        "hybrid",
+    }
+    unknown = sorted(set(requested) - supported)
     if unknown:
         raise ValueError(f"Unsupported methods in common pipeline: {unknown}")
 
     base = Path(output_dir)
     rows: list[dict[str, object]] = []
     for method in requested:
-        settings: HybridConfig | None = None
+        hybrid_settings: HybridConfig | None = None
+        lns_settings: ExactLNSConfig | None = None
         if method == "default":
             solution = solve_default_baseline(problem)
         elif method == "greedy":
             solution = solve_greedy_baseline(problem)
+        elif method == "polished_greedy":
+            solution = solve_polished_greedy(
+                problem,
+                time_limit_seconds=time_limit_seconds,
+                seed=seed,
+            )
+        elif method == "exact_lns":
+            lns_settings = exact_lns_config or ExactLNSConfig(
+                local_time_limit_seconds=min(10.0, time_limit_seconds),
+                seed=seed,
+            )
+            solution = solve_exact_lns(problem, config=lns_settings)
         elif method == "classical":
             solution = solve_classical(
                 problem,
@@ -202,11 +289,11 @@ def run_methods(
                 seed=seed,
             )
         else:
-            settings = hybrid_config or HybridConfig(
+            hybrid_settings = hybrid_config or HybridConfig(
                 seed=seed,
                 recourse_time_limit_seconds=min(10.0, time_limit_seconds),
             )
-            solution = solve_hybrid(problem, config=settings)
+            solution = solve_hybrid(problem, config=hybrid_settings)
 
         run_path = base / method
         metrics = write_solution_artifacts(
@@ -217,7 +304,10 @@ def run_methods(
             seed=seed,
             configuration={
                 "time_limit_seconds": time_limit_seconds,
-                "hybrid": None if settings is None else asdict(settings),
+                "hybrid": (
+                    None if hybrid_settings is None else asdict(hybrid_settings)
+                ),
+                "exact_lns": None if lns_settings is None else asdict(lns_settings),
             },
         )
         rows.append(metrics)
