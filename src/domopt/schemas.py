@@ -66,6 +66,7 @@ class ValidationResult:
     eligibility_violations: list[str] = field(default_factory=list)
     capacity_violations: list[str] = field(default_factory=list)
     schema_violations: list[str] = field(default_factory=list)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     @property
     def violations(self) -> list[str]:
@@ -87,6 +88,7 @@ class ValidationResult:
             "eligibility_violations": list(self.eligibility_violations),
             "capacity_violations": list(self.capacity_violations),
             "schema_violations": list(self.schema_violations),
+            "diagnostics": dict(self.diagnostics),
             "violations": list(self.violations),
         }
 

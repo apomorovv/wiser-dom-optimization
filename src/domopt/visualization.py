@@ -127,6 +127,15 @@ def _solver_frontier(frame: pd.DataFrame, output: Path) -> Path:
 
 def _size_scaling(frame: pd.DataFrame, output: Path) -> Path:
     data = _feasible(frame).copy()
+    is_synthetic = (
+        "experiment" in data
+        and set(data["experiment"].dropna().astype(str)) == {"synthetic_scaling"}
+    )
+    quality_column = (
+        "case_fill_rate"
+        if is_synthetic and "case_fill_rate" in data
+        else "objective_capture_rate"
+    )
     x_column = (
         "actual_assignment_groups"
         if "actual_assignment_groups" in data
@@ -134,7 +143,7 @@ def _size_scaling(frame: pd.DataFrame, output: Path) -> Path:
     )
     measures = [
         "runtime_seconds",
-        "objective_capture_rate",
+        quality_column,
         "candidate_count",
         "maximum_qubo_variables",
         "maximum_local_variables",
@@ -153,15 +162,15 @@ def _size_scaling(frame: pd.DataFrame, output: Path) -> Path:
             group[x_column], group["runtime_seconds"], label=method, **style
         )
         axes[1].plot(
-            group[x_column], 100 * group["objective_capture_rate"], label=method, **style
+            group[x_column], 100 * group[quality_column], label=method, **style
         )
         if raw.groupby(x_column).size().max() > 1:
             runtime_quantiles = raw.groupby(x_column)["runtime_seconds"].quantile(
                 [0.25, 0.75]
             ).unstack()
-            quality_quantiles = raw.groupby(x_column)[
-                "objective_capture_rate"
-            ].quantile([0.25, 0.75]).unstack()
+            quality_quantiles = raw.groupby(x_column)[quality_column].quantile(
+                [0.25, 0.75]
+            ).unstack()
             x_values = group[x_column].to_numpy(dtype=float)
             axes[0].fill_between(
                 x_values,
@@ -198,7 +207,7 @@ def _size_scaling(frame: pd.DataFrame, output: Path) -> Path:
             exact_lns[x_column],
             exact_lns["maximum_local_variables"],
             marker="X",
-            label="Maximum exact-LNS variables",
+            label="Maximum exact-LNS local-neighborhood variables",
         )
     axes[0].set(
         title="Runtime scaling (median and IQR)",
@@ -207,9 +216,17 @@ def _size_scaling(frame: pd.DataFrame, output: Path) -> Path:
     )
     axes[0].set_yscale("log")
     axes[1].set(
-        title="Normalized quality (median and IQR)",
+        title=(
+            "Case-fill quality (median and IQR)"
+            if quality_column == "case_fill_rate"
+            else "Normalized quality (median and IQR)"
+        ),
         xlabel="Assignment groups",
-        ylabel="Objective capture (%)",
+        ylabel=(
+            "Case fill rate (%)"
+            if quality_column == "case_fill_rate"
+            else "Objective capture (%)"
+        ),
     )
     axes[2].set(title="Model-size growth", xlabel="Assignment groups", ylabel="Count")
     for axis in axes:
@@ -677,7 +694,7 @@ def plot_ibm_hardware_study(
         "hardware_mitigation_strategy",
         "qaoa_layers",
         "raw_one_hot_rate",
-        "hardware_optimal_hit_rate",
+        "hardware_qubo_optimal_hit_rate",
         "hardware_two_qubit_gates",
         "runtime_seconds",
         "search_improvement",
@@ -685,6 +702,9 @@ def plot_ibm_hardware_study(
     if missing := required - set(results.columns):
         raise ValueError(f"IBM hardware results are missing {sorted(missing)}")
     summary = rank_ibm_hardware_strategies(results)
+    summary = summary.loc[summary["successful_runs"] > 0].copy()
+    if summary.empty:
+        raise ValueError("IBM hardware study has no successful QPU rows to plot")
     display_names = {
         "baseline": "baseline",
         "dynamical_decoupling": "DD",
@@ -716,17 +736,20 @@ def plot_ibm_hardware_study(
     axes[0, 0].set(title="Raw one-hot feasibility", ylabel="Percent of shots")
     axes[0, 1].bar(
         summary["variant"],
-        100 * summary["hardware_optimal_hit_rate"],
-        yerr=100 * asymmetric_error("hardware_optimal_hit_rate"),
+        100 * summary["hardware_qubo_optimal_hit_rate"],
+        yerr=100 * asymmetric_error("hardware_qubo_optimal_hit_rate"),
         color=colors,
         capsize=4,
     )
-    axes[0, 1].set(title="Exact-optimum raw hit rate", ylabel="Percent of shots")
+    axes[0, 1].set(
+        title="Exact feasible-QUBO raw hit rate",
+        ylabel="Percent of shots",
+    )
     axes[0, 2].bar(
         summary["variant"], summary["search_improvement"], color=colors
     )
     axes[0, 2].set(
-        title="Validated sampler-driven assignment gain",
+        title="Validated post-recourse assignment gain",
         ylabel="Synthetic objective units",
     )
     axes[1, 0].bar(

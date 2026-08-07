@@ -72,6 +72,7 @@ class HybridConfig:
     ibm_mitigation_strategy: str = "baseline"
     ibm_transpiler_optimization_level: int = 3
     ibm_transpiler_trials: int = 4
+    ibm_transpiler_seed: int | None = None
 
     def validate(self) -> None:
         if self.iterations <= 0:
@@ -116,6 +117,8 @@ class HybridConfig:
             raise ValueError("ibm_transpiler_optimization_level must be 0, 1, 2, or 3")
         if self.ibm_transpiler_trials <= 0:
             raise ValueError("ibm_transpiler_trials must be positive")
+        if self.ibm_transpiler_seed is not None and self.ibm_transpiler_seed < 0:
+            raise ValueError("ibm_transpiler_seed must be nonnegative")
 
 
 @dataclass(frozen=True)
@@ -1302,6 +1305,7 @@ def solve_hybrid(
     maximum_qubo_variables = 0
     qubo_build_seconds = 0.0
     sampling_seconds = 0.0
+    sample_decode_repair_seconds = 0.0
     recourse_seconds = 0.0
     hardware_runs: list[dict[str, object]] = []
 
@@ -1358,6 +1362,7 @@ def solve_hybrid(
                 settings.ibm_transpiler_optimization_level
             ),
             ibm_transpiler_trials=settings.ibm_transpiler_trials,
+            ibm_transpiler_seed=settings.ibm_transpiler_seed,
         )
         sampling_seconds += perf_counter() - sampling_start
         sampler_info = samples.attrs.get("sampler_info")
@@ -1366,6 +1371,7 @@ def solve_hybrid(
         sampler_calls += 1
         total_raw_samples += len(samples)
 
+        sample_processing_start = perf_counter()
         candidates: list[tuple[float, tuple[str, ...], dict[str, int]]] = []
         seen_assignments: set[tuple[str, ...]] = set()
         for _, sample in samples.iterrows():
@@ -1389,6 +1395,7 @@ def solve_hybrid(
             candidates.append((qubo_energy(model, vector), selected, repaired))
 
         candidates.sort(key=lambda item: (item[0], item[1]))
+        sample_decode_repair_seconds += perf_counter() - sample_processing_start
         best_iteration = incumbent
         best_iteration_value = incumbent_value
         attempted = 0
@@ -1459,6 +1466,13 @@ def solve_hybrid(
             if isinstance(run.get(key), (int, float, np.integer, np.floating))
         ]
 
+    def hardware_text_values(key: str) -> list[str]:
+        return [
+            str(run[key])
+            for run in hardware_runs
+            if run.get(key) not in {None, ""}
+        ]
+
     backend_names = sorted(
         {
             str(run["backend_name"])
@@ -1474,7 +1488,11 @@ def solve_hybrid(
         }
     )
     hardware_present = bool(hardware_runs)
-    quantum_seconds = sum(hardware_values("hardware_quantum_seconds"))
+    def hardware_sum(key: str) -> float | None:
+        values = hardware_values(key)
+        return float(sum(values)) if values else None
+
+    quantum_seconds = hardware_sum("hardware_quantum_seconds")
     return Solution(
         method="hybrid",
         assignments=assignments,
@@ -1507,9 +1525,42 @@ def solve_hybrid(
                 sampler_calls if settings.sampler == "qaoa_statevector" else 0
             ),
             "qpu_access_time_microseconds": (
-                quantum_seconds * 1_000_000.0 if hardware_present else None
+                quantum_seconds * 1_000_000.0
+                if quantum_seconds is not None
+                else None
             ),
             "hardware_backend": ",".join(backend_names) if backend_names else None,
+            "hardware_job_ids": (
+                ",".join(hardware_text_values("job_id"))
+                if hardware_present
+                else None
+            ),
+            "hardware_created_at": (
+                min(hardware_text_values("hardware_created_at"), default=None)
+            ),
+            "hardware_finished_at": (
+                max(hardware_text_values("hardware_finished_at"), default=None)
+            ),
+            "hardware_physical_qubit_mappings": (
+                ";".join(sorted(set(hardware_text_values("physical_qubit_mapping"))))
+                if hardware_present
+                else None
+            ),
+            "hardware_calibration_last_update_at": (
+                max(hardware_text_values("calibration_last_update_at"), default=None)
+            ),
+            "hardware_qiskit_versions": (
+                ",".join(sorted(set(hardware_text_values("qiskit_version"))))
+                if hardware_present
+                else None
+            ),
+            "hardware_qiskit_ibm_runtime_versions": (
+                ",".join(
+                    sorted(set(hardware_text_values("qiskit_ibm_runtime_version")))
+                )
+                if hardware_present
+                else None
+            ),
             "hardware_backend_pending_jobs": (
                 min(hardware_values("backend_pending_jobs_at_selection"), default=None)
             ),
@@ -1517,26 +1568,56 @@ def solve_hybrid(
                 ",".join(mitigation_names) if mitigation_names else None
             ),
             "hardware_wall_seconds": (
-                sum(hardware_values("hardware_wall_seconds"))
-                if hardware_present
-                else None
+                hardware_sum("hardware_wall_seconds")
             ),
             "hardware_queue_seconds": (
-                sum(hardware_values("hardware_queue_seconds"))
-                if hardware_present
-                else None
+                hardware_sum("hardware_queue_seconds")
             ),
-            "hardware_execution_seconds": sum(
-                hardware_values("hardware_execution_seconds")
-            )
-            if hardware_present
-            else None,
+            "hardware_execution_seconds": hardware_sum(
+                "hardware_execution_seconds"
+            ),
             "hardware_turnaround_seconds": (
-                sum(hardware_values("hardware_turnaround_seconds"))
+                hardware_sum("hardware_turnaround_seconds")
+            ),
+            "hardware_quantum_seconds": quantum_seconds,
+            "hardware_angle_optimization_seconds": hardware_sum(
+                "angle_optimization_seconds"
+            ),
+            "hardware_circuit_construction_seconds": hardware_sum(
+                "circuit_construction_seconds"
+            ),
+            "hardware_backend_selection_seconds": hardware_sum(
+                "backend_selection_seconds"
+            ),
+            "hardware_transpilation_seconds": hardware_sum(
+                "transpilation_seconds"
+            ),
+            "hardware_primitive_submit_seconds": hardware_sum(
+                "primitive_submit_seconds"
+            ),
+            "hardware_primitive_wait_seconds": hardware_sum(
+                "primitive_wait_seconds"
+            ),
+            "hardware_decode_seconds": hardware_sum("decode_seconds"),
+            "hardware_angle_seeds": (
+                ",".join(sorted(set(hardware_text_values("angle_seed"))))
                 if hardware_present
                 else None
             ),
-            "hardware_quantum_seconds": quantum_seconds if hardware_present else None,
+            "hardware_transpiler_base_seeds": (
+                ",".join(
+                    sorted(set(hardware_text_values("transpiler_base_seed")))
+                )
+                if hardware_present
+                else None
+            ),
+            "hardware_selected_transpiler_seeds": (
+                ",".join(
+                    sorted(set(hardware_text_values("selected_transpiler_seed")))
+                )
+                if hardware_present
+                else None
+            ),
             "hardware_returned_samples": (
                 sum(hardware_values("returned_samples")) if hardware_present else None
             ),
@@ -1560,18 +1641,22 @@ def solve_hybrid(
             "hardware_two_qubit_depth": max(
                 hardware_values("transpiled_two_qubit_depth"), default=None
             ),
-            "hardware_optimal_hit_rate": (
-                float(np.mean(hardware_values("hardware_optimal_hit_rate")))
-                if hardware_values("hardware_optimal_hit_rate")
+            "hardware_qubo_optimal_hit_rate": (
+                float(np.mean(hardware_values("hardware_qubo_optimal_hit_rate")))
+                if hardware_values("hardware_qubo_optimal_hit_rate")
                 else None
             ),
-            "hardware_optimal_hit_rate_given_feasible": (
+            "hardware_qubo_optimal_hit_rate_given_feasible": (
                 float(
                     np.mean(
-                        hardware_values("hardware_optimal_hit_rate_given_feasible")
+                        hardware_values(
+                            "hardware_qubo_optimal_hit_rate_given_feasible"
+                        )
                     )
                 )
-                if hardware_values("hardware_optimal_hit_rate_given_feasible")
+                if hardware_values(
+                    "hardware_qubo_optimal_hit_rate_given_feasible"
+                )
                 else None
             ),
             "hardware_best_feasible_normalized_gap": min(
@@ -1586,6 +1671,7 @@ def solve_hybrid(
             "initial_polish_seconds": initial_polish_seconds,
             "qubo_build_seconds": qubo_build_seconds,
             "sampling_seconds": sampling_seconds,
+            "sample_decode_repair_seconds": sample_decode_repair_seconds,
             "recourse_seconds": recourse_seconds,
             "other_seconds": max(
                 0.0,
@@ -1593,6 +1679,7 @@ def solve_hybrid(
                 - initialization_seconds
                 - qubo_build_seconds
                 - sampling_seconds
+                - sample_decode_repair_seconds
                 - recourse_seconds,
             ),
             "raw_one_hot_rate": (

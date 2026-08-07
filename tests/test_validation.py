@@ -34,6 +34,11 @@ def test_tiny_optimal_solution_is_feasible() -> None:
     validation = validate_solution(make_tiny_problem_data(), _solution())
     assert validation.is_feasible
     assert validation.violations == []
+    assert validation.diagnostics["validation_tolerance"] == pytest.approx(1e-8)
+    assert validation.diagnostics["maximum_demand_balance_abs_error"] == 0.0
+    assert validation.diagnostics["maximum_inventory_excess_cases"] == 0.0
+    assert validation.diagnostics["enabled_capacity_resources"] == "none"
+    assert validation.diagnostics["capacity_constraints_enabled"] is False
 
 
 def test_validator_detects_demand_and_inventory_violation() -> None:
@@ -44,6 +49,8 @@ def test_validator_detects_demand_and_inventory_violation() -> None:
     assert not validation.is_feasible
     assert validation.demand_violations
     assert validation.inventory_violations
+    assert validation.diagnostics["maximum_demand_balance_abs_error"] == 1.0
+    assert validation.diagnostics["maximum_inventory_excess_cases"] == 1.0
 
 
 def test_canonical_gate_rejects_nonfinite_numbers_and_orders_without_lines() -> None:
@@ -56,5 +63,3 @@ def test_canonical_gate_rejects_nonfinite_numbers_and_orders_without_lines() -> 
     lines = problem.order_lines.loc[problem.order_lines["order_id"] != "O2"]
     with pytest.raises(DataValidationError, match="at least one line"):
         normalize_problem_data(replace(problem, order_lines=lines))
-
-

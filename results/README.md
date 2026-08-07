@@ -2,9 +2,8 @@
 
 This directory is reserved for aggregate tables, figures, and planner-facing summaries.
 Raw per-order solver artifacts still belong in ignored `runs/` directories.
-The existing `scaling_synthetic.*` pair is a historical development snapshot from the
-pre-LNS experiment schema; it is not current challenge evidence and must be regenerated
-before inclusion in a report.
+Historical pre-LNS snapshots have been removed; only newly generated, manifest-verified
+evidence should be considered for publication.
 
 ## Suggested structure
 
@@ -17,9 +16,12 @@ results/
         aggregate_results.manifest.json
         figures/
     notebook/
-      <profile>/<problem-hash>/<run-hash>/
+      <profile>/
         aggregate_results.csv
         aggregate_results.manifest.json
+        tables/
+        figures/
+      ibm-quick/
         tables/
         figures/
   planner/
@@ -39,7 +41,9 @@ Every final result must identify:
 - git commit;
 - assumption version;
 - method configuration;
-- source run directories.
+- source-state hash and dirty/clean provenance;
+- runtime-environment versions; and
+- stable profile directory.
 
 ## Required comparison columns
 
@@ -77,6 +81,5 @@ A planner-facing recommendation should state:
 
 Use synthetic or approved anonymized examples only.
 
-`scripts/run_scaling_study.py` creates a repeated `scaling_synthetic.csv` from
-independently generated data. Do not mix those objectives with real challenge evidence.
-
+`scripts/run_scaling_study.py` can create a repeated synthetic scaling table in a chosen
+output directory. Do not mix those objectives with real challenge evidence.

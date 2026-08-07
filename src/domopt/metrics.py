@@ -93,6 +93,7 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
         "reassigned_assignment_groups": reassigned_groups,
         "unassigned_orders": unassigned,
         "runtime_seconds": float(solution.runtime_seconds),
+        **validation.diagnostics,
         "best_bound": solution.metadata.get("best_bound"),
         "optimality_gap": solution.metadata.get("optimality_gap"),
         "initial_objective": solution.metadata.get("initial_objective"),
@@ -133,6 +134,21 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
             "qpu_access_time_microseconds"
         ),
         "hardware_backend": solution.metadata.get("hardware_backend"),
+        "hardware_job_ids": solution.metadata.get("hardware_job_ids"),
+        "hardware_created_at": solution.metadata.get("hardware_created_at"),
+        "hardware_finished_at": solution.metadata.get("hardware_finished_at"),
+        "hardware_physical_qubit_mappings": solution.metadata.get(
+            "hardware_physical_qubit_mappings"
+        ),
+        "hardware_calibration_last_update_at": solution.metadata.get(
+            "hardware_calibration_last_update_at"
+        ),
+        "hardware_qiskit_versions": solution.metadata.get(
+            "hardware_qiskit_versions"
+        ),
+        "hardware_qiskit_ibm_runtime_versions": solution.metadata.get(
+            "hardware_qiskit_ibm_runtime_versions"
+        ),
         "hardware_backend_pending_jobs": solution.metadata.get(
             "hardware_backend_pending_jobs"
         ),
@@ -149,6 +165,34 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
         ),
         "hardware_quantum_seconds": solution.metadata.get(
             "hardware_quantum_seconds"
+        ),
+        "hardware_angle_optimization_seconds": solution.metadata.get(
+            "hardware_angle_optimization_seconds"
+        ),
+        "hardware_circuit_construction_seconds": solution.metadata.get(
+            "hardware_circuit_construction_seconds"
+        ),
+        "hardware_backend_selection_seconds": solution.metadata.get(
+            "hardware_backend_selection_seconds"
+        ),
+        "hardware_transpilation_seconds": solution.metadata.get(
+            "hardware_transpilation_seconds"
+        ),
+        "hardware_primitive_submit_seconds": solution.metadata.get(
+            "hardware_primitive_submit_seconds"
+        ),
+        "hardware_primitive_wait_seconds": solution.metadata.get(
+            "hardware_primitive_wait_seconds"
+        ),
+        "hardware_decode_seconds": solution.metadata.get(
+            "hardware_decode_seconds"
+        ),
+        "hardware_angle_seeds": solution.metadata.get("hardware_angle_seeds"),
+        "hardware_transpiler_base_seeds": solution.metadata.get(
+            "hardware_transpiler_base_seeds"
+        ),
+        "hardware_selected_transpiler_seeds": solution.metadata.get(
+            "hardware_selected_transpiler_seeds"
         ),
         "hardware_returned_samples": solution.metadata.get(
             "hardware_returned_samples"
@@ -171,11 +215,11 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
         "hardware_two_qubit_depth": solution.metadata.get(
             "hardware_two_qubit_depth"
         ),
-        "hardware_optimal_hit_rate": solution.metadata.get(
-            "hardware_optimal_hit_rate"
+        "hardware_qubo_optimal_hit_rate": solution.metadata.get(
+            "hardware_qubo_optimal_hit_rate"
         ),
-        "hardware_optimal_hit_rate_given_feasible": solution.metadata.get(
-            "hardware_optimal_hit_rate_given_feasible"
+        "hardware_qubo_optimal_hit_rate_given_feasible": solution.metadata.get(
+            "hardware_qubo_optimal_hit_rate_given_feasible"
         ),
         "hardware_best_feasible_normalized_gap": solution.metadata.get(
             "hardware_best_feasible_normalized_gap"
@@ -209,6 +253,9 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
         "initial_polish_seconds": solution.metadata.get("initial_polish_seconds"),
         "qubo_build_seconds": solution.metadata.get("qubo_build_seconds"),
         "sampling_seconds": solution.metadata.get("sampling_seconds"),
+        "sample_decode_repair_seconds": solution.metadata.get(
+            "sample_decode_repair_seconds"
+        ),
         "recourse_seconds": solution.metadata.get("recourse_seconds"),
         "local_solve_seconds": solution.metadata.get("local_solve_seconds"),
         "residualization_seconds": solution.metadata.get(

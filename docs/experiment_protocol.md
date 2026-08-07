@@ -10,7 +10,8 @@ An experiment is identified by:
 
 $$
 E=(\text{profile},\text{bundle/problem hash},\text{schema},\text{assumptions},
-\text{objective},\text{method config},\text{seed},\text{source state}).
+\text{objective},\text{method config},\text{seed},\text{source state},
+\text{runtime environment}).
 $$
 
 Changing any element creates a different experiment. Methods compared within one row
@@ -18,6 +19,12 @@ group receive identical canonical data, candidates, objective calculation, and
 validator. Source state contains the Git commit, a dirty-worktree flag, and a content
 hash over tracked changes and untracked files; a commit hash alone is insufficient for
 an uncommitted run.
+
+Runtime environment is a version-only, privacy-safe record for Python, `wiser-dom`,
+NumPy, pandas, SciPy, PyYAML, and the optional Qiskit/Qiskit IBM Runtime packages.
+It is embedded in successful and failed aggregate rows, row-level `metrics.json`, and
+checkpoint identity. A package-version change therefore invalidates checkpoint reuse
+even when the data, configuration, and source tree are unchanged.
 
 ## 2. Methods
 
@@ -31,8 +38,9 @@ an uncommitted run.
 | `hybrid` | Bounded QUBO assignment search plus exact MILP recourse. |
 
 Simulated annealing is quantum-inspired, and local statevector QAOA is a quantum
-algorithm simulation rather than quantum hardware. The optional IBM backend
-are excluded until restricted-data approval is obtained.
+algorithm simulation rather than quantum hardware. The optional IBM backend receives
+only the independently generated synthetic control and remains disabled until remote
+execution is explicitly approved.
 
 ## 3. Common metrics
 
@@ -49,7 +57,11 @@ local solves, accepted assignment moves, maximum active groups/orders, local mod
 size, and phase timing. Hybrid rows likewise separate raw baseline objective, exact
 fixed-assignment polish, sampler-only improvement, and total improvement, and record
 accepted moves, recourse calls, maximum local QUBO width, raw one-hot rate, and phase
-timing.
+timing, including sampler execution, sample decode/repair/ranking, and exact recourse.
+
+Every row also reports the validator tolerance and maximum observed demand-balance,
+integrality, inventory-excess, and capacity-excess residuals. Structural failures remain
+categorized violations; a Boolean `feasible` value alone is not the validity evidence.
 
 $$
 J=\text{fulfilled value}-\text{thresholded penalty}-\text{shipping cost},
@@ -200,8 +212,9 @@ Default and greedy methods are deterministic. Ties are resolved by incremental
 objective, fill increase, lower shipping cost, default before alternate, then
 candidate identifier. Every stochastic sampler records its seed. The bundle hash,
 problem hash, profile, configuration, schema/assumption/objective versions, method,
-seed, commit, dirty flag, and source-state hash are included in aggregate rows and
-checkpoint identity.
+seed, commit, dirty flag, source-state hash, and runtime environment are included in
+aggregate rows and checkpoint identity. Optional Qiskit versions are `null` on
+environments where those extras are not installed.
 
 Before experiments, the known two-order test must reproduce the exact objective 126:
 
@@ -225,11 +238,12 @@ python scripts/run_challenge_study.py \
   --profile full
 ```
 
-Or run `notebooks/nestle_challenge_experiments.ipynb` with
-`NESTLE_BUNDLE_DIR=data/raw/nestle_challenge`. Each study uses a content-addressed run
-directory below
-`results/challenge-study/notebook/<profile>/<problem-hash>/<run-hash>/`. The CSV is
-paired with a manifest containing its exact identity, row count, and ordered columns.
+Or open `notebooks/nestle_challenge_experiments.ipynb`, edit the global configuration
+cell immediately below the automatic dependency bootstrap, and use **Run All**. The
+kernel adds the local package and installs missing notebook dependencies; no terminal
+commands or terminal-set environment variables are required. Each study uses the stable
+directory `results/challenge-study/notebook/<profile>/`. Every CSV is paired with a
+manifest containing its exact identity, row count, ordered columns, and content hash.
 A checkpoint is loaded only when the manifest, identity, required columns, row count,
 and table schema all match; otherwise the study is rerun rather than silently mixing
 profiles or code states. Plots live in the same run-scoped directory.
@@ -237,9 +251,12 @@ profiles or code states. Plots live in the same run-scoped directory.
 The command-line suite writes separately below
 `results/challenge-study/cli/<profile>/`. The optional GPU cell benchmarks synthetic
 batched QUBO scoring only. Optional IBM hardware validation sends generated synthetic
-circuits and records backend, queue, transpilation, mitigation, raw feasibility,
-exact-reference quality, and usage metadata. Neither optional test is part of the
-default profile.
+circuits and records backend, job IDs/timestamps, compilation, queue, execution,
+quantum-use and decode timings, mitigation, raw feasibility, exact feasible-QUBO hit
+quality, and post-recourse validity. The quick profile runs the complete two-depth by
+three-mitigation matrix once (six QPU jobs); presentation repeats it three times
+(eighteen jobs). Successful variants resume from the verified checkpoint and failed
+variants are retained and retried. Neither optional test is part of the default profile.
 
 ## 8. Interpretation rules
 

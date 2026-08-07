@@ -1,4 +1,4 @@
-"""Content-addressed aggregate experiment checkpoints."""
+"""Manifest-verified aggregate experiment checkpoints with stable paths."""
 
 from __future__ import annotations
 
@@ -10,6 +10,12 @@ from typing import Any
 import pandas as pd
 
 from .pipeline import current_source_state, problem_fingerprint
+from .provenance import (
+    CHECKPOINT_SCHEMA_VERSION,
+    EXPERIMENT_SCHEMA_VERSION,
+    runtime_environment,
+    runtime_environment_json,
+)
 from .schemas import ASSUMPTION_VERSION, SCHEMA_VERSION, ProblemData
 
 
@@ -45,8 +51,8 @@ def checkpoint_identity(
     """Return the complete identity promised by the experiment protocol."""
 
     return {
-        "checkpoint_schema_version": 1,
-        "experiment_schema_version": 3,
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "experiment_schema_version": EXPERIMENT_SCHEMA_VERSION,
         "experiment": str(experiment),
         "profile": str(profile),
         "bundle_sha256": problem.metadata.get("bundle_sha256"),
@@ -57,6 +63,7 @@ def checkpoint_identity(
         ),
         "objective_version": "fulfilled-value-minus-thresholded-penalty-minus-shipping-v2",
         "configuration": configuration,
+        "runtime_environment": runtime_environment(),
         **current_source_state(),
     }
 
@@ -70,12 +77,18 @@ def checkpoint_run_directory(
     output_root: str | Path,
     identity: dict[str, Any],
 ) -> Path:
-    """Scope artifacts by profile, problem, and exact source/config identity."""
+    """Return one stable, human-readable directory per execution profile.
 
-    profile = str(identity["profile"])
-    problem = str(identity["problem_sha256"])[:12]
-    run = checkpoint_key(identity)[:12]
-    return Path(output_root) / profile / problem / run
+    Configuration, problem, and source hashes remain in each table's manifest,
+    where they protect checkpoint reuse without burying outputs below opaque
+    directory names.  A stale manifest causes that table to be recomputed and
+    replaced in place.
+    """
+
+    profile = str(identity["profile"]).strip()
+    if not profile or Path(profile).name != profile or profile in {".", ".."}:
+        raise ValueError("checkpoint profile must be one safe directory name")
+    return Path(output_root) / profile
 
 
 def write_checkpoint(
@@ -83,21 +96,27 @@ def write_checkpoint(
     csv_path: str | Path,
     identity: dict[str, Any],
 ) -> tuple[Path, Path]:
+    """Atomically replace a checkpoint CSV and its integrity manifest."""
+
     path = Path(csv_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path = path.with_suffix(".manifest.json")
-    frame.to_csv(path, index=False)
+    csv_temporary = path.with_name(f".{path.name}.tmp")
+    manifest_temporary = manifest_path.with_name(f".{manifest_path.name}.tmp")
+    frame.to_csv(csv_temporary, index=False)
     manifest = {
         "identity": identity,
         "identity_sha256": checkpoint_key(identity),
-        "csv_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "csv_sha256": hashlib.sha256(csv_temporary.read_bytes()).hexdigest(),
         "rows": len(frame),
         "columns": list(frame.columns),
     }
-    manifest_path.write_text(
+    manifest_temporary.write_text(
         json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n",
         encoding="utf-8",
     )
+    csv_temporary.replace(path)
+    manifest_temporary.replace(manifest_path)
     return path, manifest_path
 
 
@@ -139,6 +158,7 @@ def load_checkpoint(
         "experiment_schema_version",
         "problem_sha256",
         "source_state_sha256",
+        "runtime_environment",
     }
     missing = required - set(frame.columns)
     if missing:
@@ -147,4 +167,16 @@ def load_checkpoint(
         )
     if set(frame["experiment"].dropna().astype(str)) != {str(identity["experiment"])}:
         raise StaleCheckpointError("checkpoint contains rows for another experiment")
+    expected_schema = str(identity.get("experiment_schema_version"))
+    if set(frame["experiment_schema_version"].dropna().astype(str)) != {
+        expected_schema
+    }:
+        raise StaleCheckpointError("checkpoint experiment schema does not match this run")
+    expected_environment = identity.get("runtime_environment")
+    if not isinstance(expected_environment, dict):
+        raise StaleCheckpointError("checkpoint identity has no runtime environment")
+    if set(frame["runtime_environment"].dropna().astype(str)) != {
+        runtime_environment_json(expected_environment)
+    }:
+        raise StaleCheckpointError("checkpoint runtime environment does not match this run")
     return frame

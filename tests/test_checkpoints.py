@@ -11,6 +11,11 @@ from domopt.checkpoints import (
     write_checkpoint,
 )
 from domopt.data import make_tiny_problem_data
+from domopt.provenance import (
+    CHECKPOINT_SCHEMA_VERSION,
+    EXPERIMENT_SCHEMA_VERSION,
+    runtime_environment_json,
+)
 
 
 def _frame(identity: dict[str, object]) -> pd.DataFrame:
@@ -21,15 +26,18 @@ def _frame(identity: dict[str, object]) -> pd.DataFrame:
                 "level": "tiny",
                 "method": "greedy",
                 "feasible": True,
-                "experiment_schema_version": "3",
+                "experiment_schema_version": str(EXPERIMENT_SCHEMA_VERSION),
                 "problem_sha256": identity["problem_sha256"],
                 "source_state_sha256": identity["source_state_sha256"],
+                "runtime_environment": runtime_environment_json(
+                    identity["runtime_environment"]
+                ),
             }
         ]
     )
 
 
-def test_checkpoint_round_trip_is_content_addressed(tmp_path: Path) -> None:
+def test_checkpoint_round_trip_uses_stable_profile_directory(tmp_path: Path) -> None:
     problem = make_tiny_problem_data()
     identity = checkpoint_identity(
         problem,
@@ -44,7 +52,10 @@ def test_checkpoint_round_trip_is_content_addressed(tmp_path: Path) -> None:
     loaded = load_checkpoint(path, identity)
 
     assert loaded["feasible"].all()
-    assert "smoke" in run_dir.parts
+    assert run_dir == tmp_path / "smoke"
+    assert identity["checkpoint_schema_version"] == CHECKPOINT_SCHEMA_VERSION
+    assert identity["experiment_schema_version"] == EXPERIMENT_SCHEMA_VERSION
+    assert identity["runtime_environment"]["wiser_dom_version"] == "0.4.0"
 
 
 def test_checkpoint_rejects_changed_profile_or_configuration(tmp_path: Path) -> None:
@@ -98,4 +109,23 @@ def test_checkpoint_rejects_value_tampering_with_same_schema(tmp_path: Path) -> 
     tampered.to_csv(path, index=False)
 
     with pytest.raises(StaleCheckpointError, match="content hash"):
+        load_checkpoint(path, identity)
+
+
+def test_checkpoint_rejects_runtime_environment_row_drift(tmp_path: Path) -> None:
+    problem = make_tiny_problem_data()
+    identity = checkpoint_identity(
+        problem,
+        profile="smoke",
+        experiment="solver_comparison",
+        configuration={"sizes": [4, 8]},
+    )
+    path = checkpoint_run_directory(tmp_path, identity) / "tables" / "solver.csv"
+    frame = _frame(identity)
+    frame.loc[:, "runtime_environment"] = runtime_environment_json(
+        {**identity["runtime_environment"], "numpy_version": "different"}
+    )
+    write_checkpoint(frame, path, identity)
+
+    with pytest.raises(StaleCheckpointError, match="runtime environment"):
         load_checkpoint(path, identity)

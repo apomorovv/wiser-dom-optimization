@@ -20,3 +20,16 @@ jobs:
       - run: python -m pip install -e ".[dev]"
       - run: ruff check src scripts tests
       - run: pytest
+
+  ibm-adapter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev,ibm]"
+      - name: Test IBM adapter without credentials or remote jobs
+        run: pytest tests/test_quantum.py tests/test_hardware.py

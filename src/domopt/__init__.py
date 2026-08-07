@@ -1,5 +1,7 @@
 """WISER–Nestlé Distributed Order Management optimization package."""
 
+__version__ = "0.4.0"
+
 from .hybrid import ExactLNSConfig, HybridConfig, solve_exact_lns, solve_hybrid
 from .planner import build_planner_table, write_planner_artifacts
 from .schemas import (
@@ -10,6 +12,7 @@ from .schemas import (
     Solution,
     ValidationResult,
 )
+from .solver import SolverConfig, SolverMode, solve_dom
 
 __all__ = [
     "ASSUMPTION_VERSION",
@@ -19,11 +22,12 @@ __all__ = [
     "ObjectiveBreakdown",
     "ProblemData",
     "Solution",
+    "SolverConfig",
+    "SolverMode",
     "ValidationResult",
     "build_planner_table",
+    "solve_dom",
     "solve_exact_lns",
     "solve_hybrid",
     "write_planner_artifacts",
 ]
-
-__version__ = "0.3.0"

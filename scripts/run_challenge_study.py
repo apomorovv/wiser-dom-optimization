@@ -18,7 +18,6 @@ from domopt.experiments import (
     run_challenge_experiments,
     write_experiment_results,
 )
-from domopt.pipeline import current_source_state
 from domopt.poc import (
     POC_REFERENCE_FILENAMES,
     PocConfig,
@@ -52,31 +51,12 @@ def main() -> int:
         choices=EXPERIMENT_NAMES,
         help="Run only the named studies; the default runs the complete profile.",
     )
-    parser.add_argument(
-        "--allow-dirty",
-        action="store_true",
-        help=(
-            "Allow a full evidence run from uncommitted source. The resulting "
-            "manifest will still record the dirty source hash."
-        ),
-    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
     default_root = challenge_results_root(project_root, producer="cli") / args.profile
     output_path = args.output or default_root / "aggregate_results.csv"
     figures_dir = args.figures_dir or output_path.parent / "figures"
-    source_state = current_source_state()
-    if (
-        args.profile == "full"
-        and source_state.get("git_dirty") is True
-        and not args.allow_dirty
-    ):
-        raise RuntimeError(
-            "Refusing a full evidence run from a dirty Git worktree. Commit the "
-            "source first, or pass --allow-dirty for an explicitly provisional run."
-        )
-
     audit = audit_poc_bundle(args.bundle_dir)
     print(audit[["role", "filename", "readable"]].to_string(index=False))
     problem = load_poc_problem(

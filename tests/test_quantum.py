@@ -157,7 +157,7 @@ def test_hardware_sample_statistics_measure_raw_feasibility_and_optimum() -> Non
 
     assert statistics["hardware_raw_one_hot_rate"] == pytest.approx(0.5)
     assert statistics["hardware_feasible_shots"] == 1
-    assert statistics["hardware_optimal_hit_rate"] == pytest.approx(0.5)
+    assert statistics["hardware_qubo_optimal_hit_rate"] == pytest.approx(0.5)
     assert statistics["hardware_best_feasible_normalized_gap"] == pytest.approx(0.0)
 
 
@@ -269,6 +269,6 @@ def test_ibm_adapter_transpiles_and_collects_current_runtime_schema(monkeypatch)
     assert info["backend_name"] == backend.name
     assert info["mitigation_strategy"] == "dd_measure_twirling"
     assert info["returned_samples"] == 16
-    assert info["hardware_optimal_hit_rate"] == pytest.approx(1.0)
+    assert info["hardware_qubo_optimal_hit_rate"] == pytest.approx(1.0)
     assert info["transpiled_two_qubit_gates"] > 0
     assert info["hardware_queue_seconds"] == pytest.approx(3.0)

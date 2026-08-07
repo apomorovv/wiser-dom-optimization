@@ -54,6 +54,27 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
             .itertuples(index=False, name=None),
         )
     )
+    enabled_capacity_resources = sorted(
+        problem.capacities.get("resource", pd.Series(dtype=str)).astype(str).unique()
+    )
+    diagnostics: dict[str, object] = {
+        "validation_tolerance": _TOL,
+        "checked_orders": len(order_ids),
+        "checked_order_lines": len(line_keys),
+        "assignment_row_count": len(assignments),
+        "fulfillment_row_count": len(fulfillment),
+        "maximum_demand_balance_abs_error": 0.0,
+        "maximum_fulfilled_integrality_error": 0.0,
+        "maximum_unfulfilled_integrality_error": 0.0,
+        "maximum_inventory_excess_cases": 0.0,
+        "maximum_capacity_excess": 0.0,
+        "capacity_constraints_enabled": not problem.capacities.empty,
+        "capacity_constraint_rows": len(problem.capacities),
+        "enabled_capacity_resources": "|".join(enabled_capacity_resources) or "none",
+        "throughput_capacity_enabled": "throughput_cases" in enabled_capacity_resources,
+        "case_pick_capacity_enabled": "case_pick" in enabled_capacity_resources,
+        "pallet_pick_capacity_enabled": "pallet_pick" in enabled_capacity_resources,
+    }
 
     required_assignment_columns = {
         "order_id",
@@ -84,6 +105,7 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
         return ValidationResult(
             is_feasible=False,
             schema_violations=schema_violations,
+            diagnostics=diagnostics,
         )
 
     for column in ["is_unassigned", "is_divert"]:
@@ -265,12 +287,27 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
 
         if fulfilled < -_TOL or unfulfilled < -_TOL:
             demand_violations.append(f"negative quantities for line {key}")
-        if not np.isclose(fulfilled, round(fulfilled), atol=_TOL):
+        fulfilled_integrality_error = abs(fulfilled - round(fulfilled))
+        unfulfilled_integrality_error = abs(unfulfilled - round(unfulfilled))
+        diagnostics["maximum_fulfilled_integrality_error"] = max(
+            float(diagnostics["maximum_fulfilled_integrality_error"]),
+            fulfilled_integrality_error,
+        )
+        diagnostics["maximum_unfulfilled_integrality_error"] = max(
+            float(diagnostics["maximum_unfulfilled_integrality_error"]),
+            unfulfilled_integrality_error,
+        )
+        if fulfilled_integrality_error > _TOL:
             demand_violations.append(f"fulfilled_cases is not integer for line {key}")
-        if not np.isclose(unfulfilled, round(unfulfilled), atol=_TOL):
+        if unfulfilled_integrality_error > _TOL:
             demand_violations.append(f"unfulfilled_cases is not integer for line {key}")
         demand = float(demands[key])
-        if not np.isclose(fulfilled + unfulfilled, demand, atol=_TOL):
+        balance_error = abs(fulfilled + unfulfilled - demand)
+        diagnostics["maximum_demand_balance_abs_error"] = max(
+            float(diagnostics["maximum_demand_balance_abs_error"]),
+            balance_error,
+        )
+        if balance_error > _TOL:
             demand_violations.append(
                 f"demand balance fails for {key}: {fulfilled}+{unfulfilled}!={demand}"
             )
@@ -358,6 +395,10 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
             positions = np.searchsorted(usage_dates, checkpoint_dates, side="right") - 1
             consumed = np.where(positions >= 0, cumulative[np.maximum(positions, 0)], 0.0)
             available = checkpoints["cumulative_available_cases"].to_numpy(dtype=float)
+            diagnostics["maximum_inventory_excess_cases"] = max(
+                float(diagnostics["maximum_inventory_excess_cases"]),
+                float(np.maximum(consumed - available, 0.0).max(initial=0.0)),
+            )
             exceeded = np.flatnonzero(consumed > available + _TOL)
             for index in exceeded:
                 row = checkpoints.iloc[int(index)]
@@ -405,6 +446,10 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
             resource = str(cap.resource)
             capacity = float(cap.capacity)
             consumed = float(capacity_usage.get((str(cap.dc_id), date, resource), 0.0))
+            diagnostics["maximum_capacity_excess"] = max(
+                float(diagnostics["maximum_capacity_excess"]),
+                max(0.0, consumed - capacity),
+            )
 
             if consumed > capacity + _TOL:
                 capacity_violations.append(
@@ -428,4 +473,5 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
         eligibility_violations=eligibility_violations,
         capacity_violations=capacity_violations,
         schema_violations=schema_violations,
+        diagnostics=diagnostics,
     )

@@ -9,6 +9,7 @@ a QPU run and no claim of quantum advantage follows from it.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from importlib.metadata import PackageNotFoundError, version
 from itertools import product
 from math import exp
 from time import perf_counter
@@ -31,6 +32,13 @@ IBM_MITIGATION_STRATEGIES = (
     "dynamical_decoupling",
     "dd_measure_twirling",
 )
+
+
+def _package_version(name: str) -> str | None:
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return None
 
 
 def ibm_sampler_options(
@@ -102,12 +110,12 @@ def _hardware_sample_statistics(
     return {
         "hardware_raw_one_hot_rate": float(one_hot.mean()) if len(one_hot) else 0.0,
         "hardware_feasible_shots": int(one_hot.sum()),
-        "hardware_optimal_hit_rate": float(
+        "hardware_qubo_optimal_hit_rate": float(
             np.mean(one_hot & (np.abs(raw_energies - optimum) <= tolerance))
         )
         if len(raw_energies)
         else 0.0,
-        "hardware_optimal_hit_rate_given_feasible": float(
+        "hardware_qubo_optimal_hit_rate_given_feasible": float(
             np.mean(np.abs(feasible_raw - optimum) <= tolerance)
         )
         if len(feasible_raw)
@@ -122,7 +130,7 @@ def _hardware_sample_statistics(
         "hardware_mean_feasible_energy": (
             float(np.mean(feasible_raw)) if len(feasible_raw) else None
         ),
-        "exact_best_feasible_energy": optimum,
+        "exact_best_feasible_qubo_energy": optimum,
     }
 
 
@@ -137,7 +145,7 @@ def _duration_seconds(timestamps: dict[str, object], start: str, end: str) -> fl
         return None
 
 
-def _ibm_job_timing(job: object, wall_seconds: float) -> dict[str, float | None]:
+def _ibm_job_timing(job: object, wall_seconds: float) -> dict[str, object]:
     """Normalize IBM Runtime wall, queue, execution, and quantum usage timing."""
 
     try:
@@ -162,6 +170,15 @@ def _ibm_job_timing(job: object, wall_seconds: float) -> dict[str, float | None]
         quantum_seconds = usage.get("quantum_seconds", usage.get("seconds"))
     return {
         "hardware_wall_seconds": float(wall_seconds),
+        "hardware_created_at": (
+            None if timestamps.get("created") is None else str(timestamps["created"])
+        ),
+        "hardware_running_at": (
+            None if timestamps.get("running") is None else str(timestamps["running"])
+        ),
+        "hardware_finished_at": (
+            None if timestamps.get("finished") is None else str(timestamps["finished"])
+        ),
         "hardware_queue_seconds": queue_seconds,
         "hardware_execution_seconds": execution_seconds,
         "hardware_turnaround_seconds": turnaround_seconds,
@@ -450,6 +467,7 @@ def _sample_ibm_qpu(
     mitigation_strategy: str,
     transpiler_optimization_level: int,
     transpiler_trials: int,
+    transpiler_seed: int | None,
 ) -> tuple[list[np.ndarray], dict[str, object]]:
     """Run constraint-preserving QAOA on a configured IBM Quantum account.
 
@@ -472,6 +490,7 @@ def _sample_ibm_qpu(
             "IBM QPU sampling requires the optional 'ibm' dependencies"
         ) from error
 
+    angle_start = perf_counter()
     _, local_info = _qaoa_statevector_samples(
         model,
         num_samples=1,
@@ -480,6 +499,8 @@ def _sample_ibm_qpu(
         restarts=restarts,
         max_feasible_states=max_feasible_states,
     )
+    angle_optimization_seconds = perf_counter() - angle_start
+    circuit_start = perf_counter()
     parameters = np.asarray(local_info["optimized_parameters"], dtype=float)
     gammas = parameters[:layers]
     betas = parameters[layers:]
@@ -531,49 +552,73 @@ def _sample_ibm_qpu(
                 circuit.rxx(float(beta), i, j)
                 circuit.ryy(float(beta), i, j)
     circuit.measure_all()
+    circuit_construction_seconds = perf_counter() - circuit_start
 
-    service = QiskitRuntimeService()
     if transpiler_optimization_level not in {0, 1, 2, 3}:
         raise QuantumSolverError("IBM transpiler optimization level must be 0, 1, 2, or 3")
     if transpiler_trials <= 0:
         raise QuantumSolverError("IBM transpiler trials must be positive")
-    if backend_name:
-        backend = service.backend(str(backend_name), use_fractional_gates=False)
-        status = backend.status()
-        if not bool(getattr(status, "operational", False)):
-            raise QuantumSolverError(f"Requested IBM backend {backend_name!r} is not operational")
-        if int(getattr(backend, "num_qubits", 0)) < n:
-            raise QuantumSolverError(
-                f"Requested IBM backend {backend_name!r} has fewer than {n} qubits"
+    backend_selection_start = perf_counter()
+    try:
+        service = QiskitRuntimeService()
+        if backend_name:
+            backend = service.backend(str(backend_name), use_fractional_gates=False)
+            status = backend.status()
+            if not bool(getattr(status, "operational", False)):
+                raise QuantumSolverError(
+                    f"Requested IBM backend {backend_name!r} is not operational"
+                )
+            if int(getattr(backend, "num_qubits", 0)) < n:
+                raise QuantumSolverError(
+                    f"Requested IBM backend {backend_name!r} has fewer than {n} qubits"
+                )
+        else:
+            backend = service.least_busy(
+                operational=True,
+                simulator=False,
+                min_num_qubits=n,
+                use_fractional_gates=False,
             )
-    else:
-        backend = service.least_busy(
-            operational=True,
-            simulator=False,
-            min_num_qubits=n,
-            use_fractional_gates=False,
-        )
-        status = backend.status()
+            status = backend.status()
+    except QuantumSolverError:
+        raise
+    except Exception as error:
+        raise QuantumSolverError(
+            f"IBM backend selection failed: {type(error).__name__}: {error}"
+        ) from error
+    backend_selection_seconds = perf_counter() - backend_selection_start
 
     transpiled: list[tuple[tuple[int, int, int], int, object]] = []
+    transpilation_errors: list[str] = []
+    base_transpiler_seed = int(seed if transpiler_seed is None else transpiler_seed)
+    transpilation_start = perf_counter()
     for trial in range(transpiler_trials):
-        transpiler_seed = int(seed + 104_729 * trial)
-        pass_manager = generate_preset_pass_manager(
-            backend=backend,
-            optimization_level=transpiler_optimization_level,
-            seed_transpiler=transpiler_seed,
-        )
-        candidate = pass_manager.run(circuit)
-        two_qubit_gates = sum(
-            1 for instruction in candidate.data if len(instruction.qubits) == 2
-        )
-        transpiled.append(
-            (
-                (two_qubit_gates, int(candidate.depth()), int(candidate.size())),
-                transpiler_seed,
-                candidate,
+        trial_seed = int(base_transpiler_seed + 104_729 * trial)
+        try:
+            pass_manager = generate_preset_pass_manager(
+                backend=backend,
+                optimization_level=transpiler_optimization_level,
+                seed_transpiler=trial_seed,
             )
-        )
+            candidate = pass_manager.run(circuit)
+            two_qubit_gates = sum(
+                1 for instruction in candidate.data if len(instruction.qubits) == 2
+            )
+            transpiled.append(
+                (
+                    (two_qubit_gates, int(candidate.depth()), int(candidate.size())),
+                    trial_seed,
+                    candidate,
+                )
+            )
+        # Qiskit pass plugins can raise backend-specific exceptions that are not
+        # part of a stable public hierarchy; one failed seed must not abort trials.
+        except Exception as error:  # noqa: BLE001
+            transpilation_errors.append(f"{type(error).__name__}: {error}")
+    if not transpiled:
+        detail = transpilation_errors[0] if transpilation_errors else "unknown error"
+        raise QuantumSolverError(f"IBM transpilation failed for every trial: {detail}")
+    transpilation_seconds = perf_counter() - transpilation_start
     score, selected_transpiler_seed, isa_circuit = min(
         transpiled, key=lambda item: item[0]
     )
@@ -583,18 +628,47 @@ def _sample_ibm_qpu(
             isa_circuit.depth(filter_function=lambda item: len(item.qubits) == 2)
         )
     except (AttributeError, TypeError, ValueError):
-        two_qubit_depth = 0
+        two_qubit_depth = None
+    try:
+        layout = getattr(isa_circuit, "layout", None)
+        final_index_layout = layout.final_index_layout
+        try:
+            mapped = final_index_layout(filter_ancillas=True)
+        except TypeError:
+            mapped = final_index_layout()
+        physical_qubits = list(mapped)[:n]
+        physical_qubit_mapping = ",".join(str(int(index)) for index in physical_qubits)
+    except (AttributeError, TypeError, ValueError):
+        physical_qubit_mapping = None
+    try:
+        properties_method = getattr(backend, "properties", None)
+        properties = properties_method() if callable(properties_method) else None
+        calibration_value = getattr(properties, "last_update_date", None)
+        calibration_last_update_at = (
+            None if calibration_value is None else str(calibration_value)
+        )
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        calibration_last_update_at = None
 
     options = ibm_sampler_options(
         mitigation_strategy,
         shots=int(num_samples),
         max_execution_time_seconds=time_limit_seconds,
     )
-    sampler = SamplerV2(mode=backend, options=options)
-    wall_start = perf_counter()
-    job = sampler.run([isa_circuit], shots=int(num_samples))
-    publication = job.result()[0]
-    wall_seconds = perf_counter() - wall_start
+    try:
+        sampler = SamplerV2(mode=backend, options=options)
+        submit_start = perf_counter()
+        job = sampler.run([isa_circuit], shots=int(num_samples))
+        primitive_submit_seconds = perf_counter() - submit_start
+        wait_start = perf_counter()
+        publication = job.result()[0]
+        primitive_wait_seconds = perf_counter() - wait_start
+        wall_seconds = primitive_submit_seconds + primitive_wait_seconds
+    except Exception as error:
+        raise QuantumSolverError(
+            f"IBM Runtime execution failed: {type(error).__name__}: {error}"
+        ) from error
+    decode_start = perf_counter()
     counts = publication.data.meas.get_counts()
     samples: list[np.ndarray] = []
     for remote_bits, count in counts.items():
@@ -604,6 +678,7 @@ def _sample_ibm_qpu(
         samples.extend(vector.copy() for _ in range(int(count)))
     if not samples:
         raise QuantumSolverError("IBM Runtime returned no samples")
+    decode_seconds = perf_counter() - decode_start
     backend_name = getattr(backend, "name", "unknown")
     if callable(backend_name):
         backend_name = backend_name()
@@ -625,14 +700,28 @@ def _sample_ibm_qpu(
         "backend_pending_jobs_at_selection": int(getattr(status, "pending_jobs", 0)),
         "backend_num_qubits": int(getattr(backend, "num_qubits", 0)),
         "logical_qubits": n,
+        "physical_qubit_mapping": physical_qubit_mapping,
+        "calibration_last_update_at": calibration_last_update_at,
+        "qiskit_version": _package_version("qiskit"),
+        "qiskit_ibm_runtime_version": _package_version("qiskit-ibm-runtime"),
+        "angle_seed": int(seed),
         "mitigation_strategy": mitigation_strategy,
         "transpiler_optimization_level": transpiler_optimization_level,
         "transpiler_trials": transpiler_trials,
+        "transpiler_base_seed": base_transpiler_seed,
+        "transpiler_failed_trials": len(transpilation_errors),
         "selected_transpiler_seed": selected_transpiler_seed,
         "transpiled_depth": transpiled_depth,
         "transpiled_size": transpiled_size,
         "transpiled_two_qubit_gates": two_qubit_gates,
         "transpiled_two_qubit_depth": two_qubit_depth,
+        "angle_optimization_seconds": angle_optimization_seconds,
+        "circuit_construction_seconds": circuit_construction_seconds,
+        "backend_selection_seconds": backend_selection_seconds,
+        "transpilation_seconds": transpilation_seconds,
+        "primitive_submit_seconds": primitive_submit_seconds,
+        "primitive_wait_seconds": primitive_wait_seconds,
+        "decode_seconds": decode_seconds,
         **timing,
         **sample_statistics,
     }
@@ -665,6 +754,7 @@ def sample_qubo(
     ibm_mitigation_strategy: str = "baseline",
     ibm_transpiler_optimization_level: int = 3,
     ibm_transpiler_trials: int = 4,
+    ibm_transpiler_seed: int | None = None,
 ) -> pd.DataFrame:
     """Return sampled bitstrings and energies using one common schema.
 
@@ -755,6 +845,7 @@ def sample_qubo(
             mitigation_strategy=ibm_mitigation_strategy,
             transpiler_optimization_level=ibm_transpiler_optimization_level,
             transpiler_trials=ibm_transpiler_trials,
+            transpiler_seed=ibm_transpiler_seed,
         )
     else:
         raise QuantumSolverError(f"Unknown QUBO sampling method {method!r}")

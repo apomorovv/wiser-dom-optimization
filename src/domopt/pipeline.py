@@ -8,7 +8,6 @@ import subprocess
 from collections.abc import Iterable
 from dataclasses import asdict
 from datetime import datetime, timezone
-from functools import cache
 from pathlib import Path
 
 import pandas as pd
@@ -21,6 +20,7 @@ from .baselines import (
 from .classical import solve_classical
 from .hybrid import ExactLNSConfig, HybridConfig, solve_exact_lns, solve_hybrid
 from .metrics import compute_metrics
+from .provenance import runtime_environment, runtime_environment_json
 from .schemas import ASSUMPTION_VERSION, SCHEMA_VERSION, ProblemData, Solution
 from .validation import validate_solution
 
@@ -86,9 +86,13 @@ def current_git_commit() -> str | None:
         return None
 
 
-@cache
 def current_source_state() -> dict[str, object]:
-    """Return commit, dirty flag, and a content hash for reproducible checkpoints."""
+    """Return a fresh commit, dirty flag, and source-content hash.
+
+    Notebook users commonly edit parameters or source and rerun cells in the
+    same kernel.  Recomputing this small provenance record prevents a cached
+    pre-edit value from validating a checkpoint produced by different code.
+    """
 
     commit = current_git_commit()
     try:
@@ -164,6 +168,7 @@ def write_solution_artifacts(
             "assumption_version": problem.metadata.get(
                 "assumption_version", ASSUMPTION_VERSION
             ),
+            "runtime_environment": runtime_environment(),
             **current_source_state(),
         }
     )
@@ -322,7 +327,12 @@ def run_methods(
 
     summary = pd.DataFrame(rows)
     base.mkdir(parents=True, exist_ok=True)
-    summary.drop(columns=["violations"], errors="ignore").to_csv(
-        base / "comparison.csv", index=False
-    )
+    comparison = summary.drop(columns=["violations"], errors="ignore").copy()
+    if "runtime_environment" in comparison.columns:
+        comparison["runtime_environment"] = comparison["runtime_environment"].map(
+            lambda value: (
+                runtime_environment_json(value) if isinstance(value, dict) else value
+            )
+        )
+    comparison.to_csv(base / "comparison.csv", index=False)
     return summary

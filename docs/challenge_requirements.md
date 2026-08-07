@@ -5,6 +5,26 @@ reviewable artifact. ``Implemented`` means the code path and automated checks ex
 it does not imply that the final full-profile evidence or submission artifact has
 already been generated and reviewed.
 
+The 2026 challenge brief is the acceptance authority. The 2022 equations document is
+used only for business semantics, and the example workbook is a static worked example
+(one sheet, no formulas), not executable specification. Where the sources conflict,
+the corrected model and a documented assumption take precedence.
+
+## Legacy-model corrections applied
+
+| Legacy defect or ambiguity | Challenge-ready treatment |
+|---|---|
+| Assignment indexed by DC but not PGI date | Candidate assignment is a unique order/group–DC–PGI column. |
+| Demand bounded per candidate, permitting aggregate overfill | The canonical validator and exact model enforce one order-SKU demand balance across all choices. |
+| Stated 5% diversion inequality requires more than total demand | Percentage fill gain and absolute case gain are separate, explicit configuration values. |
+| Prose mentions 100 cases inconsistently | The case-gain threshold is configurable and its inclusive boundary is tested/documented. |
+| Default and non-default inventory can be double-counted | One cumulative protected-ATP ledger is consumed once across competing orders. |
+| Five-day inventory window is underspecified | The adapter documents the exact protected horizon and treats inventory as cumulative checkpoints. |
+| Pick variables are continuous and final pick limits are absent | Exact integer case/pallet consumption is precomputed and enabled capacities are enforced. |
+| Penalty auxiliaries are under-linked | One versioned thresholded penalty function is shared by solver, evaluator, validator, and planner. |
+| Throughput/labor and load grouping are incomplete | Only documented capacity rows are enabled; disabled constraints are disclosed, and assignment groups move atomically. |
+| Workbook net saving includes payload-waste terms outside the brief | Payload waste remains a secondary diagnostic and is not silently added to the common objective. |
+
 | Brief requirement | Implementation | Evidence |
 |---|---|---|
 | Explain DOM and combinatorial trade-offs | Business framing, exact-versus-heuristic and hardware discussion | `README.md`, `docs/hybrid_algorithm.md`, `docs/research_basis.md` |
@@ -13,17 +33,18 @@ already been generated and reviewed.
 | Default-assignment baseline | Deterministic shared-resource default allocator | `src/domopt/baselines.py`, notebook solver comparison |
 | Greedy/sequential baseline | Residual-resource sequential reassignment | `src/domopt/baselines.py`, notebook solver comparison |
 | Strong scalable classical controls | Greedy plus exact fixed-assignment quantity polish and adaptive conflict-aware exact-MILP LNS | `src/domopt/baselines.py`, `src/domopt/hybrid.py`, solver and scaling comparisons |
+| One clean final solver entry point | `fast` polished-greedy default, `quality` exact-LNS escalation, and opt-in `hybrid`, all independently validated before return | `src/domopt/solver.py`, `tests/test_solver.py` |
 | Report objective, fill, diverts, penalty, shipping | Common independent metrics for every method | `src/domopt/metrics.py`, `src/domopt/objective.py`, experiment CSV |
 | Deterministic binary or column-selection model | Exact MILP with assignment columns and SKU quantities | `src/domopt/classical.py`, `docs/mathematical_formulation.md` |
 | Define variables, objective, and constraints | Complete thresholded-penalty and load-cohesion formulation | `docs/mathematical_formulation.md` |
 | Implement on tractable real-data subset | Deterministic assignment-group subsets with whole-load expansion | `src/domopt/poc.py`, `src/domopt/experiments.py`, notebook |
-| Explain candidate generation and validation | Strict source adapter, explicit network-versus-default-DC scope, optional Pareto pruning, and independent validator | `docs/poc_data_mapping.md`, `src/domopt/poc.py`, `src/domopt/validation.py` |
+| Explain candidate generation and validation | Strict source adapter, explicit network-versus-default-DC scope, optional Pareto pruning, and independent validator with residual/tolerance diagnostics | `docs/poc_data_mapping.md`, `src/domopt/poc.py`, `src/domopt/validation.py` |
 | Compare best candidate with identical checks | Default, greedy, polished greedy, exact LNS, exact MILP, and hybrid use one objective and validator | notebook `solver_comparison` experiment |
 | Estimate variable/qubit growth | Bounded local QUBO width plus local/global MILP variable and constraint counts | `docs/hybrid_algorithm.md`, size-scaling experiment |
 | Analyze runtime, complexity, and robustness | Repeated real and synthetic scaling, candidate/scope, noise, and ablation experiments | notebook and `src/domopt/experiments.py` |
 | Propose scalability improvements | Atomic greedy, exact quantity polish, adaptive exact LNS, cached conflict indexes, candidate limits, conflict batches, and bounded local recourse; heuristic pruning is optional | implementation and `docs/hybrid_algorithm.md` |
 | 6–10 page report | Intentionally deferred until reviewed full-profile results exist | `reports/README.md` |
-| Runnable notebook/repository | Installation/execution instructions and content-addressed checkpoints that reject changed profile, problem, configuration, source state, or table schema | `README.md`, `notebooks/nestle_challenge_experiments.ipynb`, `src/domopt/checkpoints.py` |
+| Runnable notebook/repository | Automatic dependency bootstrap, one top configuration cell, and stable profile folders; manifests reject changed profile, problem, configuration, source state, runtime environment, content, or table schema | `README.md`, `notebooks/nestle_challenge_experiments.ipynb`, `src/domopt/checkpoints.py` |
 | 5–7 slide presentation | Intentionally deferred until reviewed full-profile results exist | `reports/README.md` |
 | One-page planner view | Template retained; generator now uses the canonical thresholded penalty, load-group totals, and delivery-date status; reviewed data-specific artifact remains deferred | `reports/planner_view_template.md`, `src/domopt/planner.py` |
 | Compare exact cover and deterministic model (optional) | **Not implemented.** The local assignment QUBO is a search neighborhood, not a same-instance exact-cover-versus-deterministic-LP study | Optional future experiment |
@@ -32,7 +53,7 @@ already been generated and reviewed.
 | Add uncertainty (optional) | Inventory-shock and coefficient-noise scenarios | notebook experiments |
 | Planner dashboard (optional) | Aggregate-only Streamlit copilot | `apps/planner_copilot.py` |
 | GPU acceleration study (optional) | Synthetic CPU/GPU QUBO-scoring crossover and capability audit | notebook and `src/domopt/hardware.py` |
-| Remote QPU test (optional) | Opt-in IBM hardware study using generated synthetic coefficients only, least-busy discovery, repeated mitigation variants, and exact references | notebook, `scripts/run_ibm_hardware_study.py`, and `src/domopt/experiments.py` |
+| Remote QPU test (project-required) | Opt-in IBM hardware study using generated synthetic coefficients only, derived circuit width, exact/simulator references, full p=1/p=2 mitigation matrix, per-variant resume, and raw-versus-repaired validity | notebook, `scripts/run_ibm_hardware_study.py`, and `src/domopt/experiments.py` |
 | Reproducible evidence | Aggregate rows record problem/bundle hashes, schema and assumption versions, objective version, commit, dirty state, source-state hash, configuration, and seed | `src/domopt/experiments.py`, `src/domopt/pipeline.py`, `src/domopt/checkpoints.py` |
 | Privacy-safe public package | No raw challenge tables or identifiers committed; public result writers reject identifier-like columns | `.gitignore`, `docs/privacy.md`, aggregate-output guards |
 

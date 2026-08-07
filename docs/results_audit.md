@@ -4,12 +4,18 @@ Audit updated: 2026-08-07
 
 ## Status
 
-The supplied command-line aggregate contains 247 feasible rows across 14 experiment
-families and zero independently reported validation violations. It is useful evidence,
-but every row reports `git_dirty=True`; numerical conclusions are therefore provisional
-until the corrected full profile is rerun from a clean commit. The separately supplied
-notebook aggregate has an older 62-column schema, only 86 rows, and two infeasible exact
-rows. It is stale and must not be combined with the 105-column command-line aggregate.
+The supplied archive contains a clean command-line full study with 247 rows across 14
+experiment families. All 18 CSV-manifest hashes pass; every row reports
+`feasible=True`, `validation_violation_count=0`, `git_dirty=False`, and the same source
+commit. Objective/component, case/value balance, business-cost, and rate identities
+reconcile to at most `7.5e-9` absolute error. The separately supplied notebook aggregate
+has an older schema and two infeasible exact rows; it is stale and must not be combined
+with the clean command-line aggregate.
+
+The clean archive records validity as a Boolean, category/count, and messages rather
+than numeric residuals. The updated implementation now emits validator tolerance and
+maximum demand-balance, integrality, inventory-excess, and capacity-excess residuals;
+those fields require a fresh run and are not retroactively claimed for the archive.
 
 No exact source-scale objective, revenue, penalty, shipping, inventory, capacity, or
 row-level identifier is published here. Reviewed public results should use normalized
@@ -22,19 +28,20 @@ aggregate explicitly.
 ### Solver decision
 
 The common 20-assignment-group comparison supports **polished greedy as the operational
-default**. It matched the zero-gap exact MILP's normalized objective capture (64.9002%)
-in 6.63 seconds, versus 6.67 seconds for the full MILP, 16.05 seconds for exact LNS,
-and 28.43 seconds for sampler-assisted LNS. Raw greedy was the speed option at 1.73
-seconds and reached 64.8961% capture. The hybrid run accepted no sampler move, so it
-does not establish sampler value on this real subset.
+default**. It ties exact MILP, exact LNS, and sampler-assisted LNS at 64.9002% normalized
+objective capture. The exact MILP is fastest among those tied methods
+at 2.518 seconds; polished greedy takes 2.715 seconds, exact LNS 6.565 seconds, and
+hybrid 12.149 seconds. Raw greedy takes 0.755 seconds and reaches 64.8961% capture.
+The hybrid accepts no sampler move, so all of its improvement over raw greedy comes
+from the common classical quantity polish.
 
 | Method | Objective capture | Runtime (s) | Evidence-based role |
 |---|---:|---:|---|
-| Greedy | 64.8961% | 1.73 | Time-critical fallback |
-| Polished greedy | 64.9002% | 6.63 | Production default |
-| Exact MILP | 64.9002% | 6.67 | Small-instance certificate |
-| Exact LNS | 64.9002% | 16.05 | Coordinated-assignment escalation |
-| Hybrid sampler LNS | 64.9002% | 28.43 | Research comparator |
+| Greedy | 64.8961% | 0.755 | Time-critical fallback |
+| Polished greedy | 64.9002% | 2.715 | Production default |
+| Exact MILP | 64.9002% | 2.518 | Small-instance certificate |
+| Exact LNS | 64.9002% | 6.565 | Coordinated-assignment escalation |
+| Hybrid sampler LNS | 64.9002% | 12.149 | Research comparator |
 
 This is not a universal solver theorem. The independent synthetic coordination control
 contains a deliberately coupled greedy trap: exact LNS and exact MILP improve its
@@ -44,20 +51,20 @@ exact LNS as an escalation, but not making the sampler the production solver.
 
 ### Scaling and design choices
 
-- At 372 real assignment groups, median greedy and polished-greedy runtimes were 37.55
-  and 133.35 seconds. Polishing improved objective capture by about 3.37 basis points.
-- The supplied scaling configuration started exact LNS from raw greedy while the
-  comparison showed a separately polished baseline. That was an unfair attribution
-  mismatch and explains why exact LNS appeared below polished greedy at larger sizes.
-  The corrected experiment always starts exact LNS from the polished incumbent, so its
-  accepted-result invariant prevents this artifact.
+- At 372 real assignment groups (750 orders), median greedy, polished-greedy, and
+  exact-LNS runtimes are 15.945, 51.779, and 71.208 seconds. Exact LNS improves the
+  polished objective by only `0.000027%` at that point.
+- Across the real scaling grid, 98.87% of exact LNS's aggregate improvement over raw
+  greedy comes from the initial polish; neighborhood assignment search contributes
+  1.13%. The corresponding initial-polish share is 98.44% in synthetic scaling.
 - Raising the candidate cap from one to two increased capture from 61.5664% to
   64.9002%; caps of four and six added candidates and runtime without improving quality
   on the tested subset. A cap of two is the measured default for this instance, not a
   globally proven optimum.
 - Heuristic Pareto pruning reduced the tested hybrid candidate set from 90 to 70 while
-  preserving observed quality and modestly reducing runtime. It remains an ablation,
-  not a proof of globally safe dominance.
+  preserving observed quality and reducing mean runtime by 2.2%. It remains an
+  ablation, not a proof of globally safe dominance, and is disabled in the rigorous
+  default path.
 - Penalty scaling from 0.25× through 4× did not change the selected routing on the
   tested subset. That is evidence of local routing stability, not evidence that the
   business penalty scale is correct.
@@ -68,15 +75,20 @@ exact LNS as an escalation, but not making the sampler the production solver.
 
 ### IBM evidence boundary
 
-The supplied IBM screenshot reports one QPU call and only 19% raw one-hot samples, but
-does not identify the backend and reports zero QPU access time. The former hardware
-adapter read a provider-specific timing field that IBM does not populate, so zero was a
-measurement bug rather than evidence of zero device usage. The corrected study uses a
-coupled synthetic instance with an exact reference, discovers and records the current
-least-busy eligible IBM backend, compares baseline/DD/DD-plus-measurement-twirling and
-$p=1$/$p=2$ variants, and records Runtime timestamps, quantum seconds, raw feasibility,
-optimal-hit rate, assignment gain, and transpiled two-qubit cost. No new IBM hardware
-result is claimed until that opt-in study is run from an authenticated machine.
+The supplied IBM evidence is a dirty, single-seed, 512-shot study on an independently
+generated four-order, 16-logical-qubit control. Baseline p=1 and p=1 with DD plus
+measurement twirling each produce one exact feasible-QUBO hit; all variants reach the
+same final objective only after exact recourse. The p=1 end-to-end runtimes of 81–83
+seconds are not explained by 4.8–5.7 seconds of reported QPU turnaround, while the
+deeper p=2 example completes in 15.8 seconds. It is therefore diagnostic only.
+
+The corrected study derives circuit width from the actual QUBO, runs the complete
+$p=1/p=2$ by baseline/DD/DD-plus-measurement-twirling matrix, fixes angle and transpiler
+seeds across hardware repetitions, records job IDs/timestamps and phase timings, keeps
+missing provider timing as missing rather than zero, records package versions, physical
+qubit mapping, and available calibration timestamp, resumes successful variants, and
+retains/retries failures. No corrected hardware result is claimed until the opt-in
+notebook cell is run from this clean branch.
 
 ## Implemented validity controls
 
@@ -84,7 +96,7 @@ result is claimed until that opt-in study is run from an authenticated machine.
 |---|---|---|
 | Strict input contract | Five runtime tables are checked for required columns, identifiers, dates, numeric/domain validity, finiteness, and the documented inventory identity before transformation | Successful bundle audit plus any rejected-input diagnostics retained locally |
 | Common objective | Default, greedy, polished greedy, exact LNS, exact MILP, and hybrid are recomputed by the same independent evaluator | Component reconciliation and feasibility status for every method row |
-| Independent feasibility | Assignment, demand, group cohesion, candidate eligibility, inventory, capacity, diversion, date, and objective checks are solver-independent | Zero violations for every reportable recommendation |
+| Independent feasibility | Assignment, demand, group cohesion, candidate eligibility, inventory, capacity, diversion, and date checks are solver-independent; numeric tolerance/residual diagnostics are exported | Zero violations and within-tolerance residuals for every reportable recommendation |
 | Thresholded penalties | Exact model, evaluator, baselines/recourse, and planner use the same fixed, variable, per-cut-SKU, floor, and cap semantics | Component tests and aggregate reconciliation |
 | Load-atomic decisions | Whole assignment groups share one DC/PGI option; shipping and incremental dock use are charged to a deterministic group leader | Group-level reassignment counts and planner group totals |
 | Candidate breadth | The default `network_intersection` policy is compared with the narrower `focus_default_dcs` policy | Candidate breadth, feasibility, objective capture, and runtime by scope |
@@ -208,7 +220,7 @@ deliverables.
 
 Before promoting any local table or figure:
 
-1. verify its checkpoint manifest and complete provenance identity;
+1. verify its checkpoint manifest, content hash, and complete provenance identity;
 2. retain failed/infeasible rows in the audit denominator and exclude them from ranking;
 3. confirm all compared rows share the same problem and economic scale;
 4. replace exact source-scale economics with approved normalized/indexed measures;

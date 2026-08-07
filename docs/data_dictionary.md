@@ -226,10 +226,15 @@ Every method is evaluated independently into the following common fields.
 
 Aggregate experiment rows additionally carry `experiment_schema_version`,
 `bundle_sha256`, `problem_sha256`, `objective_version`, `git_commit`, `git_dirty`,
-`source_state_sha256`, and the serialized method configuration. These fields are part
-of reproducibility identity, not business features. Exact source-scale values remain
-restricted even when aggregated; public artifacts require approval or
-normalized/indexed values.
+`source_state_sha256`, `runtime_environment`, and the serialized method configuration.
+`runtime_environment` is canonical JSON containing the Python, `wiser-dom`, NumPy,
+pandas, SciPy, PyYAML, Qiskit, and Qiskit IBM Runtime versions; unavailable optional
+Qiskit packages are explicit `null` values. These fields are part of reproducibility
+identity, not business features. Exact source-scale values remain restricted even when
+aggregated; public artifacts require approval or normalized/indexed values.
+
+The current aggregate experiment schema is version `5`, the checkpoint schema is
+version `3`, and the nested runtime-environment record is version `1`.
 
 ## Metadata
 

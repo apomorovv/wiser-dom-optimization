@@ -61,6 +61,41 @@ def test_hybrid_does_not_degrade_greedy_incumbent() -> None:
     assert solution.metadata["final_objective"] >= solution.metadata["initial_objective"]
 
 
+def test_missing_ibm_usage_time_remains_missing(monkeypatch) -> None:
+    def fake_remote_samples(model, **kwargs):
+        del kwargs
+        row = {name: 0 for name in model.variable_names}
+        for group in model.metadata["one_hot_groups"]:
+            row[str(group[0])] = 1
+        frame = pd.DataFrame([row])
+        frame.attrs["sampler_info"] = {
+            "backend": "ibm-qpu",
+            "remote": True,
+            "backend_name": "fake_backend",
+            "mitigation_strategy": "baseline",
+            "returned_samples": 1,
+            "hardware_feasible_shots": 1,
+            "hardware_qubo_optimal_hit_rate": 0.0,
+        }
+        return frame
+
+    monkeypatch.setattr("domopt.hybrid.sample_qubo", fake_remote_samples)
+    solution = solve_hybrid(
+        make_tiny_problem_data(),
+        config=HybridConfig(
+            sampler="ibm-qpu",
+            allow_remote=True,
+            iterations=1,
+            neighborhood_orders=2,
+            max_qubo_variables=8,
+            top_k_recourse=1,
+        ),
+    )
+
+    assert solution.metadata["hardware_quantum_seconds"] is None
+    assert solution.metadata["qpu_access_time_microseconds"] is None
+
+
 def test_resource_pressure_detects_higher_order_contention() -> None:
     key = ("capacity", "D1", pd.Timestamp("2026-07-14"), "throughput_cases")
     plans = pd.DataFrame(

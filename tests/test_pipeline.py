@@ -46,6 +46,16 @@ def test_common_pipeline_runs_polished_greedy_and_exact_lns(tmp_path) -> None:
         assert (run_dir / "validation.json").is_file()
         configuration = json.loads((run_dir / "config.json").read_text())
         assert configuration["method"] == method
+        metrics = json.loads((run_dir / "metrics.json").read_text())
+        environment = metrics["runtime_environment"]
+        assert environment["wiser_dom_version"] == "0.4.0"
+        assert environment["numpy_version"]
+
+    comparison = pd.read_csv(tmp_path / "comparison.csv")
+    assert all(
+        json.loads(value)["runtime_environment_schema_version"] == 1
+        for value in comparison["runtime_environment"]
+    )
 
 
 @pytest.mark.parametrize(

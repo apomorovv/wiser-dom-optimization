@@ -1,8 +1,9 @@
 import pandas as pd
 import pytest
 
+from domopt import experiments
 from domopt.checkpoints import challenge_results_root
-from domopt.experiments import rank_ibm_hardware_strategies
+from domopt.experiments import rank_ibm_hardware_strategies, run_ibm_hardware_study
 from domopt.hardware import benchmark_qubo_batch_scoring, hardware_capabilities
 
 
@@ -48,7 +49,7 @@ def _ibm_results() -> pd.DataFrame:
                     "sampler_backend": "ibm-qpu",
                     "qaoa_layers": layers,
                     "hardware_mitigation_strategy": mitigation,
-                    "hardware_optimal_hit_rate": hit + seed_offset,
+                    "hardware_qubo_optimal_hit_rate": hit + seed_offset,
                     "raw_one_hot_rate": one_hot + seed_offset,
                     "search_improvement": 197.2,
                     "hardware_two_qubit_gates": gates,
@@ -69,7 +70,80 @@ def test_ibm_strategy_ranking_prioritizes_raw_exact_quality() -> None:
     assert best["hardware_mitigation_strategy"] == "dynamical_decoupling"
     assert bool(best["selected_best_observed"])
     assert best["successful_runs"] == 3
-    assert best["hardware_optimal_hit_rate"] == pytest.approx(0.24)
+    assert best["hardware_qubo_optimal_hit_rate"] == pytest.approx(0.24)
+    assert best["attempted_runs"] == 3
+    assert best["success_rate"] == pytest.approx(1.0)
+
+
+def test_ibm_strategy_ranking_handles_all_failed_qpu_attempts() -> None:
+    results = pd.DataFrame(
+        [
+            {
+                "feasible": False,
+                "sampler_backend": "ibm-qpu",
+                "qaoa_layers": 1,
+                "hardware_mitigation_strategy": "baseline",
+                "method": "failed",
+            }
+        ]
+    )
+
+    ranking = rank_ibm_hardware_strategies(results)
+
+    assert len(ranking) == 1
+    assert ranking.loc[0, "attempted_runs"] == 1
+    assert ranking.loc[0, "successful_runs"] == 0
+    assert ranking.loc[0, "success_rate"] == 0
+    assert not ranking.loc[0, "selected_best_observed"]
+
+
+def test_ibm_quick_profile_is_full_factorial_and_resumable(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_attempt(rows, problem, solver, *, experiment, level, configuration=None):
+        del problem, solver
+        settings = configuration or {}
+        calls.append(level)
+        rows.append(
+            {
+                "experiment": experiment,
+                "level": level,
+                "method": settings.get("method", "reference"),
+                "feasible": True,
+                "sampler_backend": settings.get("sampler"),
+                "qaoa_layers": settings.get("qaoa_layers"),
+                "hardware_mitigation_strategy": settings.get(
+                    "ibm_mitigation_strategy"
+                ),
+            }
+        )
+
+    monkeypatch.setattr(experiments, "_attempt", fake_attempt)
+    first = run_ibm_hardware_study(allow_remote=True, profile="quick", shots=16)
+    remote = first.loc[first["sampler_backend"].eq("ibm-qpu")]
+
+    assert len(remote) == 6
+    assert set(
+        zip(remote["qaoa_layers"], remote["hardware_mitigation_strategy"])
+    ) == {
+        (layers, mitigation)
+        for layers in (1, 2)
+        for mitigation in (
+            "baseline",
+            "dynamical_decoupling",
+            "dd_measure_twirling",
+        )
+    }
+
+    calls.clear()
+    resumed = run_ibm_hardware_study(
+        allow_remote=True,
+        profile="quick",
+        shots=16,
+        existing_results=first,
+    )
+    assert calls == []
+    assert len(resumed) == len(first)
 
 
 def test_ibm_presentation_figures_render(tmp_path, monkeypatch) -> None:

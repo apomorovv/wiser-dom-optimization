@@ -285,33 +285,38 @@ queue, sampling, repair, and recourse time.
 
 ### IBM stress matrix and selection rule
 
-The opt-in study deliberately uses the four-group, 16-logical-qubit coupled synthetic
-control whose polished-greedy assignment is known to be suboptimal. This avoids paying
+The opt-in study deliberately uses a four-group coupled synthetic control whose
+polished-greedy assignment is known to be suboptimal. Circuit width is derived from the
+actual retained QUBO instead of hardcoded. This avoids paying
 for hardware runs on a random instance where no assignment improvement is possible,
 and prevents source coefficients or identifiers from leaving the approved environment.
 
 Before submission, authenticated discovery records every accessible operational IBM
-backend with at least 16 qubits and calls IBM Runtime's `least_busy` selector. A named
+backend wide enough for that QUBO and calls IBM Runtime's `least_busy` selector. A named
 backend remains available for a controlled rerun, but the queue snapshot distinguishes
 the least-busy recommendation from the device actually selected for the study. The
-presentation profile holds the device and 512-shot budget fixed while repeating three
-seeds across four variants:
+presentation profile holds device, 512-shot budget, angle seed, and transpiler seed
+fixed while repeating hardware execution three times across all six variants:
 
 | Layers | Runtime options | Purpose |
 |---:|---|---|
 | $p=1$ | baseline | Unmitigated hardware reference |
 | $p=1$ | dynamical decoupling | Isolate idle-error suppression |
 | $p=1$ | dynamical decoupling plus measurement twirling | Test the combined readout strategy |
+| $p=2$ | baseline | Deeper unmitigated reference |
+| $p=2$ | dynamical decoupling | Isolate depth-dependent idle-error suppression |
 | $p=2$ | dynamical decoupling plus measurement twirling | Test extra ansatz depth against added hardware error |
 
 Each variant uses eight seeded transpiler trials; the circuit with the fewest two-qubit
-gates, then depth and size, is submitted. The evidence table records backend queue,
-logical qubits, transpiled depth and two-qubit cost, raw one-hot rate, exact raw hit
-rate, best feasible normalized gap, Runtime queue/execution/quantum time, repaired
-assignment gain, recourse time, and total solver time. The best-observed variant is
-ranked by median exact raw hit rate, raw feasibility, and validated gain, with quantum
-usage and end-to-end runtime used only as tie-breakers. This empirical ranking is
-reported after the run; no mitigation strategy is assumed to win in advance.
+gates, then depth and size, is submitted. The evidence table records backend queue and
+job timestamps, package versions, logical and mapped physical qubits, available
+calibration timestamp, transpiled depth and two-qubit cost, raw one-hot rate, exact
+feasible-QUBO raw hit rate, best feasible normalized gap, Runtime queue/execution/
+quantum time, compilation and decode phases, repaired assignment gain, recourse time,
+and total solver time. The best-observed successful variant is ranked by median exact
+feasible-QUBO hit rate, raw feasibility, and validated gain, with quantum usage and
+end-to-end runtime used only as tie-breakers. Failures remain in the denominator and
+are resumable. No mitigation strategy is assumed to win in advance.
 
 ## 5. Scaling
 

@@ -8,9 +8,10 @@ experimental hybrid quantum-classical search, and persists
 aggregate tables and figures. Final reports, planner PDFs, and slides are deliberately
 deferred until the full experiment profile has produced reviewed results.
 
-The production path is adaptive exact large-neighborhood search (LNS): assignment
-groups and quantity recourse are optimized jointly in bounded MILPs. In the
-experimental quantum path, a QUBO sample is only a proposal. Exact
+The measured production default is polished greedy: deterministic whole-load routing
+followed by exact fixed-assignment quantity recourse. Adaptive exact large-neighborhood
+search (LNS) is the quality escalation when coordinated reassignment is worth more
+runtime. In the experimental quantum path, a QUBO sample is only a proposal. Exact
 mixed-integer recourse rebuilds SKU quantities, an independent validator checks all
 hard constraints, and a move is accepted only when it is feasible and improves the
 current solution. A weak or noisy sampler can consume runtime, but it cannot worsen
@@ -41,16 +42,18 @@ the returned incumbent.
 - an independent objective evaluator and feasibility validator;
 - all requested experiments, business- and QUBO-penalty sweeps, and additional
   controls;
-- content-addressed notebook checkpoints under
+- stable, profile-scoped notebook checkpoints with content-hash manifests under
   `results/challenge-study/notebook/` and separate CLI evidence under
   `results/challenge-study/cli/`;
 - an opt-in synthetic CPU/GPU crossover benchmark and privacy-gated hardware tests; and
 - a runnable Jupyter notebook and aggregate-only Streamlit planner copilot.
 
-No QPU experiment has been run and no quantum advantage is claimed.
+No corrected IBM result is committed and no quantum advantage is claimed. Supplied
+historical hardware evidence is audited separately and is not publication-ready.
 
 The implementation audit, unresolved owner decisions, and method comparison are in
-[the results audit](docs/results_audit.md).
+[the results audit](docs/results_audit.md). The complete lineage decision is in the
+[branch comparison](docs/branch_comparison.md).
 
 ## Supplied-data audit boundary
 
@@ -67,12 +70,12 @@ challenge PDF, equations document, and workbook are references, not runtime inpu
 flowchart TD
     A["Readable challenge bundle"] --> B["Canonical orders, lines, candidates, resources"]
     B --> C["Feasible default or greedy incumbent"]
-    C --> D["Precomputed conflict neighborhood"]
-    D --> E["Joint exact local MILP"]
+    C --> D["Exact fixed-assignment polish"]
+    D --> E["Optional joint exact local MILP"]
     E --> F{"Validated strict improvement?"}
     F -->|Yes| C
     F -->|No| D
-    D -. research comparator .-> G["QUBO sampler plus exact recourse"]
+    E -. research comparator .-> G["QUBO sampler plus exact recourse"]
 ```
 
 The exact model assigns each order to one eligible DC/PGI option or leaves it
@@ -88,6 +91,18 @@ dock capacity, optional scenario capacity, the diversion-uplift rule, pallet/cas
 accounting, and assignment-group cohesion. See the
 [mathematical formulation](docs/mathematical_formulation.md) and
 [source mapping](docs/poc_data_mapping.md).
+
+`solve_dom` exposes the final method hierarchy through one validated API:
+
+```python
+from domopt import SolverConfig, solve_dom
+
+solution = solve_dom(problem, config=SolverConfig(mode="fast"))
+# mode="quality" enables adaptive exact LNS;
+# mode="hybrid" keeps sampler/IBM search experimental.
+```
+
+Every mode is independently validated before it can return a solution.
 
 ## Installation
 
@@ -139,32 +154,33 @@ python scripts/run_challenge_study.py \
 ```
 
 The command first validates every required file and stops on the first missing,
-unreadable, empty, malformed, nonfinite, or structurally invalid artifact. `--profile smoke` runs a short
-development grid; `--profile full` runs the evidence grid. A full run refuses an
-uncommitted worktree by default. CLI tables, manifests, and PNG charts are written
-below `results/challenge-study/cli/<profile>/`; notebook artifacts cannot overwrite
-them.
+unreadable, empty, malformed, nonfinite, or structurally invalid artifact.
+`--profile smoke` runs a short development grid; `--profile full` runs the evidence
+grid. Source provenance is always recorded without blocking execution on worktree
+state. CLI tables, manifests, and PNG charts are written below
+`results/challenge-study/cli/<profile>/`; notebook artifacts cannot overwrite them.
 
 ## Current evidence and solver choice
 
-The supplied full study produced 247 feasible rows across 14 experiment families with
-zero independent-validation violations. Those artifacts were generated from a dirty
-worktree, so their numerical conclusions are provisional until rerun from this branch.
-They nevertheless establish the production hierarchy:
+The supplied clean full study produced 247 feasible rows across 14 experiment families
+with zero reported validation violations. All 18 CSV-manifest hashes pass and its
+numeric identities reconcile within `7.5e-9`. It predates the new numeric validator
+residual fields, so a fresh run is still required for final evidence. The archive
+establishes this method hierarchy:
 
 | Method | Observed result on the common real subset | Role |
 |---|---|---|
-| Greedy | Fastest nontrivial method; slightly below the exact objective | Large-scale first incumbent |
-| Polished greedy | Matched the exact MILP in 6.63 seconds | Recommended production default |
-| Exact MILP | Same objective with a zero reported gap | Small-instance certificate |
-| Exact LNS | Same objective but slower on this subset | Assignment-search escalation when coordination exists |
-| Hybrid sampler LNS | Same objective in 28.43 seconds with zero accepted sampler moves | Research comparator only |
+| Greedy | 64.8961% objective capture in 0.755 s | Time-critical first incumbent |
+| Polished greedy | 64.9002% in 2.715 s | Recommended production default |
+| Exact MILP | Same capture in 2.518 s with zero reported gap | Small-instance certificate |
+| Exact LNS | Same capture in 6.565 s | Coordinated-assignment quality escalation |
+| Hybrid sampler LNS | Same capture in 12.149 s with zero accepted sampler moves | Research comparator only |
 
-On the largest real scaling point, median greedy and polished-greedy runtimes were
-37.5 and 133.4 seconds. Polishing improved normalized objective capture by only 0.0337
-percentage points, so greedy remains the time-critical fallback. Exact LNS now starts
-from that polished incumbent in every scaling study; it can no longer appear worse
-merely because quantity polishing was disabled.
+At 372 assignment groups/750 orders, polished greedy takes 51.779 seconds. Exact LNS
+takes 71.208 seconds and improves it by only `0.000027%`. Across
+the real scaling grid, 98.87% of LNS's aggregate gain over raw greedy comes from the
+initial polish. Hybrid is tested only through 50 groups and contributes zero post-polish
+gain in every repeated real-subset row.
 
 ## Run the notebook
 
@@ -172,8 +188,12 @@ merely because quantity polishing was disabled.
 jupyter lab notebooks/nestle_challenge_experiments.ipynb
 ```
 
-Set `NESTLE_BUNDLE_DIR` before launching Jupyter, or use the default cleaned path
-`data/raw/nestle_challenge`. The notebook performs and checkpoints:
+Use **Run All** after editing the global configuration cell immediately below the
+automatic dependency bootstrap. The kernel adds the local package and installs missing
+notebook dependencies, so no terminal commands or terminal-set environment variables
+are required. The default bundle is `data/raw/nestle_challenge`; profiles, experiment
+switches, rerun policy, GPU, and every IBM setting are together in that one cell. The
+notebook performs and checkpoints:
 
 1. strict bundle and output reconciliation audits;
 2. default, greedy, polished greedy, exact LNS, exact MILP, and hybrid comparison;
@@ -193,15 +213,17 @@ Set `NESTLE_BUNDLE_DIR` before launching Jupyter, or use the default cleaned pat
 
 All persisted experiment rows are aggregate-only.
 
-Notebook checkpoints, aggregate tables, and figures are written below
-`results/challenge-study/notebook/<profile>/<problem-hash>/<run-hash>/`.
+Notebook checkpoints, aggregate tables, and figures are written directly below the
+stable path `results/challenge-study/notebook/<profile>/`; identity and content hashes
+remain in the adjacent manifests.
 
 ## Run the IBM hardware study
 
-The opt-in hardware study first records all accessible operational backends and uses
-the least-busy eligible device unless a backend is specified. It evaluates a coupled
-synthetic instance with an exact reference, not Nestlé coefficients, and refuses a
-dirty worktree unless the run is explicitly marked provisional.
+The opt-in hardware study derives the needed logical-qubit width, records all accessible
+operational backends, and uses the least-busy eligible device unless a backend is
+specified. It evaluates a coupled synthetic instance with exact and local simulator
+references—not Nestlé coefficients. Provenance is recorded without a dirty-worktree
+gate or escape flag.
 
 ```bash
 python scripts/run_ibm_hardware_study.py \
@@ -210,13 +232,12 @@ python scripts/run_ibm_hardware_study.py \
   --shots 512
 ```
 
-It compares $p=1$ and $p=2$ Dicke/XY-QAOA, baseline execution, dynamical decoupling,
-and measurement twirling. The saved figures report raw one-hot feasibility,
-exact-optimum hit rate, validated assignment gain, circuit depth/two-qubit gates,
-queue time, execution time, quantum usage, and end-to-end runtime. A separate strategy
-ranking identifies the best observed variant from exact raw hit rate and feasibility,
-using validated gain and cost only as tie-breakers. Completed rows are written after
-every variant so a later provider failure does not erase earlier QPU evidence.
+It runs the full $p=1/p=2$ by baseline/dynamical-decoupling/DD-plus-measurement-
+twirling matrix: six QPU jobs in `quick`, eighteen in `presentation`. Saved evidence
+separates exact feasible-QUBO raw hit rate from repaired/recourse validity and records
+job IDs/timestamps, circuit cost, compilation, submit/wait, queue, execution, quantum-
+use, decode, recourse, and end-to-end timing. Successful variants resume; failed rows
+are retained and retried instead of aborting the matrix.
 
 ## Run the planner copilot
 
@@ -254,7 +275,8 @@ hybrid exact-QUBO configuration both reproduce it.
 | `src/domopt/poc.py` | runtime-bundle cleanup, audit, and source adapter |
 | `src/domopt/classical.py` | exact MILP and fixed-assignment recourse |
 | `src/domopt/hybrid.py` | adaptive exact LNS plus sampler-assisted LNS |
-| `src/domopt/checkpoints.py` | content-addressed experiment checkpoint manifests |
+| `src/domopt/solver.py` | validated `fast`, `quality`, and experimental `hybrid` entry point |
+| `src/domopt/checkpoints.py` | stable-profile checkpoints with content/identity manifests |
 | `src/domopt/validation.py` | independent feasibility authority |
 | `src/domopt/experiments.py` | complete experiment matrix |
 | `src/domopt/hardware.py` | privacy-safe hardware discovery and GPU benchmark |
