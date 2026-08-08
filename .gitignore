@@ -4,6 +4,7 @@
 __pycache__/
 *.py[cod]
 *.so
+*.egg-info/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
@@ -66,6 +67,10 @@ data/external/*
 runs/*
 !runs/.gitkeep
 
+# Keep only the reviewed, privacy-safe final evidence in Git.
+results/runs/
+results/challenge-study/
+
 logs/
 checkpoints/
 tmp/
@@ -75,6 +80,9 @@ tmp/
 # ---------------------------------------------------------
 results/private/*
 reports/private/
+reports/*.docx
+reports/*.pptx.inspect.ndjson
+reports/*/slide-*.png
 
 # ---------------------------------------------------------
 # Solver-generated files
