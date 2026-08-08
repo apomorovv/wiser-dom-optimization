@@ -58,8 +58,6 @@ optional labeled scenarios.
 
 ### Minimum diversion improvement
 
-### Minimum diversion improvement
-
 Let
 
 - $Q_o$ be the total demand of order $o$ in cases;
