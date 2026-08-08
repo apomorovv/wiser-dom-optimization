@@ -80,7 +80,7 @@ $$
 and a non-default candidate must satisfy
 
 $$
-\boxed{F_{oc}\geF_o^{\mathrm{def}}+\Delta_o^{\mathrm{div}}}.
+\boxed{F_{oc} \ge F_o^{\mathrm{def}}+\Delta_o^{\mathrm{div}}}.
 $$
 
 For the POC,
