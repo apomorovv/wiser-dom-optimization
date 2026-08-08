@@ -1,8 +1,6 @@
-# WISER Distributed Order Management Solver
+# Distributed Order Management Solver
 
 **Author:** Andrei Pomorov
-
-**Submission status:** Submission ready
 
 This repository contains a validated hybrid optimization system for the Nestlé WISER
 Quantum Challenge. It decides whether an order should remain at its default distribution
@@ -283,12 +281,6 @@ tables, checkpoints, and manifests remain excluded. The two charts containing ab
 commercial totals are also excluded. The provenance code normalizes notebooks to
 code-cell source, records relevant source dirtiness separately from general worktree
 dirtiness, and prevents output autosaves from changing checkpoint identity.
-
-The reviewed evidence was produced by source commit
-`7d087161e7d40cc7603c04e92eac71f4dbdb12ee`. Its original manifests correctly record a
-dirty worktree because Jupyter changed tracked notebook outputs during the run. The
-current provenance code fixes that identity instability. Existing results are preserved
-rather than silently relabeled as if they came from the strengthened final code.
 
 ## Documentation and submission files
 
