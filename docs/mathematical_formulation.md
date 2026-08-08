@@ -58,14 +58,45 @@ optional labeled scenarios.
 
 ### Minimum diversion improvement
 
-Let $F_o^{\mathrm{def}}$ be the default candidate's protected-ATP fill preview. The minimum non-default fill is
+### Minimum diversion improvement
+
+Let
+
+- $Q_o$ be the total demand of order $o$ in cases;
+- $F_o^{\mathrm{def}}$ be the number of cases that can be fulfilled at the default DC; and
+- $F_{oc}$ be the number of cases fulfilled if order $o$ is assigned to alternative candidate $c$.
+
+The POC requires a diversion to improve fulfillment by both:
+
+1. at least $\delta_o=5\%$ of the order demand, and
+2. at least $B_o=100$ cases.
+
+Therefore, the minimum required improvement is
 
 $$
-L_o^{\mathrm{div}}=\min\left(Q_o,\;F_o^{\mathrm{def}}+\max\left(\left\lceil \delta_o Q_o \right\rceil,\;B_o\right)\right),
+\Delta_o^{\mathrm{div}}=\max\left(\left\lceil \delta_o Q_o \right\rceil,B_o\right),
 $$
 
-where the POC uses $\delta_o = 0.05$ and $B_o = 100$ cases. Thus diversion must improve by both five percentage points and 
-100 cases, unless demand itself caps the requirement.
+and a non-default candidate must satisfy
+
+$$
+\boxed{F_{oc}\geF_o^{\mathrm{def}}+\Delta_o^{\mathrm{div}}}.
+$$
+
+For the POC,
+
+$$
+\delta_o=0.05, \qquad B_o=100.
+$$
+
+If
+
+$$
+F_o^{\mathrm{def}}+\Delta_o^{\mathrm{div}}>Q_o,
+$$
+
+then no alternative DC can satisfy the diversion-improvement rule, so the
+non-default candidate is infeasible.
 
 ## 3. Decision variables
 
