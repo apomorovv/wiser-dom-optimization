@@ -34,9 +34,6 @@
 - [x] SciPy/HiGHS remains the default on every operating system.
 - [x] Gurobi and GPU dependencies are optional and isolated.
 - [x] Remote QPU execution requires explicit approval.
-- [x] The report states that current IBM evidence does not demonstrate quantum advantage.
 - [x] The final circuit improvements are not attributed to hardware results that predate them.
 - [x] Internal branch comparison, results-audit, planner-copilot, placeholder job, and
   duplicate runner files are removed.
-- [x] Andrei Pomorov is identified as the sole author in package metadata and every
-  submission-facing artifact.
