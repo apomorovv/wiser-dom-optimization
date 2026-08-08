@@ -136,17 +136,34 @@ def current_source_state() -> dict[str, object]:
                 "notebooks",
             }
 
+        def normalize_newlines(content: bytes) -> bytes:
+            """Canonicalize text line endings so source identity is OS-independent."""
+
+            return content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+        def normalize_notebook_source(source: object) -> object:
+            if isinstance(source, str):
+                return source.replace("\r\n", "\n").replace("\r", "\n")
+            if isinstance(source, list):
+                return [
+                    item.replace("\r\n", "\n").replace("\r", "\n")
+                    if isinstance(item, str)
+                    else item
+                    for item in source
+                ]
+            return source
+
         def normalized(relative: str, content: bytes | None) -> bytes:
             if content is None:
                 return b"<deleted>"
             if Path(relative).suffix.lower() != ".ipynb":
-                return content
+                return normalize_newlines(content)
             try:
                 notebook = json.loads(content.decode("utf-8"))
                 code_cells = [
                     {
                         "cell_type": "code",
-                        "source": cell.get("source", []),
+                        "source": normalize_notebook_source(cell.get("source", [])),
                     }
                     for cell in notebook.get("cells", [])
                     if cell.get("cell_type") == "code"
@@ -158,7 +175,7 @@ def current_source_state() -> dict[str, object]:
                     ensure_ascii=False,
                 ).encode("utf-8")
             except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
-                return content
+                return normalize_newlines(content)
 
         tracked_names = {
             name.decode("utf-8", errors="surrogateescape")
