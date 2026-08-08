@@ -33,9 +33,8 @@ On the common 20-assignment-group real-data subset:
 | Hybrid simulated annealing | 64.90% | 68.50% | 12.88 s | Experimental comparator |
 
 Objective capture is the achieved objective divided by the total requested merchandise
-value. Case fill is fulfilled cases divided by requested cases. The raw objective is:
-
-The optimization objective is:
+value. Case fill is fulfilled cases divided by requested cases. The optimization
+objective is:
 
 $$
 \text{fulfilled value} - \text{unmet-demand penalty} - \text{shipping cost}.
