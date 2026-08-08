@@ -16,3 +16,4 @@ def test_planner_view_explains_tiny_diversion() -> None:
     assert diverted.iloc[0]["screened_alternative_dc"] is not None
     assert "modeled resource" in diverted.iloc[0]["binding_constraint_note"].lower()
     assert "reoptimize" in diverted.iloc[0]["alternative_review_note"].lower()
+

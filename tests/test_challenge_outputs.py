@@ -47,3 +47,4 @@ def test_challenge_output_summary_is_aggregate_only() -> None:
     assert summary["diverted_orders"] == 1
     assert summary["contains_raw_identifiers"] is False
     assert "private-order" not in str(summary)
+

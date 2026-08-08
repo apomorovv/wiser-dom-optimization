@@ -120,3 +120,4 @@ def generate_candidates(
         )
     return filter_feasible_candidates(candidates, orders=orders, calendar=calendar)
 
+

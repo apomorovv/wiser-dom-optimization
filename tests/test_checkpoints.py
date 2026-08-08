@@ -55,7 +55,7 @@ def test_checkpoint_round_trip_uses_stable_profile_directory(tmp_path: Path) -> 
     assert run_dir == tmp_path / "smoke"
     assert identity["checkpoint_schema_version"] == CHECKPOINT_SCHEMA_VERSION
     assert identity["experiment_schema_version"] == EXPERIMENT_SCHEMA_VERSION
-    assert identity["runtime_environment"]["wiser_dom_version"] == "0.4.0"
+    assert identity["runtime_environment"]["wiser_dom_version"] == "0.5.0"
 
 
 def test_checkpoint_rejects_changed_profile_or_configuration(tmp_path: Path) -> None:

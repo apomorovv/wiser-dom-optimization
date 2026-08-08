@@ -1066,7 +1066,9 @@ def run_ibm_hardware_study(
         local_angle_seeds = (6,)
         hardware_repetitions = (1,)
     elif normalized == "presentation":
-        local_angle_seeds = (3, 11, 29)
+        # Seed 6 is the matched local control for every QPU job. Additional
+        # seeds measure local parameter sensitivity without changing hardware.
+        local_angle_seeds = (6, 3, 11, 29)
         hardware_repetitions = (1, 2, 3)
     else:
         raise ValueError("IBM hardware profile must be 'quick' or 'presentation'")
@@ -1146,6 +1148,7 @@ def run_ibm_hardware_study(
                 sampler="qaoa_statevector",
                 num_reads=shots,
                 qaoa_layers=layers,
+                qaoa_mixer_topology="path",
                 seed=seed,
                 allow_remote=False,
             )
@@ -1156,6 +1159,7 @@ def run_ibm_hardware_study(
                     "method": "local_qaoa",
                     "sampler": "qaoa_statevector",
                     "qaoa_layers": layers,
+                    "qaoa_mixer_topology": "path",
                     "angle_seed": seed,
                     "shots": shots,
                     "data_scope": "independently generated coupled synthetic control",
@@ -1171,6 +1175,7 @@ def run_ibm_hardware_study(
                 sampler="ibm-qpu",
                 num_reads=shots,
                 qaoa_layers=layers,
+                qaoa_mixer_topology="path",
                 seed=angle_seed,
                 allow_remote=True,
                 remote_time_limit_seconds=180.0,
@@ -1191,6 +1196,7 @@ def run_ibm_hardware_study(
                     "method": "ibm_qaoa",
                     "sampler": "ibm-qpu",
                     "qaoa_layers": layers,
+                    "qaoa_mixer_topology": "path",
                     "angle_seed": angle_seed,
                     "transpiler_seed": transpiler_seed,
                     "hardware_repetition": hardware_repetition,
@@ -1208,11 +1214,12 @@ def run_ibm_hardware_study(
 def rank_ibm_hardware_strategies(results: pd.DataFrame) -> pd.DataFrame:
     """Rank successful IBM variants using quality first and cost as a tie-breaker.
 
-    Exact feasible-QUBO raw hit rate is the primary hardware outcome. Raw one-hot
-    feasibility is next because repaired assignments are not evidence of native
-    constraint preservation. Validated assignment gain then confirms end-to-end
-    usefulness; quantum usage and wall time break remaining ties. Presentation
-    profiles report medians and interquartile ranges across seeds.
+    The near-optimal feasible-sample rate is the primary outcome because it is
+    less brittle than a rare exact hit. Exact hit rate and native one-hot
+    feasibility follow; repaired assignments are not evidence of native
+    constraint preservation. Mean feasible normalized gap, validated assignment
+    gain, quantum usage, and wall time break remaining ties. Presentation
+    profiles report medians and interquartile ranges across repetitions.
     """
 
     required = {
@@ -1225,7 +1232,9 @@ def rank_ibm_hardware_strategies(results: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"IBM hardware results are missing {sorted(missing)}")
     results = results.copy()
     for column in [
+        "hardware_qubo_near_optimal_1pct_rate",
         "hardware_qubo_optimal_hit_rate",
+        "hardware_mean_feasible_normalized_gap",
         "raw_one_hot_rate",
         "search_improvement",
         "hardware_two_qubit_gates",
@@ -1248,7 +1257,9 @@ def rank_ibm_hardware_strategies(results: pd.DataFrame) -> pd.DataFrame:
 
     group_columns = ["qaoa_layers", "hardware_mitigation_strategy"]
     measures = [
+        "hardware_qubo_near_optimal_1pct_rate",
         "hardware_qubo_optimal_hit_rate",
+        "hardware_mean_feasible_normalized_gap",
         "raw_one_hot_rate",
         "search_improvement",
         "hardware_two_qubit_gates",
@@ -1269,6 +1280,7 @@ def rank_ibm_hardware_strategies(results: pd.DataFrame) -> pd.DataFrame:
             summary[measure] = np.nan
         summary["successful_runs"] = 0
         for measure in [
+            "hardware_qubo_near_optimal_1pct_rate",
             "hardware_qubo_optimal_hit_rate",
             "raw_one_hot_rate",
             "runtime_seconds",
@@ -1282,6 +1294,7 @@ def rank_ibm_hardware_strategies(results: pd.DataFrame) -> pd.DataFrame:
         summary = attempted.merge(successful, on=group_columns, how="left")
         summary["successful_runs"] = summary["successful_runs"].fillna(0).astype(int)
         for measure in [
+            "hardware_qubo_near_optimal_1pct_rate",
             "hardware_qubo_optimal_hit_rate",
             "raw_one_hot_rate",
             "runtime_seconds",
@@ -1304,8 +1317,10 @@ def rank_ibm_hardware_strategies(results: pd.DataFrame) -> pd.DataFrame:
     )
     summary = summary.sort_values(
         [
+            "hardware_qubo_near_optimal_1pct_rate",
             "hardware_qubo_optimal_hit_rate",
             "raw_one_hot_rate",
+            "hardware_mean_feasible_normalized_gap",
             "search_improvement",
             "hardware_quantum_seconds",
             "runtime_seconds",
@@ -1313,7 +1328,7 @@ def rank_ibm_hardware_strategies(results: pd.DataFrame) -> pd.DataFrame:
             "qaoa_layers",
             "hardware_mitigation_strategy",
         ],
-        ascending=[False, False, False, True, True, True, True, True],
+        ascending=[False, False, False, True, False, True, True, True, True, True],
         kind="mergesort",
         na_position="last",
     ).reset_index(drop=True)

@@ -38,7 +38,8 @@ Implementation mapping:
 
 ## Canonical tables
 
-The canonical contract is defined in [`../docs/data_dictionary.md`](../docs/data_dictionary.md). Initial datasets should contain:
+The canonical contract is defined in the [data guide](../docs/data_guide.md). Initial
+datasets should contain:
 
 - `orders.csv`
 - `order_lines.csv`

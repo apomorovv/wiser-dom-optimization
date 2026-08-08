@@ -234,3 +234,4 @@ def test_randomized_multisku_milp_penalty_matches_evaluator() -> None:
         assert validate_solution(problem, solution).is_feasible
         assert evaluated.penalty_cost == pytest.approx(expected)
         assert solution.raw_objective == pytest.approx(evaluated.objective_value)
+

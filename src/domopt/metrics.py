@@ -96,6 +96,7 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
         **validation.diagnostics,
         "best_bound": solution.metadata.get("best_bound"),
         "optimality_gap": solution.metadata.get("optimality_gap"),
+        "milp_backend": solution.metadata.get("milp_backend"),
         "initial_objective": solution.metadata.get("initial_objective"),
         "hybrid_improvement": (
             solution.metadata.get("improvement")
@@ -221,11 +222,42 @@ def compute_metrics(problem: ProblemData, solution: Solution) -> dict[str, Any]:
         "hardware_qubo_optimal_hit_rate_given_feasible": solution.metadata.get(
             "hardware_qubo_optimal_hit_rate_given_feasible"
         ),
+        "hardware_qubo_near_optimal_1pct_rate": solution.metadata.get(
+            "hardware_qubo_near_optimal_1pct_rate"
+        ),
+        "hardware_mean_feasible_normalized_gap": solution.metadata.get(
+            "hardware_mean_feasible_normalized_gap"
+        ),
+        "hardware_uniform_feasible_optimal_rate": solution.metadata.get(
+            "hardware_uniform_feasible_optimal_rate"
+        ),
+        "hardware_uniform_feasible_near_optimal_1pct_rate": solution.metadata.get(
+            "hardware_uniform_feasible_near_optimal_1pct_rate"
+        ),
+        "hardware_uniform_feasible_mean_normalized_gap": solution.metadata.get(
+            "hardware_uniform_feasible_mean_normalized_gap"
+        ),
+        "hardware_qaoa_parameter_cache_hits": solution.metadata.get(
+            "hardware_qaoa_parameter_cache_hits"
+        ),
+        "qaoa_mixer_topology": solution.metadata.get("qaoa_mixer_topology"),
         "hardware_best_feasible_normalized_gap": solution.metadata.get(
             "hardware_best_feasible_normalized_gap"
         ),
         "accepted_moves": solution.metadata.get("accepted_moves"),
         "raw_one_hot_rate": solution.metadata.get("raw_one_hot_rate"),
+        "sample_qubo_optimal_hit_rate": solution.metadata.get(
+            "sample_qubo_optimal_hit_rate"
+        ),
+        "sample_qubo_near_optimal_1pct_rate": solution.metadata.get(
+            "sample_qubo_near_optimal_1pct_rate"
+        ),
+        "sample_mean_feasible_normalized_gap": solution.metadata.get(
+            "sample_mean_feasible_normalized_gap"
+        ),
+        "uniform_feasible_optimal_rate": solution.metadata.get(
+            "uniform_feasible_optimal_rate"
+        ),
         "hybrid_iterations": solution.metadata.get("iterations"),
         "maximum_qubo_variables": solution.metadata.get("maximum_qubo_variables"),
         "maximum_candidates_per_order": solution.metadata.get(

@@ -172,3 +172,4 @@ def summarize_challenge_outputs(
                 .sum()
             )
     return result
+

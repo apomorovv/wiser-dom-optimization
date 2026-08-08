@@ -96,3 +96,4 @@ def test_validator_rejects_invalid_booleans_and_nonfinite_quantities() -> None:
     assert not result.is_feasible
     assert any("expected a boolean" in item for item in result.schema_violations)
     assert any("nonfinite quantities" in item for item in result.demand_violations)
+

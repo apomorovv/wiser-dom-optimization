@@ -42,3 +42,4 @@ def selected_plans(sample: dict[str, int] | pd.Series) -> list[str]:
     return sorted(str(name) for name, value in sample.items() if int(value) == 1)
 
 
+

@@ -169,3 +169,4 @@ def total_penalty(problem: ProblemData, quantities: pd.DataFrame) -> float:
     for order_id, group in quantities.groupby("order_id", sort=False):
         total += order_penalty(problem, str(order_id), group, context=context)
     return float(total)
+

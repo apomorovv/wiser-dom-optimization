@@ -1,85 +1,36 @@
 # Results
 
-This directory is reserved for aggregate tables, figures, and planner-facing summaries.
-Raw per-order solver artifacts still belong in ignored `runs/` directories.
-Historical pre-LNS snapshots have been removed; only newly generated, manifest-verified
-evidence should be considered for publication.
+`final/figures/` contains the screened figure bundle for submission. Generated reruns
+and their evidence tables belong under ignored `results/challenge-study/` or
+`results/runs/` paths until they have been audited.
 
-## Suggested structure
+## Bundle contents
 
-```text
-results/
-  challenge-study/
-    cli/
-      full/
-        aggregate_results.csv
-        aggregate_results.manifest.json
-        figures/
-    notebook/
-      <profile>/
-        aggregate_results.csv
-        aggregate_results.manifest.json
-        tables/
-        figures/
-      ibm-quick/
-        tables/
-        figures/
-  planner/
-    synthetic_planner_example.md
+| Path | Contents |
+|---|---|
+| `final/figures/` | Aggregate normalized summaries, scaling, robustness, coordination, and QAOA figures |
+| `final/ibm/figures/` | Synthetic IBM hardware and queue-control figures |
+
+The underlying CSV/JSON evidence, checkpoint manifests, IBM job tables, backend
+snapshots, strategy rankings, solver logs, and checkpoints remain local-only. The two
+charts that expose absolute commercial objective or cost totals are also excluded.
+These private files are not needed to run the repository or review the submission
+narrative.
+
+The final paper, summary, planner view, and presentation contain screened aggregate
+metrics. Synthetic controls demonstrate the execution and validation workflow, not
+business impact or quantum advantage.
+
+## Reproducing or replacing evidence
+
+Run the smoke profile first to create a new local evidence bundle:
+
+```bash
+python scripts/run_challenge_study.py \
+  --bundle-dir data/raw/nestle_challenge \
+  --profile smoke
 ```
 
-`challenge-study/` is ignored by Git until a human selects publication-safe aggregates.
-Separating `cli` from `notebook` prevents either execution surface from loading or
-overwriting the other's checkpoints.
-
-## Required provenance
-
-Every final result must identify:
-
-- experiment ID;
-- dataset ID;
-- git commit;
-- assumption version;
-- method configuration;
-- source-state hash and dirty/clean provenance;
-- runtime-environment versions; and
-- stable profile directory.
-
-## Required comparison columns
-
-```text
-method
-feasible
-objective_value
-fulfilled_value
-penalty_cost
-shipping_cost
-case_fill_rate
-value_fill_rate
-reassigned_orders
-runtime_seconds
-optimality_gap
-```
-
-Do not rank infeasible solutions by objective value as though they were valid.
-
-## Planner output
-
-A planner-facing recommendation should state:
-
-- order;
-- default DC;
-- recommended DC;
-- default and recommended fill;
-- incremental fulfilled cases or value;
-- penalty avoided;
-- shipping-cost change;
-- net objective change;
-- delivery-date status;
-- main binding constraint or reason;
-- next-best feasible option when available.
-
-Use synthetic or approved anonymized examples only.
-
-`scripts/run_scaling_study.py` can create a repeated synthetic scaling table in a chosen
-output directory. Do not mix those objectives with real challenge evidence.
+Then run `full`. Do not overwrite the published figures automatically. Review
+feasibility, residuals, manifests, privacy, source state, and figure consistency before
+promoting any new privacy-safe figures.

@@ -269,3 +269,4 @@ def test_exact_pallet_and_loose_case_capacity_accounting() -> None:
     assert usage[("D1", pd.Timestamp("2026-07-14"), "case_pick")] == 3
     assert usage[("D2", pd.Timestamp("2026-07-14"), "pallet_pick")] == 1
     assert usage[("D2", pd.Timestamp("2026-07-14"), "case_pick")] == 2
+

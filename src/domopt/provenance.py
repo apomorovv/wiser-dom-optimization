@@ -9,9 +9,9 @@ from importlib.metadata import PackageNotFoundError, version
 
 from . import __version__
 
-RUNTIME_ENVIRONMENT_SCHEMA_VERSION = 1
-EXPERIMENT_SCHEMA_VERSION = 5
-CHECKPOINT_SCHEMA_VERSION = 3
+RUNTIME_ENVIRONMENT_SCHEMA_VERSION = 2
+EXPERIMENT_SCHEMA_VERSION = 6
+CHECKPOINT_SCHEMA_VERSION = 4
 
 
 def _distribution_version(distribution: str) -> str | None:
@@ -44,6 +44,7 @@ def runtime_environment() -> dict[str, int | str | None]:
         "qiskit_ibm_runtime_version": _distribution_version(
             "qiskit-ibm-runtime"
         ),
+        "gurobipy_version": _distribution_version("gurobipy"),
     }
 
 

@@ -181,3 +181,4 @@ def solution_inventory_usage(
             if pgi_date <= checkpoint:
                 result[(dc_id, sku_id, checkpoint)] += quantity
     return dict(result)
+

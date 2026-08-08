@@ -50,3 +50,4 @@ def test_tiny_objective_breakdown_is_exact() -> None:
     assert objective.objective_value == pytest.approx(126.0)
 
 
+

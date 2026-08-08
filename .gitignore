@@ -67,8 +67,8 @@ data/external/*
 runs/*
 !runs/.gitkeep
 
-# CLI and notebook evidence are separated by producer below this root.
-# Keep only reviewed, intentionally selected aggregates in Git.
+# Keep only the reviewed, privacy-safe final evidence in Git.
+results/runs/
 results/challenge-study/
 
 logs/
@@ -80,6 +80,7 @@ tmp/
 # ---------------------------------------------------------
 results/private/*
 reports/private/
+reports/*.docx
 reports/*.pptx.inspect.ndjson
 reports/*/slide-*.png
 

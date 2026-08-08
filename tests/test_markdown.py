@@ -34,3 +34,4 @@ def test_markdown_uses_github_math_delimiters() -> None:
         assert "\\[" not in text and "\\]" not in text, (
             f"{path}: use $$...$$ for display GitHub math"
         )
+

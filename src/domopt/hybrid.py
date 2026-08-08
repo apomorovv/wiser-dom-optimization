@@ -66,6 +66,8 @@ class HybridConfig:
     polish_initial_incumbent: bool = True
     qaoa_layers: int = 1
     qaoa_restarts: int = 4
+    qaoa_mixer_topology: str = "path"
+    qaoa_parameters: tuple[float, ...] | None = None
     qaoa_readout_bitflip_probability: float = 0.0
     max_feasible_states: int = 65_536
     ibm_backend_name: str | None = None
@@ -102,6 +104,10 @@ class HybridConfig:
             raise ValueError("batch_strategy must be 'conflict' or 'random'")
         if self.qaoa_layers <= 0 or self.qaoa_restarts <= 0:
             raise ValueError("QAOA layers and restarts must be positive")
+        if self.qaoa_mixer_topology not in {"path", "ring"}:
+            raise ValueError("qaoa_mixer_topology must be 'path' or 'ring'")
+        if self.qaoa_parameters is not None and len(self.qaoa_parameters) != 2 * self.qaoa_layers:
+            raise ValueError("qaoa_parameters must contain two values per QAOA layer")
         if not 0 <= self.qaoa_readout_bitflip_probability <= 1:
             raise ValueError(
                 "qaoa_readout_bitflip_probability must be between zero and one"
@@ -1307,6 +1313,7 @@ def solve_hybrid(
     sampling_seconds = 0.0
     sample_decode_repair_seconds = 0.0
     recourse_seconds = 0.0
+    sampler_runs: list[dict[str, object]] = []
     hardware_runs: list[dict[str, object]] = []
 
     neighborhood_index = _build_neighborhood_index(problem)
@@ -1352,6 +1359,8 @@ def solve_hybrid(
             time_limit_seconds=settings.remote_time_limit_seconds,
             qaoa_layers=settings.qaoa_layers,
             qaoa_restarts=settings.qaoa_restarts,
+            qaoa_mixer_topology=settings.qaoa_mixer_topology,
+            qaoa_parameters=settings.qaoa_parameters,
             qaoa_readout_bitflip_probability=(
                 settings.qaoa_readout_bitflip_probability
             ),
@@ -1366,8 +1375,10 @@ def solve_hybrid(
         )
         sampling_seconds += perf_counter() - sampling_start
         sampler_info = samples.attrs.get("sampler_info")
-        if isinstance(sampler_info, dict) and sampler_info.get("remote"):
-            hardware_runs.append(dict(sampler_info))
+        if isinstance(sampler_info, dict):
+            sampler_runs.append(dict(sampler_info))
+            if sampler_info.get("remote"):
+                hardware_runs.append(dict(sampler_info))
         sampler_calls += 1
         total_raw_samples += len(samples)
 
@@ -1471,6 +1482,13 @@ def solve_hybrid(
             str(run[key])
             for run in hardware_runs
             if run.get(key) not in {None, ""}
+        ]
+
+    def sampler_values(key: str) -> list[float]:
+        return [
+            float(run[key])
+            for run in sampler_runs
+            if isinstance(run.get(key), (int, float, np.integer, np.floating))
         ]
 
     backend_names = sorted(
@@ -1646,6 +1664,51 @@ def solve_hybrid(
                 if hardware_values("hardware_qubo_optimal_hit_rate")
                 else None
             ),
+            "hardware_qubo_near_optimal_1pct_rate": (
+                float(
+                    np.mean(
+                        hardware_values("hardware_qubo_near_optimal_1pct_rate")
+                    )
+                )
+                if hardware_values("hardware_qubo_near_optimal_1pct_rate")
+                else None
+            ),
+            "hardware_mean_feasible_normalized_gap": (
+                float(
+                    np.mean(
+                        hardware_values("hardware_mean_feasible_normalized_gap")
+                    )
+                )
+                if hardware_values("hardware_mean_feasible_normalized_gap")
+                else None
+            ),
+            "hardware_uniform_feasible_optimal_rate": (
+                float(np.mean(hardware_values("uniform_feasible_optimal_rate")))
+                if hardware_values("uniform_feasible_optimal_rate")
+                else None
+            ),
+            "hardware_uniform_feasible_near_optimal_1pct_rate": (
+                float(
+                    np.mean(
+                        hardware_values("uniform_feasible_near_optimal_1pct_rate")
+                    )
+                )
+                if hardware_values("uniform_feasible_near_optimal_1pct_rate")
+                else None
+            ),
+            "hardware_uniform_feasible_mean_normalized_gap": (
+                float(
+                    np.mean(
+                        hardware_values("uniform_feasible_mean_normalized_gap")
+                    )
+                )
+                if hardware_values("uniform_feasible_mean_normalized_gap")
+                else None
+            ),
+            "hardware_qaoa_parameter_cache_hits": sum(
+                1 for run in hardware_runs if bool(run.get("qaoa_parameter_cache_hit"))
+            ),
+            "qaoa_mixer_topology": settings.qaoa_mixer_topology,
             "hardware_qubo_optimal_hit_rate_given_feasible": (
                 float(
                     np.mean(
@@ -1684,6 +1747,26 @@ def solve_hybrid(
             ),
             "raw_one_hot_rate": (
                 raw_one_hot_samples / total_raw_samples if total_raw_samples else 0.0
+            ),
+            "sample_qubo_optimal_hit_rate": (
+                float(np.mean(sampler_values("sample_qubo_optimal_hit_rate")))
+                if sampler_values("sample_qubo_optimal_hit_rate")
+                else None
+            ),
+            "sample_qubo_near_optimal_1pct_rate": (
+                float(np.mean(sampler_values("sample_qubo_near_optimal_1pct_rate")))
+                if sampler_values("sample_qubo_near_optimal_1pct_rate")
+                else None
+            ),
+            "sample_mean_feasible_normalized_gap": (
+                float(np.mean(sampler_values("sample_mean_feasible_normalized_gap")))
+                if sampler_values("sample_mean_feasible_normalized_gap")
+                else None
+            ),
+            "uniform_feasible_optimal_rate": (
+                float(np.mean(sampler_values("uniform_feasible_optimal_rate")))
+                if sampler_values("uniform_feasible_optimal_rate")
+                else None
             ),
             "remote_enabled": settings.allow_remote,
             "qubo_noise_relative_sigma": settings.qubo_noise_relative_sigma,

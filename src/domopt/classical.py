@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from importlib.util import find_spec
 from time import perf_counter
 from typing import Any
 
@@ -25,6 +26,179 @@ from .schemas import ProblemData, Solution
 
 class ClassicalSolverError(RuntimeError):
     """Raised when the MILP cannot produce a usable solution."""
+
+
+@dataclass(frozen=True)
+class _MILPResult:
+    """Backend-independent result from one compiled linear mixed-integer model."""
+
+    x: np.ndarray
+    fun: float
+    status: int
+    message: str
+    success: bool
+    best_bound: float | None
+    mip_gap: float | None
+    mip_node_count: float | None
+    solver: str
+    backend: str
+
+
+def available_milp_backends() -> dict[str, bool]:
+    """Report installed MILP adapters without opening a commercial license.
+
+    ``scipy-highs`` is always available because SciPy is a core dependency.
+    A true ``gurobi`` value means that ``gurobipy`` is importable; a usable
+    local or remote Gurobi license is still checked only when it is selected.
+    """
+
+    return {
+        "scipy-highs": True,
+        "gurobi": find_spec("gurobipy") is not None,
+    }
+
+
+def _solve_compiled_milp(
+    *,
+    backend: str,
+    objective: np.ndarray,
+    integrality: np.ndarray,
+    lower_bounds: np.ndarray,
+    upper_bounds: np.ndarray,
+    matrix: Any,
+    constraint_lower: np.ndarray,
+    constraint_upper: np.ndarray,
+    time_limit_seconds: float,
+    mip_relative_gap: float,
+    seed: int | None,
+) -> _MILPResult:
+    normalized = str(backend).strip().lower().replace("_", "-")
+    if normalized in {"scipy", "highs", "scipy-highs"}:
+        options: dict[str, Any] = {
+            "time_limit": float(time_limit_seconds),
+            "mip_rel_gap": float(mip_relative_gap),
+            "presolve": True,
+        }
+        result = milp(
+            c=objective,
+            integrality=integrality,
+            bounds=Bounds(lower_bounds, upper_bounds),
+            constraints=LinearConstraint(
+                matrix,
+                constraint_lower,
+                constraint_upper,
+            ),
+            options=options,
+        )
+        if result.x is None:
+            raise ClassicalSolverError(
+                "HiGHS returned no incumbent. "
+                f"status={result.status}, message={result.message}"
+            )
+        if not bool(result.success) and int(result.status) not in {1}:
+            raise ClassicalSolverError(
+                f"HiGHS failed. status={result.status}, message={result.message}"
+            )
+        return _MILPResult(
+            x=np.asarray(result.x, dtype=float),
+            fun=float(result.fun),
+            status=int(result.status),
+            message=str(result.message),
+            success=bool(result.success),
+            best_bound=(
+                None
+                if getattr(result, "mip_dual_bound", None) is None
+                else float(result.mip_dual_bound)
+            ),
+            mip_gap=(
+                None
+                if getattr(result, "mip_gap", None) is None
+                else float(result.mip_gap)
+            ),
+            mip_node_count=getattr(result, "mip_node_count", None),
+            solver="scipy.optimize.milp/HiGHS",
+            backend="scipy-highs",
+        )
+
+    if normalized != "gurobi":
+        raise ClassicalSolverError(
+            "Unknown MILP backend. Choose 'scipy-highs' (default) or 'gurobi'."
+        )
+    try:
+        import gurobipy as gp
+        from gurobipy import GRB
+    except ImportError as error:
+        raise ClassicalSolverError(
+            "The optional Gurobi backend requires `pip install -e '.[gurobi]'` "
+            "and a valid Gurobi license. SciPy/HiGHS remains the default."
+        ) from error
+
+    try:
+        gurobi = gp.Model("wiser-dom")
+        gurobi.Params.OutputFlag = 0
+        gurobi.Params.TimeLimit = float(time_limit_seconds)
+        gurobi.Params.MIPGap = float(mip_relative_gap)
+        if seed is not None:
+            gurobi.Params.Seed = int(seed)
+        lower = np.where(np.isfinite(lower_bounds), lower_bounds, -GRB.INFINITY)
+        upper = np.where(np.isfinite(upper_bounds), upper_bounds, GRB.INFINITY)
+        variable_types = np.where(integrality.astype(bool), GRB.INTEGER, GRB.CONTINUOUS)
+        variables = gurobi.addMVar(
+            len(objective),
+            lb=lower,
+            ub=upper,
+            obj=objective,
+            vtype=variable_types.tolist(),
+            name="v",
+        )
+        equality = np.isfinite(constraint_lower) & np.isfinite(constraint_upper) & np.isclose(
+            constraint_lower, constraint_upper, rtol=0.0, atol=1e-12
+        )
+        upper_rows = np.isfinite(constraint_upper) & ~equality
+        lower_rows = np.isfinite(constraint_lower) & ~equality
+        if bool(equality.any()):
+            gurobi.addMConstr(
+                matrix[equality], variables, "=", constraint_lower[equality], name="eq"
+            )
+        if bool(upper_rows.any()):
+            gurobi.addMConstr(
+                matrix[upper_rows], variables, "<", constraint_upper[upper_rows], name="ub"
+            )
+        if bool(lower_rows.any()):
+            gurobi.addMConstr(
+                matrix[lower_rows], variables, ">", constraint_lower[lower_rows], name="lb"
+            )
+        gurobi.ModelSense = GRB.MINIMIZE
+        gurobi.optimize()
+        if int(gurobi.SolCount) <= 0:
+            raise ClassicalSolverError(
+                f"Gurobi returned no incumbent. status={int(gurobi.Status)}"
+            )
+        status_names = {
+            GRB.OPTIMAL: "optimal",
+            GRB.TIME_LIMIT: "time limit with incumbent",
+            GRB.SUBOPTIMAL: "suboptimal incumbent",
+            GRB.INTERRUPTED: "interrupted with incumbent",
+        }
+        return _MILPResult(
+            x=np.asarray(variables.X, dtype=float),
+            fun=float(gurobi.ObjVal),
+            status=int(gurobi.Status),
+            message=status_names.get(gurobi.Status, f"Gurobi status {gurobi.Status}"),
+            success=int(gurobi.Status) == int(GRB.OPTIMAL),
+            best_bound=float(gurobi.ObjBound),
+            mip_gap=float(gurobi.MIPGap),
+            mip_node_count=float(gurobi.NodeCount),
+            solver=f"gurobipy/Gurobi {gp.gurobi.version()}",
+            backend="gurobi",
+        )
+    except ClassicalSolverError:
+        raise
+    except gp.GurobiError as error:
+        raise ClassicalSolverError(
+            "Gurobi could not start or solve the model. Confirm that a compatible "
+            f"license is available. Original error: {error}"
+        ) from error
 
 
 @dataclass
@@ -54,20 +228,23 @@ class _RowBuilder:
 def solve_classical(
     problem: ProblemData,
     *,
+    backend: str = "scipy-highs",
     time_limit_seconds: float = 60.0,
     mip_relative_gap: float = 0.0,
     seed: int | None = None,
     fixed_assignments: Mapping[str, str | None] | None = None,
 ) -> Solution:
-    """Solve the detailed DOM MILP with HiGHS through SciPy.
+    """Solve the detailed DOM MILP with a selected interchangeable backend.
 
     fixed_assignments turns the model into an exact fulfillment-recourse
     problem. A value is either a candidate ID or None for no assignment.
     The hybrid optimizer uses this bounded recourse mode after sampling a local
     assignment QUBO.
 
-    seed is recorded for experiment consistency. SciPy's portable HiGHS
-    interface does not currently expose a random-seed option.
+    ``scipy-highs`` is the portable, license-free default. ``gurobi`` is an
+    optional adapter for controlled comparisons and is never selected
+    implicitly. Seed is recorded for experiment consistency; SciPy's portable
+    HiGHS interface does not currently expose a random-seed option.
     """
 
     recorded_seed = seed
@@ -696,31 +873,19 @@ def solve_classical(
         (constraints.data, (constraints.rows, constraints.cols)),
         shape=(constraints.row_count, n_variables),
     ).tocsr()
-    options: dict[str, Any] = {
-        "time_limit": float(time_limit_seconds),
-        "mip_rel_gap": float(mip_relative_gap),
-        "presolve": True,
-    }
-    result = milp(
-        c=objective,
+    result = _solve_compiled_milp(
+        backend=backend,
+        objective=objective,
         integrality=integrality,
-        bounds=Bounds(lower_bounds, upper_bounds),
-        constraints=LinearConstraint(
-            matrix,
-            np.asarray(constraints.lower, dtype=float),
-            np.asarray(constraints.upper, dtype=float),
-        ),
-        options=options,
+        lower_bounds=lower_bounds,
+        upper_bounds=upper_bounds,
+        matrix=matrix,
+        constraint_lower=np.asarray(constraints.lower, dtype=float),
+        constraint_upper=np.asarray(constraints.upper, dtype=float),
+        time_limit_seconds=time_limit_seconds,
+        mip_relative_gap=mip_relative_gap,
+        seed=seed,
     )
-
-    if result.x is None:
-        raise ClassicalSolverError(
-            f"MILP returned no solution. status={result.status}, message={result.message}"
-        )
-    if not bool(result.success) and int(result.status) not in {1}:
-        raise ClassicalSolverError(
-            f"MILP failed. status={result.status}, message={result.message}"
-        )
 
     values = np.asarray(result.x, dtype=float)
     default_lookup = orders.set_index("order_id")["default_dc"].astype(str).to_dict()
@@ -793,14 +958,8 @@ def solve_classical(
             }
         )
 
-    best_bound = (
-        None
-        if getattr(result, "mip_dual_bound", None) is None
-        else -float(result.mip_dual_bound)
-    )
-    optimality_gap = (
-        None if getattr(result, "mip_gap", None) is None else float(result.mip_gap)
-    )
+    best_bound = None if result.best_bound is None else -float(result.best_bound)
+    optimality_gap = result.mip_gap
     return Solution(
         method="classical",
         assignments=pd.DataFrame(assignment_rows),
@@ -808,12 +967,13 @@ def solve_classical(
         runtime_seconds=perf_counter() - start,
         raw_objective=-float(result.fun),
         metadata={
-            "solver": "scipy.optimize.milp/HiGHS",
+            "solver": result.solver,
+            "milp_backend": result.backend,
             "status": int(result.status),
             "message": str(result.message),
             "best_bound": best_bound,
             "optimality_gap": optimality_gap,
-            "mip_node_count": getattr(result, "mip_node_count", None),
+            "mip_node_count": result.mip_node_count,
             "n_variables": n_variables,
             "n_binary_assignment_variables": len(x_index) + len(z_index),
             "n_fulfillment_variables": len(f_index),

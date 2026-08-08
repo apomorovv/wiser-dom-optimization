@@ -87,11 +87,14 @@ def current_git_commit() -> str | None:
 
 
 def current_source_state() -> dict[str, object]:
-    """Return a fresh commit, dirty flag, and source-content hash.
+    """Return commit and normalized source identity for checkpoint safety.
 
-    Notebook users commonly edit parameters or source and rerun cells in the
-    same kernel.  Recomputing this small provenance record prevents a cached
-    pre-edit value from validating a checkpoint produced by different code.
+    Jupyter writes execution counts and cell outputs while a study is running.
+    Those presentation-only changes must not invalidate checkpoints or make the
+    source hash drift between experiments. Notebook identity therefore includes
+    code-cell source only. ``git_dirty`` means computation-relevant source is
+    different from ``HEAD``; ``git_worktree_dirty`` separately records any Git
+    change, including notebook outputs and documentation.
     """
 
     commit = current_git_commit()
@@ -109,37 +112,101 @@ def current_source_state() -> dict[str, object]:
             check=True,
             capture_output=True,
         ).stdout
-        diff = subprocess.run(
-            ["git", "diff", "--binary", "HEAD"],
-            cwd=root,
-            check=True,
-            capture_output=True,
-        ).stdout
-        untracked = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        tracked = subprocess.run(
+            ["git", "ls-files", "--cached", "-z"],
             cwd=root,
             check=True,
             capture_output=True,
         ).stdout.split(b"\0")
+        present = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        ).stdout.split(b"\0")
+
+        def relevant(relative: str) -> bool:
+            path = Path(relative)
+            if relative in {"pyproject.toml", "environment.yml"}:
+                return True
+            return bool(path.parts) and path.parts[0] in {
+                "src",
+                "scripts",
+                "configs",
+                "notebooks",
+            }
+
+        def normalized(relative: str, content: bytes | None) -> bytes:
+            if content is None:
+                return b"<deleted>"
+            if Path(relative).suffix.lower() != ".ipynb":
+                return content
+            try:
+                notebook = json.loads(content.decode("utf-8"))
+                code_cells = [
+                    {
+                        "cell_type": "code",
+                        "source": cell.get("source", []),
+                    }
+                    for cell in notebook.get("cells", [])
+                    if cell.get("cell_type") == "code"
+                ]
+                return json.dumps(
+                    code_cells,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+                return content
+
+        tracked_names = {
+            name.decode("utf-8", errors="surrogateescape")
+            for name in tracked
+            if name
+        }
+        current_names = {
+            name.decode("utf-8", errors="surrogateescape")
+            for name in present
+            if name
+        }
+        names = sorted(
+            relative
+            for relative in tracked_names | current_names
+            if relevant(relative)
+        )
         digest = hashlib.sha256()
-        digest.update((commit or "no-commit").encode())
-        digest.update(diff)
-        for raw_name in sorted(name for name in untracked if name):
-            relative = raw_name.decode("utf-8", errors="surrogateescape")
+        source_dirty = False
+        for relative in names:
             path = root / relative
-            if not path.is_file():
-                continue
-            digest.update(raw_name)
-            digest.update(path.read_bytes())
+            current_content = path.read_bytes() if path.is_file() else None
+            try:
+                head_content = subprocess.run(
+                    ["git", "show", f"HEAD:{relative}"],
+                    cwd=root,
+                    check=True,
+                    capture_output=True,
+                ).stdout
+            except subprocess.CalledProcessError:
+                head_content = None
+            current_normalized = normalized(relative, current_content)
+            head_normalized = normalized(relative, head_content)
+            source_dirty = source_dirty or current_normalized != head_normalized
+            digest.update(relative.encode("utf-8", errors="surrogateescape"))
+            digest.update(b"\0")
+            digest.update(current_normalized)
+            digest.update(b"\0")
         return {
             "git_commit": commit,
-            "git_dirty": bool(status.strip()),
+            "git_dirty": bool(source_dirty),
+            "git_worktree_dirty": bool(status.strip()),
             "source_state_sha256": digest.hexdigest(),
         }
     except (OSError, subprocess.CalledProcessError):
         return {
             "git_commit": commit,
             "git_dirty": None,
+            "git_worktree_dirty": None,
             "source_state_sha256": None,
         }
 

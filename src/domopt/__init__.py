@@ -1,6 +1,6 @@
 """WISER–Nestlé Distributed Order Management optimization package."""
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 from .hybrid import ExactLNSConfig, HybridConfig, solve_exact_lns, solve_hybrid
 from .planner import build_planner_table, write_planner_artifacts

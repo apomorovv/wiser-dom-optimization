@@ -331,3 +331,4 @@ def write_planner_artifacts(
     )
     markdown_path.write_text("\n".join(lines), encoding="utf-8")
     return csv_path, markdown_path
+

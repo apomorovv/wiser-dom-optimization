@@ -7,3 +7,4 @@ def test_synthetic_generator_is_reproducible() -> None:
     assert first.orders.equals(second.orders)
     assert first.order_lines.equals(second.order_lines)
     assert first.candidates.equals(second.candidates)
+

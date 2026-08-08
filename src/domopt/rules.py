@@ -54,3 +54,4 @@ def minimum_divert_fulfillment(problem: ProblemData, order_id: str) -> int | Non
 def candidate_is_divert(problem: ProblemData, candidate: pd.Series) -> bool:
     defaults = problem.orders.set_index("order_id")["default_dc"].astype(str).to_dict()
     return str(candidate["dc_id"]) != defaults[str(candidate["order_id"])]
+

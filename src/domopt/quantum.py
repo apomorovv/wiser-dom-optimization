@@ -1,13 +1,14 @@
 """Reproducible local samplers and optional privacy-gated hardware adapters.
 
-``qaoa_statevector`` is a genuine gate-model algorithm simulation.  It uses a
-weight-one Dicke (W) state for each assignment group and an XY ring mixer, so
-every simulated state satisfies the one-hot assignment constraints.  It is not
-a QPU run and no claim of quantum advantage follows from it.
+``qaoa_statevector`` is a genuine gate-model algorithm simulation. It uses a
+weight-one Dicke (W) state for each assignment group and a connected XY mixer,
+so every ideal simulated state satisfies the one-hot assignment constraints.
+It is not a QPU run and no claim of quantum advantage follows from it.
 """
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from importlib.metadata import PackageNotFoundError, version
 from itertools import product
@@ -32,6 +33,23 @@ IBM_MITIGATION_STRATEGIES = (
     "dynamical_decoupling",
     "dd_measure_twirling",
 )
+
+_QAOA_PARAMETER_CACHE: dict[tuple[object, ...], tuple[float, ...]] = {}
+
+
+def _qaoa_parameter_cache_key(
+    model: QUBOModel,
+    *,
+    seed: int,
+    layers: int,
+    restarts: int,
+    mixer_topology: str,
+) -> tuple[object, ...]:
+    digest = hashlib.sha256()
+    digest.update("\0".join(model.variable_names).encode("utf-8"))
+    digest.update(np.asarray(model.Q, dtype=np.float64).tobytes(order="C"))
+    digest.update(np.asarray([float(model.constant)], dtype=np.float64).tobytes())
+    return (digest.hexdigest(), int(seed), int(layers), int(restarts), mixer_topology)
 
 
 def _package_version(name: str) -> str | None:
@@ -80,13 +98,30 @@ def ibm_sampler_options(
     return options
 
 
-def _hardware_sample_statistics(
+def _wilson_interval(successes: int, trials: int) -> tuple[float, float]:
+    """Return a 95% Wilson score interval for one observed proportion."""
+
+    if trials <= 0:
+        return 0.0, 1.0
+    z = 1.959963984540054
+    proportion = successes / trials
+    denominator = 1.0 + z * z / trials
+    center = (proportion + z * z / (2.0 * trials)) / denominator
+    radius = (
+        z
+        * np.sqrt(proportion * (1.0 - proportion) / trials + z * z / (4.0 * trials**2))
+        / denominator
+    )
+    return max(0.0, float(center - radius)), min(1.0, float(center + radius))
+
+
+def _sample_quality_statistics(
     model: QUBOModel,
     samples: list[np.ndarray],
     *,
     max_feasible_states: int,
 ) -> dict[str, float | int | None]:
-    """Compare raw hardware samples with the exact feasible QUBO reference."""
+    """Compare raw samples with exact feasible and uniform-feasible references."""
 
     feasible, groups = _feasible_bitstrings(
         model,
@@ -107,31 +142,72 @@ def _hardware_sample_statistics(
     feasible_raw = raw_energies[one_hot]
     tolerance = 1e-9 * max(1.0, abs(optimum))
     best = float(np.min(feasible_raw)) if len(feasible_raw) else None
+    feasible_gaps = (feasible_raw - optimum) / span
+    raw_optimal = one_hot & (np.abs(raw_energies - optimum) <= tolerance)
+    raw_near_optimal = one_hot & ((raw_energies - optimum) / span <= 0.01 + 1e-12)
+    optimum_successes = int(raw_optimal.sum())
+    feasible_successes = int(one_hot.sum())
+    optimum_low, optimum_high = _wilson_interval(optimum_successes, len(samples))
+    one_hot_low, one_hot_high = _wilson_interval(feasible_successes, len(samples))
+    exact_gaps = (feasible_energies - optimum) / span
     return {
-        "hardware_raw_one_hot_rate": float(one_hot.mean()) if len(one_hot) else 0.0,
-        "hardware_feasible_shots": int(one_hot.sum()),
-        "hardware_qubo_optimal_hit_rate": float(
-            np.mean(one_hot & (np.abs(raw_energies - optimum) <= tolerance))
-        )
-        if len(raw_energies)
-        else 0.0,
-        "hardware_qubo_optimal_hit_rate_given_feasible": float(
+        "sample_raw_one_hot_rate": float(one_hot.mean()) if len(one_hot) else 0.0,
+        "sample_raw_one_hot_rate_ci95_low": one_hot_low,
+        "sample_raw_one_hot_rate_ci95_high": one_hot_high,
+        "sample_feasible_shots": feasible_successes,
+        "sample_qubo_optimal_hit_rate": float(np.mean(raw_optimal)) if len(samples) else 0.0,
+        "sample_qubo_optimal_hit_rate_ci95_low": optimum_low,
+        "sample_qubo_optimal_hit_rate_ci95_high": optimum_high,
+        "sample_qubo_optimal_hit_rate_given_feasible": float(
             np.mean(np.abs(feasible_raw - optimum) <= tolerance)
         )
         if len(feasible_raw)
         else 0.0,
-        "hardware_best_feasible_energy": best,
-        "hardware_best_feasible_normalized_gap": (
+        "sample_qubo_near_optimal_1pct_rate": (
+            float(np.mean(raw_near_optimal)) if len(samples) else 0.0
+        ),
+        "sample_best_feasible_energy": best,
+        "sample_best_feasible_normalized_gap": (
             None if best is None else float((best - optimum) / span)
         ),
-        "hardware_mean_raw_energy": (
+        "sample_mean_feasible_normalized_gap": (
+            float(np.mean(feasible_gaps)) if len(feasible_gaps) else None
+        ),
+        "sample_mean_raw_energy": (
             float(np.mean(raw_energies)) if len(raw_energies) else None
         ),
-        "hardware_mean_feasible_energy": (
+        "sample_mean_feasible_energy": (
             float(np.mean(feasible_raw)) if len(feasible_raw) else None
         ),
         "exact_best_feasible_qubo_energy": optimum,
+        "exact_feasible_state_count": len(feasible),
+        "uniform_feasible_optimal_rate": float(np.mean(exact_gaps <= 1e-12)),
+        "uniform_feasible_near_optimal_1pct_rate": float(
+            np.mean(exact_gaps <= 0.01 + 1e-12)
+        ),
+        "uniform_feasible_mean_normalized_gap": float(np.mean(exact_gaps)),
     }
+
+
+def _hardware_sample_statistics(
+    model: QUBOModel,
+    samples: list[np.ndarray],
+    *,
+    max_feasible_states: int,
+) -> dict[str, float | int | None]:
+    """Return common sample metrics plus legacy hardware-prefixed aliases."""
+
+    common = _sample_quality_statistics(
+        model,
+        samples,
+        max_feasible_states=max_feasible_states,
+    )
+    aliases = {
+        f"hardware_{key.removeprefix('sample_')}": value
+        for key, value in common.items()
+        if key.startswith("sample_")
+    }
+    return {**common, **aliases}
 
 
 def _duration_seconds(timestamps: dict[str, object], start: str, end: str) -> float | None:
@@ -242,6 +318,21 @@ def _ring_edges(size: int) -> tuple[tuple[int, int], ...]:
     return tuple((index, (index + 1) % size) for index in range(size))
 
 
+def _path_edges(size: int) -> tuple[tuple[int, int], ...]:
+    if size <= 1:
+        return ()
+    return tuple((index, index + 1) for index in range(size - 1))
+
+
+def _mixer_edges(size: int, topology: str) -> tuple[tuple[int, int], ...]:
+    normalized = str(topology).strip().lower()
+    if normalized == "path":
+        return _path_edges(size)
+    if normalized == "ring":
+        return _ring_edges(size)
+    raise QuantumSolverError("QAOA mixer topology must be 'path' or 'ring'")
+
+
 def _xy_edge_unitary(size: int, edge: tuple[int, int], beta: float) -> np.ndarray:
     """XY edge evolution restricted to the single-excitation subspace."""
 
@@ -274,6 +365,8 @@ def _qaoa_statevector_samples(
     layers: int,
     restarts: int,
     max_feasible_states: int,
+    mixer_topology: str,
+    parameters: tuple[float, ...] | list[float] | np.ndarray | None = None,
 ) -> tuple[list[np.ndarray], dict[str, object]]:
     if num_samples <= 0 or layers <= 0 or restarts <= 0:
         raise QuantumSolverError("QAOA samples, layers, and restarts must be positive")
@@ -289,7 +382,7 @@ def _qaoa_statevector_samples(
     else:
         phase_energies = np.zeros_like(energies)
 
-    mixer_edges = tuple(_ring_edges(size) for size in shape)
+    mixer_edges = tuple(_mixer_edges(size, mixer_topology) for size in shape)
 
     initial = np.full(len(feasible), 1.0 / np.sqrt(len(feasible)), dtype=complex)
 
@@ -299,8 +392,8 @@ def _qaoa_statevector_samples(
         betas = parameters[layers:]
         for gamma, beta in zip(gammas, betas):
             state *= np.exp(-1j * float(gamma) * phase_energies)
-            # Use the same ordered first-order ring schedule as the hardware
-            # RXX/RYY circuit, avoiding a simulator/hardware mixer mismatch.
+            # Use the same ordered first-order schedule as the hardware RXX/RYY
+            # circuit, avoiding a simulator/hardware mixer mismatch.
             for axis, edges in enumerate(mixer_edges):
                 for edge in edges:
                     state = _apply_axis_unitary(
@@ -316,30 +409,45 @@ def _qaoa_statevector_samples(
         return float(probabilities @ energies)
 
     rng = np.random.default_rng(seed)
-    best_result = None
-    bounds = [(0.0, 2.0 * np.pi)] * layers + [(0.0, np.pi)] * layers
-    starts = [np.full(2 * layers, 0.5)]
-    starts.extend(
-        np.concatenate(
-            [
-                rng.uniform(0.0, 2.0 * np.pi, size=layers),
-                rng.uniform(0.0, np.pi, size=layers),
-            ]
+    if parameters is None:
+        best_result = None
+        bounds = [(0.0, 2.0 * np.pi)] * layers + [(0.0, np.pi)] * layers
+        starts = [np.full(2 * layers, 0.5)]
+        starts.extend(
+            np.concatenate(
+                [
+                    rng.uniform(0.0, 2.0 * np.pi, size=layers),
+                    rng.uniform(0.0, np.pi, size=layers),
+                ]
+            )
+            for _ in range(restarts - 1)
         )
-        for _ in range(restarts - 1)
-    )
-    for initial_parameters in starts:
-        result = minimize(
-            expected_energy,
-            initial_parameters,
-            method="Powell",
-            bounds=bounds,
-            options={"maxiter": 80, "xtol": 1e-4, "ftol": 1e-7},
-        )
-        if best_result is None or float(result.fun) < float(best_result.fun):
-            best_result = result
-    assert best_result is not None
-    probabilities = np.abs(statevector(np.asarray(best_result.x, dtype=float))) ** 2
+        for initial_parameters in starts:
+            result = minimize(
+                expected_energy,
+                initial_parameters,
+                method="Powell",
+                bounds=bounds,
+                options={"maxiter": 80, "xtol": 1e-4, "ftol": 1e-7},
+            )
+            if best_result is None or float(result.fun) < float(best_result.fun):
+                best_result = result
+        assert best_result is not None
+        optimized_parameters = np.asarray(best_result.x, dtype=float)
+        optimizer_success: bool | None = bool(best_result.success)
+        parameter_source = "locally optimized"
+    else:
+        optimized_parameters = np.asarray(parameters, dtype=float)
+        if optimized_parameters.shape != (2 * layers,) or not np.isfinite(
+            optimized_parameters
+        ).all():
+            raise QuantumSolverError(
+                f"QAOA parameters must contain {2 * layers} finite values"
+            )
+        optimizer_success = None
+        parameter_source = "provided and reused"
+    optimized_expected_energy = expected_energy(optimized_parameters)
+    probabilities = np.abs(statevector(optimized_parameters)) ** 2
     statevector_norm = float(probabilities.sum())
     if not np.isclose(statevector_norm, 1.0, atol=1e-10):
         raise QuantumSolverError(
@@ -356,21 +464,55 @@ def _qaoa_statevector_samples(
     info: dict[str, object] = {
         "backend": "qaoa_statevector",
         "remote": False,
-        "algorithm": "QAOA with product W/Dicke(1) initial state and XY ring mixers",
+        "algorithm": (
+            "QAOA with product W/Dicke(1) initial state and "
+            f"XY {mixer_topology} mixers"
+        ),
         "constraint_encoding": "feasible one-hot subspace",
+        "mixer_topology": str(mixer_topology),
         "layers": int(layers),
         "optimizer_restarts": int(restarts),
         "feasible_state_dimension": len(feasible),
-        "optimized_expected_energy": float(best_result.fun),
+        "optimized_expected_energy": float(optimized_expected_energy),
         "uniform_expected_energy": float(np.mean(energies)),
         "best_feasible_energy": float(np.min(energies)),
         "statevector_probability_sum": float(probabilities.sum()),
-        "optimized_parameters": [float(value) for value in best_result.x],
-        "optimizer_success": bool(best_result.success),
+        "optimized_parameters": [float(value) for value in optimized_parameters],
+        "optimizer_success": optimizer_success,
+        "parameter_source": parameter_source,
+        "parameters_reused": parameters is not None,
         "initial_sample_used": False,
         "returned_samples": len(samples),
     }
     return samples, info
+
+
+def optimize_qaoa_parameters(
+    model: QUBOModel,
+    *,
+    seed: int = 0,
+    layers: int = 1,
+    restarts: int = 4,
+    max_feasible_states: int = 65_536,
+    mixer_topology: str = "path",
+) -> tuple[tuple[float, ...], dict[str, object]]:
+    """Optimize one reusable QAOA parameter vector for a fixed QUBO.
+
+    Hardware ablations should call this once per depth and reuse the returned
+    vector across mitigation strategies and repetitions. This prevents local
+    classical angle search from being counted repeatedly as QPU runtime.
+    """
+
+    _, info = _qaoa_statevector_samples(
+        model,
+        num_samples=1,
+        seed=seed,
+        layers=layers,
+        restarts=restarts,
+        max_feasible_states=max_feasible_states,
+        mixer_topology=mixer_topology,
+    )
+    return tuple(float(value) for value in info["optimized_parameters"]), info
 
 
 def _initial_vector(
@@ -453,6 +595,22 @@ def _simulated_annealing_samples(
     return samples
 
 
+def _append_linear_w_state(circuit: object, group: tuple[int, ...]) -> None:
+    """Append a deterministic linear-size W-state preparation circuit.
+
+    The construction uses one controlled rotation and one CNOT per added qubit,
+    avoiding the exponentially described generic ``StatePreparation`` gate.
+    """
+
+    if not group:
+        raise QuantumSolverError("A W-state group cannot be empty")
+    circuit.x(group[-1])
+    for local_index in range(len(group) - 1, 0, -1):
+        angle = 2.0 * np.arccos(np.sqrt(1.0 / (local_index + 1.0)))
+        circuit.cry(float(angle), group[local_index], group[local_index - 1])
+        circuit.cx(group[local_index - 1], group[local_index])
+
+
 def _sample_ibm_qpu(
     model: QUBOModel,
     *,
@@ -468,6 +626,8 @@ def _sample_ibm_qpu(
     transpiler_optimization_level: int,
     transpiler_trials: int,
     transpiler_seed: int | None,
+    mixer_topology: str,
+    qaoa_parameters: tuple[float, ...] | list[float] | np.ndarray | None,
 ) -> tuple[list[np.ndarray], dict[str, object]]:
     """Run constraint-preserving QAOA on a configured IBM Quantum account.
 
@@ -479,10 +639,9 @@ def _sample_ibm_qpu(
         raise QuantumSolverError(
             "Remote IBM QPU access is disabled. Set allow_remote=True only after "
             "the data owner approves sending a circuit that encodes model coefficients."
-        )
+    )
     try:
         from qiskit import QuantumCircuit
-        from qiskit.circuit.library import StatePreparation
         from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
         from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
     except ImportError as error:
@@ -490,6 +649,18 @@ def _sample_ibm_qpu(
             "IBM QPU sampling requires the optional 'ibm' dependencies"
         ) from error
 
+    cache_key = _qaoa_parameter_cache_key(
+        model,
+        seed=seed,
+        layers=layers,
+        restarts=restarts,
+        mixer_topology=mixer_topology,
+    )
+    cached_parameters = qaoa_parameters
+    cache_hit = False
+    if cached_parameters is None and cache_key in _QAOA_PARAMETER_CACHE:
+        cached_parameters = _QAOA_PARAMETER_CACHE[cache_key]
+        cache_hit = True
     angle_start = perf_counter()
     _, local_info = _qaoa_statevector_samples(
         model,
@@ -498,27 +669,25 @@ def _sample_ibm_qpu(
         layers=layers,
         restarts=restarts,
         max_feasible_states=max_feasible_states,
+        mixer_topology=mixer_topology,
+        parameters=cached_parameters,
     )
     angle_optimization_seconds = perf_counter() - angle_start
+    if cached_parameters is None:
+        _QAOA_PARAMETER_CACHE[cache_key] = tuple(
+            float(value) for value in local_info["optimized_parameters"]
+        )
     circuit_start = perf_counter()
     parameters = np.asarray(local_info["optimized_parameters"], dtype=float)
     gammas = parameters[:layers]
     betas = parameters[layers:]
     groups = _one_hot_group_indices(model)
     n = len(model.variable_names)
-    if max(map(len, groups), default=0) > 12:
-        raise QuantumSolverError(
-            "IBM W-state preparation is limited to 12 variables per one-hot group; "
-            "reduce max_candidates_per_order or provide a specialized preparation circuit"
-        )
     circuit = QuantumCircuit(n)
 
     # Product of weight-one Dicke states: one excitation per assignment group.
     for group in groups:
-        amplitudes = np.zeros(2 ** len(group), dtype=complex)
-        for local_index in range(len(group)):
-            amplitudes[1 << local_index] = 1.0 / np.sqrt(len(group))
-        circuit.append(StatePreparation(amplitudes), list(group))
+        _append_linear_w_state(circuit, group)
 
     matrix = np.asarray(model.Q, dtype=float)
     feasible, _ = _feasible_bitstrings(
@@ -547,7 +716,7 @@ def _sample_ibm_qpu(
         for (i, j), coefficient in pair_zz.items():
             circuit.rzz(2.0 * float(gamma) * coefficient, i, j)
         for group in groups:
-            for local_i, local_j in _ring_edges(len(group)):
+            for local_i, local_j in _mixer_edges(len(group), mixer_topology):
                 i, j = group[local_i], group[local_j]
                 circuit.rxx(float(beta), i, j)
                 circuit.ryy(float(beta), i, j)
@@ -705,6 +874,19 @@ def _sample_ibm_qpu(
         "qiskit_version": _package_version("qiskit"),
         "qiskit_ibm_runtime_version": _package_version("qiskit-ibm-runtime"),
         "angle_seed": int(seed),
+        "qaoa_parameter_source": local_info["parameter_source"],
+        "qaoa_parameters_reused": local_info["parameters_reused"],
+        "qaoa_parameter_cache_hit": cache_hit,
+        "w_state_preparation": "linear controlled-rotation construction",
+        "mixer_topology": mixer_topology,
+        "logical_w_preparation_two_qubit_gates": int(
+            2 * sum(max(0, len(group) - 1) for group in groups)
+        ),
+        "logical_mixer_two_qubit_gates": int(
+            2
+            * layers
+            * sum(len(_mixer_edges(len(group), mixer_topology)) for group in groups)
+        ),
         "mitigation_strategy": mitigation_strategy,
         "transpiler_optimization_level": transpiler_optimization_level,
         "transpiler_trials": transpiler_trials,
@@ -748,6 +930,8 @@ def sample_qubo(
     time_limit_seconds: float | None = None,
     qaoa_layers: int = 1,
     qaoa_restarts: int = 4,
+    qaoa_mixer_topology: Literal["path", "ring"] = "path",
+    qaoa_parameters: tuple[float, ...] | list[float] | np.ndarray | None = None,
     qaoa_readout_bitflip_probability: float = 0.0,
     max_feasible_states: int = 65_536,
     ibm_backend_name: str | None = None,
@@ -769,6 +953,7 @@ def sample_qubo(
         raise QuantumSolverError(
             "qaoa_readout_bitflip_probability must be between zero and one"
         )
+    _mixer_edges(2, qaoa_mixer_topology)
     sampler_info: dict[str, object] = {"backend": method, "remote": False}
     if method == "exact":
         if n > max_exact_variables:
@@ -812,6 +997,8 @@ def sample_qubo(
             layers=qaoa_layers,
             restarts=qaoa_restarts,
             max_feasible_states=max_feasible_states,
+            mixer_topology=qaoa_mixer_topology,
+            parameters=qaoa_parameters,
         )
         if qaoa_readout_bitflip_probability > 0:
             readout_rng = np.random.default_rng(seed + 1_000_003)
@@ -846,6 +1033,8 @@ def sample_qubo(
             transpiler_optimization_level=ibm_transpiler_optimization_level,
             transpiler_trials=ibm_transpiler_trials,
             transpiler_seed=ibm_transpiler_seed,
+            mixer_topology=qaoa_mixer_topology,
+            qaoa_parameters=qaoa_parameters,
         )
     else:
         raise QuantumSolverError(f"Unknown QUBO sampling method {method!r}")
@@ -867,5 +1056,13 @@ def sample_qubo(
     frame = frame.sort_values(["energy", "bitstring"], kind="mergesort").reset_index(
         drop=True
     )
+    if model.metadata.get("one_hot_groups"):
+        sampler_info.update(
+            _sample_quality_statistics(
+                model,
+                bitstrings,
+                max_feasible_states=max_feasible_states,
+            )
+        )
     frame.attrs["sampler_info"] = sampler_info
     return frame

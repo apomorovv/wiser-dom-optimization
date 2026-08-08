@@ -768,3 +768,4 @@ def solve_polished_greedy(
 
 def run_baselines(problem: ProblemData) -> list[Solution]:
     return [solve_default_baseline(problem), solve_greedy_baseline(problem)]
+

@@ -51,10 +51,10 @@ def test_each_notebook_experiment_explains_purpose_and_importance() -> None:
         if cell["cell_type"] != "markdown":
             continue
         source = _source(cell)
-        if source.startswith("## ") and not source.startswith("## 21."):
+        if source.startswith("## ") and not source.startswith("## 22."):
             experiment_sections.append(source)
 
-    assert len(experiment_sections) == 20
+    assert len(experiment_sections) == 21
     for source in experiment_sections:
         assert "**Purpose.**" in source
         assert "**Why it matters.**" in source

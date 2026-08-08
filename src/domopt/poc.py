@@ -1396,3 +1396,4 @@ def audit_poc_outputs(bundle_dir: str | Path, problem: ProblemData | None = None
             errors.append(abs(calculated - float(default_penalty.loc[str(order_id)])))
         result["default_penalty_max_abs_error"] = max(errors, default=0.0)
     return result
+

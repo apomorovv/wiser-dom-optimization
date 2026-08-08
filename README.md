@@ -1,307 +1,324 @@
-# WISER–Nestlé Distributed Order Management optimizer
+# WISER Distributed Order Management Solver
 
-This branch is the experiment-ready implementation for the 2026 WISER–Nestlé
-Distributed Order Management (DOM) challenge. It reads the supplied proof-of-concept
-data, constructs a validated optimization instance, compares transparent classical
-baselines with exact MILP, adaptive exact-MILP neighborhood search, and an
-experimental hybrid quantum-classical search, and persists
-aggregate tables and figures. Final reports, planner PDFs, and slides are deliberately
-deferred until the full experiment profile has produced reviewed results.
+**Author:** Andrei Pomorov
 
-The measured production default is polished greedy: deterministic whole-load routing
-followed by exact fixed-assignment quantity recourse. Adaptive exact large-neighborhood
-search (LNS) is the quality escalation when coordinated reassignment is worth more
-runtime. In the experimental quantum path, a QUBO sample is only a proposal. Exact
-mixed-integer recourse rebuilds SKU quantities, an independent validator checks all
-hard constraints, and a move is accepted only when it is feasible and improves the
-current solution. A weak or noisy sampler can consume runtime, but it cannot worsen
-the returned incumbent.
+**Submission status:** Submission ready
 
-## What is implemented
+This repository contains a validated hybrid optimization system for the Nestlé WISER
+Quantum Challenge. It decides whether an order should remain at its default distribution
+center (DC), move to an eligible alternative DC and ship date, or remain unassigned, and
+then determines how many cases of every stock-keeping unit (SKU) can be fulfilled.
 
-- fail-closed file, schema, type, domain, date, and inventory-identity checks for
-  the five runtime input CSVs;
-- a cleanup command that removes numbered-upload names and retains only runtime
-  inputs plus two optional recommendation outputs;
-- a real-data adapter for orders, inventory, lanes, dock availability, and throughput
-  observations;
-- source-accurate case conversion and thresholded order-penalty logic;
-- load-cohesive candidate generation, five-day protected ATP, shipping lead times,
-  working-day PGI adjustment, forecast eligibility, and dock usage;
-- deterministic load-atomic default, sequential-greedy, and polished-greedy
-  baselines;
-- an exact SciPy/HiGHS mixed-integer linear program (MILP);
-- adaptive conflict-graph exact LNS with a precomputed group index, resource-
-  residualized local models, joint assignment/quantity optimization, variable
-  budgets, and independently validated strict-improvement acceptance;
-- bounded large-neighborhood search with QUBO assignment proposals and exact MILP
-  fulfillment recourse;
-- full and feasible-subspace exact enumeration, random sampling, simulated
-  annealing, a local constraint-preserving QAOA statevector simulator, and an optional
-  IBM Quantum backend behind an explicit privacy gate;
-- an independent objective evaluator and feasibility validator;
-- all requested experiments, business- and QUBO-penalty sweeps, and additional
-  controls;
-- stable, profile-scoped notebook checkpoints with content-hash manifests under
-  `results/challenge-study/notebook/` and separate CLI evidence under
-  `results/challenge-study/cli/`;
-- an opt-in synthetic CPU/GPU crossover benchmark and privacy-gated hardware tests; and
-- a runnable Jupyter notebook and aggregate-only Streamlit planner copilot.
+The recommended production path is entirely classical and license-free. Quantum
+optimization is an experimental proposal engine inside a safeguarded hybrid workflow;
+every proposal is repaired, re-optimized by an exact recourse model, and independently
+validated before it can replace the current solution.
 
-No corrected IBM result is committed and no quantum advantage is claimed. Supplied
-historical hardware evidence is audited separately and is not publication-ready.
+## Results at a glance
 
-The implementation audit, unresolved owner decisions, and method comparison are in
-[the results audit](docs/results_audit.md). The complete lineage decision is in the
-[branch comparison](docs/branch_comparison.md).
+The reviewed study contains 247 aggregate experiment rows across 14 experiment
+families. All 247 rows passed the independent validator with zero recorded
+demand-balance, integrality, inventory, and capacity residuals. The row-level evidence
+tables and manifests are intentionally not published in this branch.
 
-## Supplied-data audit boundary
+On the common 20-assignment-group real-data subset:
 
-The strict loader verifies all five required runtime files, their required fields and
-domains, their cross-table model invariants, and the inventory reconciliation before
-solving. Optional recommendation outputs are used only for reconciliation and never
-as optimization labels. Exact source-scale totals remain in ignored local artifacts;
-the public repository reports only reviewed normalized/indexed evidence. The
-challenge PDF, equations document, and workbook are references, not runtime inputs.
+| Method | Objective capture | Case fill | Runtime | Role |
+|---|---:|---:|---:|---|
+| Default routing | 61.39% | 64.21% | 0.30 s | Business baseline |
+| Greedy | 64.90% | 68.50% | 0.76 s | Fast assignment heuristic |
+| Polished greedy | 64.90% | 68.50% | 2.86 s | Recommended production default |
+| Exact LNS | 64.90% | 68.50% | 7.00 s | Quality escalation |
+| Full exact MILP | 64.90% | 68.50% | 2.76 s | Small-instance certificate |
+| Hybrid simulated annealing | 64.90% | 68.50% | 12.88 s | Experimental comparator |
 
-## Solver architecture
+Objective capture is the achieved objective divided by the total requested merchandise
+value. Case fill is fulfilled cases divided by requested cases. The raw objective is:
+
+The optimization objective is:
+
+$$
+\text{fulfilled value} - \text{unmet-demand penalty} - \text{shipping cost}.
+$$
+
+These results do not establish quantum advantage. On a synthetic coordination control,
+exact LNS, exact MILP, simulated annealing, and local QAOA all escaped a verified greedy
+trap by 197.2 objective units. On IBM hardware, every returned decision became feasible
+after exact recourse, but native one-hot feasibility and raw QUBO quality degraded with
+circuit depth. The hardware study therefore supports safe integration and identifies
+depth limits; it does not show a speed or quality advantage over classical methods.
+
+## Recommended solver hierarchy
+
+1. Use `mode="fast"` for routine planning. It applies load-atomic greedy routing and
+   exact fixed-assignment quantity recourse.
+2. Use `mode="quality"` when coupled inventory or dock conflicts justify more search.
+   It applies adaptive exact large-neighborhood search (LNS).
+3. Use `mode="hybrid"` for research. A sampler proposes coordinated assignment moves,
+   while exact recourse and the validator retain control of feasibility.
+4. Use full exact mixed-integer linear programming (MILP) only for small instances,
+   benchmarking, or optimality certificates.
+
+## How the hybrid solver works
 
 ```mermaid
 flowchart TD
-    A["Readable challenge bundle"] --> B["Canonical orders, lines, candidates, resources"]
-    B --> C["Feasible default or greedy incumbent"]
-    C --> D["Exact fixed-assignment polish"]
-    D --> E["Optional joint exact local MILP"]
-    E --> F{"Validated strict improvement?"}
-    F -->|Yes| C
-    F -->|No| D
-    E -. research comparator .-> G["QUBO sampler plus exact recourse"]
+    A["Validated greedy incumbent"] --> B["Conflict-based neighborhood"]
+    B --> C["Assignment QUBO"]
+    C --> D["Classical, simulated, or QPU sampler"]
+    D --> E["One-hot repair"]
+    E --> F["Exact fulfillment recourse"]
+    F --> G{"Independent validator"}
+    G -->|Improves and is valid| A
+    G -->|Otherwise| H["Reject proposal"]
 ```
 
-The exact model assigns each order to one eligible DC/PGI option or leaves it
-unassigned. Partial fulfillment is allowed at the selected DC, but an order cannot
-split across DCs. Orders sharing a source load move together. The objective is:
+The quantum unconstrained binary optimization (QUBO) model contains only bounded local
+assignment choices. It uses one-hot groups, meaning exactly one candidate is selected
+for each active assignment group. Gate-model QAOA uses:
 
-$$
-\text{fulfilled value}-\text{thresholded unmet penalty}-\text{shipping cost}.
-$$
+- a product of weight-one Dicke, or W, states that starts in the feasible one-hot
+  subspace;
+- a connected XY path mixer that preserves one excitation per group with fewer logical
+  two-qubit interactions than the earlier ring implementation;
+- locally optimized parameters that are reused across matched IBM mitigation variants;
+- exact feasible-state, uniform-feasible, and classical controls;
+- Wilson confidence intervals, near-optimal rates, and normalized energy gaps in
+  addition to rare exact-hit counts.
 
-Hard constraints cover demand balance, candidate eligibility, projected inventory,
-dock capacity, optional scenario capacity, the diversion-uplift rule, pallet/case
-accounting, and assignment-group cohesion. See the
-[mathematical formulation](docs/mathematical_formulation.md) and
-[source mapping](docs/poc_data_mapping.md).
+QAOA means Quantum Approximate Optimization Algorithm. A mixer is the circuit component
+that moves probability between candidate solutions. Exact recourse is a MILP with the
+sampled assignments fixed and fulfillment quantities re-optimized. This separation
+ensures that the sampler proposes assignments but never bypasses business constraints.
 
-`solve_dom` exposes the final method hierarchy through one validated API:
+## Repository structure
 
-```python
-from domopt import SolverConfig, solve_dom
+| Path | Purpose |
+|---|---|
+| `src/domopt/` | Solver package: data loading, rules, baselines, MILP, LNS, QUBO/QAOA, validation, metrics, and provenance |
+| `notebooks/` | Run-all experiment notebook, including optional Gurobi and IBM studies |
+| `scripts/` | Supported command-line entry points for bundle preparation, studies, audits, and synthetic examples |
+| `tests/` | Unit, integration, privacy, notebook, and validator regression tests |
+| `docs/` | Data guide, assumptions, formulation, method, reproducibility protocol, and challenge checklist |
+| `results/final/figures/` | Screened aggregate, normalized, synthetic, robustness, and QAOA figures |
+| `reports/` | Final paper, two-page summary, one-page planner view, and presentation |
+| `data/synthetic/` | Shareable generated examples; restricted challenge data are intentionally excluded |
 
-solution = solve_dom(problem, config=SolverConfig(mode="fast"))
-# mode="quality" enables adaptive exact LNS;
-# mode="hybrid" keeps sampler/IBM search experimental.
-```
+## Terminology
 
-Every mode is independently validated before it can return a solution.
+| Term | Meaning in this repository |
+|---|---|
+| Assignment group | Orders that must move together as one load-level routing decision |
+| Candidate | One eligible DC and planned-goods-issue date option for an order |
+| Case fill rate | Fulfilled cases divided by requested cases |
+| Cumulative ATP | Cumulative available-to-promise inventory through a date |
+| DC | Distribution center from which an order may ship |
+| Divert or reassignment | Moving an order away from its default DC |
+| Feasible | Satisfies schema, assignment, demand, eligibility, inventory, and capacity checks |
+| HiGHS | Open-source MILP solver used through SciPy; the default exact backend |
+| LNS | Large-neighborhood search, which repeatedly re-optimizes a bounded subset of decisions |
+| MILP | Mixed-integer linear program with continuous and integer decision variables |
+| Objective capture | Objective value divided by total requested merchandise value |
+| PGI | Planned goods issue, the modeled ship date |
+| QAOA | Gate-model variational quantum optimization algorithm |
+| QUBO | Quadratic objective over binary variables used by local samplers and QAOA |
+| Recourse | Exact re-optimization of fulfillment quantities after assignments are fixed |
+| SKU | Stock-keeping unit, the item identifier at an order-line level |
+| One-hot | Exactly one binary variable in a choice group equals one |
 
-## Installation
+## Local installation
 
-Python 3.10 or newer is required.
+### Requirements
+
+- Python 3.10, 3.11, or 3.12
+- Git
+- No commercial solver, GPU, or quantum account for the default workflow
+
+The core code uses NumPy, pandas, SciPy, and PyYAML and is operating-system neutral.
+Continuous integration covers Python 3.10-3.12 on Linux, macOS, and Windows. Use the
+platform-specific virtual environment commands below.
+
+### macOS or Linux
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev,notebook,app]"
+python3 -m venv .venv
+./.venv/bin/python -m pip install --upgrade pip
+./.venv/bin/python -m pip install -e ".[notebook,dev]"
+./.venv/bin/python -m pytest
 ```
 
-Optional extras are `.[gpu]` for CUDA 12 CuPy benchmarking, `.[ibm]` for IBM
-Quantum, and `.[full]` for the complete workstation environment. The default solver remains
-local and CPU-based because exact recourse and small local QUBOs dominate the current
-workload.
+### Windows PowerShell
 
-## Prepare the challenge bundle
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[notebook,dev]"
+.\.venv\Scripts\python.exe -m pytest
+```
 
-Keep raw files outside Git. Browser downloads commonly add suffixes such as `(1)`
-and macOS archives add metadata sidecars. Create a clean directory with stable names:
+The commands call the environment's Python directly, so shell activation is optional.
+Conda users can instead run:
+
+```bash
+conda env create -f environment.yml
+conda activate wiser-dom
+```
+
+## Quick validation with synthetic data
+
+Generate the tiny shareable instance:
+
+```bash
+python scripts/make_tiny_instance.py --output-dir data/synthetic/tiny
+```
+
+Then use the validated solver facade:
+
+```python
+from domopt.data import load_problem_data
+from domopt.solver import SolverConfig, solve_dom
+
+problem = load_problem_data("data/synthetic/tiny")
+solution = solve_dom(problem, config=SolverConfig(mode="fast"))
+
+print(solution.raw_objective)
+print(solution.assignments)
+```
+
+`solve_dom` refuses to return an invalid incumbent. The `fast`, `quality`, and `hybrid`
+modes correspond to the hierarchy described above.
+
+## Running the challenge study
+
+Place the authorized five runtime tables under a local directory that is not committed.
+The canonical inputs and their columns are documented in
+[the data guide](docs/data_guide.md). To normalize downloaded filenames:
 
 ```bash
 python scripts/prepare_challenge_bundle.py \
-  --source-dir /approved/path/to/downloads \
+  --source-dir /path/to/downloads \
   --output-dir data/raw/nestle_challenge
 ```
 
-The resulting directory contains five required inputs:
-
-- `input_order_data.csv`
-- `input_capacity_planning.csv`
-- `input_shipping_cost_data.csv`
-- `input_dock_capacity.csv`
-- `input_throughput_capacity.csv`
-
-When available, the script also retains `output_order_level_data.csv` and
-`output_order_sku_level_data.csv` for optional reconciliation. It excludes the PDF,
-DOCX, XLSX, screenshots, ZIP files, numbered duplicates, and AppleDouble metadata.
-
-## Run the challenge study
-
-Point the command to the cleaned directory:
+Run a fast reproducibility check:
 
 ```bash
 python scripts/run_challenge_study.py \
-  --bundle-dir /approved/path/to/challenge-files \
+  --bundle-dir data/raw/nestle_challenge \
+  --profile smoke
+```
+
+Run the complete final grid:
+
+```bash
+python scripts/run_challenge_study.py \
+  --bundle-dir data/raw/nestle_challenge \
   --profile full
 ```
 
-The command first validates every required file and stops on the first missing,
-unreadable, empty, malformed, nonfinite, or structurally invalid artifact.
-`--profile smoke` runs a short development grid; `--profile full` runs the evidence
-grid. Source provenance is always recorded without blocking execution on worktree
-state. CLI tables, manifests, and PNG charts are written below
-`results/challenge-study/cli/<profile>/`; notebook artifacts cannot overwrite them.
-
-## Current evidence and solver choice
-
-The supplied clean full study produced 247 feasible rows across 14 experiment families
-with zero reported validation violations. All 18 CSV-manifest hashes pass and its
-numeric identities reconcile within `7.5e-9`. It predates the new numeric validator
-residual fields, so a fresh run is still required for final evidence. The archive
-establishes this method hierarchy:
-
-| Method | Observed result on the common real subset | Role |
-|---|---|---|
-| Greedy | 64.8961% objective capture in 0.755 s | Time-critical first incumbent |
-| Polished greedy | 64.9002% in 2.715 s | Recommended production default |
-| Exact MILP | Same capture in 2.518 s with zero reported gap | Small-instance certificate |
-| Exact LNS | Same capture in 6.565 s | Coordinated-assignment quality escalation |
-| Hybrid sampler LNS | Same capture in 12.149 s with zero accepted sampler moves | Research comparator only |
-
-At 372 assignment groups/750 orders, polished greedy takes 51.779 seconds. Exact LNS
-takes 71.208 seconds and improves it by only `0.000027%`. Across
-the real scaling grid, 98.87% of LNS's aggregate gain over raw greedy comes from the
-initial polish. Hybrid is tested only through 50 groups and contributes zero post-polish
-gain in every repeated real-subset row.
-
-## Run the notebook
+For an interactive, self-documenting workflow:
 
 ```bash
 jupyter lab notebooks/nestle_challenge_experiments.ipynb
 ```
 
-Use **Run All** after editing the global configuration cell immediately below the
-automatic dependency bootstrap. The kernel adds the local package and installs missing
-notebook dependencies, so no terminal commands or terminal-set environment variables
-are required. The default bundle is `data/raw/nestle_challenge`; profiles, experiment
-switches, rerun policy, GPU, and every IBM setting are together in that one cell. The
-notebook performs and checkpoints:
+Edit only the global configuration cell and choose **Run All**. The notebook includes
+solver comparison, real and synthetic scaling, candidate and penalty sensitivity,
+inventory shocks, noise proxies, pruning and batching ablations, sampler controls, an
+optional MILP-backend comparison, and an optional IBM hardware matrix.
 
-1. strict bundle and output reconciliation audits;
-2. default, greedy, polished greedy, exact LNS, exact MILP, and hybrid comparison;
-3. repeated real assignment-group scaling;
-4. repeated controlled synthetic scaling;
-5. candidate-DC universe sensitivity;
-6. business and QUBO penalty sensitivity;
-7. candidate-count sensitivity and inventory shocks;
-8. sampler seed/local coefficient sensitivity, a QAOA readout-noise proxy, and
-   algorithm ablations;
-9. Pareto-pruning and random-versus-conflict batching ablations;
-10. feasible exact, random, simulated-annealing, and Dicke/XY-QAOA controls;
-11. a synthetic coordination control with a known exact reference;
-12. an optional end-to-end CPU/GPU QUBO-scoring crossover; and
-13. optional synthetic-only IBM backend discovery and a matched Dicke/XY-QAOA
-    hardware stress test.
+## Optional Gurobi comparison
 
-All persisted experiment rows are aggregate-only.
+Gurobi can be useful for comparing solve time and optimality progress on the same exact
+MILP, but it should not be the default because many reviewers will not have a license.
 
-Notebook checkpoints, aggregate tables, and figures are written directly below the
-stable path `results/challenge-study/notebook/<profile>/`; identity and content hashes
-remain in the adjacent manifests.
+```bash
+python -m pip install -e ".[gurobi]"
+```
 
-## Run the IBM hardware study
+Configure a valid Gurobi license, then run the notebook's **Optional MILP-backend
+comparison** section. The notebook always runs SciPy/HiGHS, runs Gurobi only when
+available, validates both outputs, and asserts matching objectives when both complete.
+An unavailable package or license is recorded as a skip.
 
-The opt-in hardware study derives the needed logical-qubit width, records all accessible
-operational backends, and uses the least-busy eligible device unless a backend is
-specified. It evaluates a coupled synthetic instance with exact and local simulator
-references—not Nestlé coefficients. Provenance is recorded without a dirty-worktree
-gate or escape flag.
+## Optional IBM hardware study
+
+Install the IBM dependencies:
+
+```bash
+python -m pip install -e ".[ibm]"
+```
+
+Configure IBM Quantum using the official Qiskit Runtime mechanism. Hardware execution
+is disabled unless `allow_remote=True` is explicit. The supplied study generates its
+own synthetic coordination instance and does not transmit restricted challenge tables.
 
 ```bash
 python scripts/run_ibm_hardware_study.py \
   --allow-remote \
-  --profile presentation \
-  --shots 512
+  --profile quick
 ```
 
-It runs the full $p=1/p=2$ by baseline/dynamical-decoupling/DD-plus-measurement-
-twirling matrix: six QPU jobs in `quick`, eighteen in `presentation`. Saved evidence
-separates exact feasible-QUBO raw hit rate from repaired/recourse validity and records
-job IDs/timestamps, circuit cost, compilation, submit/wait, queue, execution, quantum-
-use, decode, recourse, and end-to-end timing. Successful variants resume; failed rows
-are retained and retried instead of aborting the matrix.
+The final code caches one QAOA parameter vector per depth, uses a linear W-state
+preparation circuit and a path mixer, performs several transpiler trials, and compares
+depth and mitigation variants with exact and uniform-feasible controls.
 
-## Run the planner copilot
+## GPU support
 
-The copilot is useful because the experiment matrix is multi-dimensional and planners
-need explanations, not raw solver logs. It is deliberately rules-based: no external
-language model receives the data, and identifier-bearing uploads are rejected.
+A GPU is not needed to solve the challenge. The optional `gpu` extra is isolated from
+`full` so macOS, Windows, and CPU-only Linux installations remain reliable. The current
+GPU extra targets Linux x86-64 with CUDA 12:
 
 ```bash
-python -m streamlit run apps/planner_copilot.py
+python -m pip install -e ".[gpu]"
 ```
 
-It explains solver comparisons, scaling, sensitivities, ablations, and the limits of
-the evidence. See [app instructions](apps/README.md).
+GPU acceleration applies only to large batches of QUBO energy scoring and does not
+replace the MILP or validator.
 
-## Reproduce the known-optimum test
+## Evidence, privacy, and provenance
 
-```bash
-python scripts/make_tiny_instance.py
-python scripts/run_experiment.py \
-  --data-dir data/synthetic/tiny \
-  --methods default greedy polished_greedy exact_lns classical hybrid \
-  --hybrid-config configs/hybrid_tiny.yaml \
-  --output-dir runs/tiny-comparison \
-  --experiment-id tiny-comparison
-pytest
-```
+Only screened aggregate submission artifacts are committed. Raw orders, customer data,
+DC and SKU identifiers, source-currency commercial totals, CSV/JSON evidence, IBM job
+tables, checkpoints, and manifests remain excluded. The two charts containing absolute
+commercial totals are also excluded. The provenance code normalizes notebooks to
+code-cell source, records relevant source dirtiness separately from general worktree
+dirtiness, and prevents output autosaves from changing checkpoint identity.
 
-The tiny instance has a proven optimum of 126 synthetic units. The exact MILP and
-hybrid exact-QUBO configuration both reproduce it.
+The reviewed evidence was produced by source commit
+`7d087161e7d40cc7603c04e92eac71f4dbdb12ee`. Its original manifests correctly record a
+dirty worktree because Jupyter changed tracked notebook outputs during the run. The
+current provenance code fixes that identity instability. Existing results are preserved
+rather than silently relabeled as if they came from the strengthened final code.
 
-## Repository map
+## Documentation and submission files
 
-| Path | Purpose |
-|---|---|
-| `src/domopt/poc.py` | runtime-bundle cleanup, audit, and source adapter |
-| `src/domopt/classical.py` | exact MILP and fixed-assignment recourse |
-| `src/domopt/hybrid.py` | adaptive exact LNS plus sampler-assisted LNS |
-| `src/domopt/solver.py` | validated `fast`, `quality`, and experimental `hybrid` entry point |
-| `src/domopt/checkpoints.py` | stable-profile checkpoints with content/identity manifests |
-| `src/domopt/validation.py` | independent feasibility authority |
-| `src/domopt/experiments.py` | complete experiment matrix |
-| `src/domopt/hardware.py` | privacy-safe hardware discovery and GPU benchmark |
-| `notebooks/` | runnable challenge analysis |
-| `apps/` | aggregate-only planner copilot |
-| `docs/` | data, assumptions, formulation, algorithm, and requirement mapping |
-| `reports/` | deferral notice and planner sign-off template |
-| `tests/` | unit, model, sampler, audit, privacy, and Markdown checks |
+- [Data guide](docs/data_guide.md)
+- [Assumptions](docs/assumptions.md)
+- [Mathematical formulation](docs/mathematical_formulation.md)
+- [Hybrid solver method](docs/solver_method.md)
+- [Reproducibility and privacy protocol](docs/reproducibility.md)
+- [Challenge completion checklist](docs/challenge_checklist.md)
 
-## Deferred submission artifacts
+- Final research report: [Markdown](reports/final_report.md) and
+  [PDF](reports/final_report.pdf)
+- Two-page business and technical summary:
+  [Markdown](reports/business_technical_summary.md) and
+  [PDF](reports/business_technical_summary.pdf)
+- One-page planner view: [Markdown](reports/planner_view.md) and
+  [PDF](reports/planner_view.pdf)
+- Final presentation: [PDF](reports/final_presentation.pdf) and
+  [PowerPoint](reports/final_presentation.pptx)
 
-The requirement matrix, experiment protocol, and literature basis are available now.
-The separate two-page summary, final report, data-specific planner view, and presentation are intentionally
-absent and must not be rendered or described as final until the full profile and any
-approved hardware runs have been reviewed.
+## Limitations
 
-## Privacy and interpretation
+- Full exact MILP was tested only on small common subsets.
+- Local and hardware QAOA experiments use bounded synthetic or local neighborhoods, not
+  the full real network.
+- Exact repair and recourse can dominate sampler differences, so final feasibility is
+  not evidence that raw quantum samples were high quality.
+- The final path-mixer and linear-W circuit improvements require a new hardware run
+  before any hardware-quality claim can be updated.
 
-Raw operational rows, identifiers, exact DC-level resources, and commercial totals
-are excluded from Git. QUBO variable labels are integers for optional remote runs,
-but coefficients can still encode sensitive economics; remote execution therefore
-requires explicit approval. See [privacy policy](docs/privacy.md).
-
-The supplied throughput file reports observed utilization rather than a documented
-maximum. It is not enforced as a real hard limit. Experiments may add explicit
-scenario headroom, and those rows are labeled as scenarios. Likewise, local QUBO
-coefficient perturbation is a ranking-robustness test, while the local QAOA bit-flip
-control covers only readout; neither is a complete physical QPU noise model.
+See [the final report](reports/final_report.pdf) for the literature review, experimental
+design, complete interpretation, and future research directions.

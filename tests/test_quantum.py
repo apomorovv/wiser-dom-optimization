@@ -7,8 +7,10 @@ from scipy.linalg import expm
 
 from domopt.quantum import (
     QuantumSolverError,
+    _append_linear_w_state,
     _hardware_sample_statistics,
     _ibm_job_timing,
+    _path_edges,
     _xy_edge_unitary,
     ibm_sampler_options,
     sample_qubo,
@@ -70,6 +72,53 @@ def test_qaoa_statevector_is_reproducible_and_constraint_preserving() -> None:
         1.0
     )
     assert first.attrs["sampler_info"]["initial_sample_used"] is False
+    assert first.attrs["sampler_info"]["mixer_topology"] == "path"
+    assert first.attrs["sampler_info"]["sample_raw_one_hot_rate"] == 1.0
+    assert first.attrs["sampler_info"]["uniform_feasible_optimal_rate"] == 0.25
+
+
+def test_optimized_qaoa_parameters_can_be_reused_without_reoptimization() -> None:
+    first = sample_qubo(
+        _model(),
+        method="qaoa_statevector",
+        num_samples=8,
+        seed=5,
+        qaoa_restarts=1,
+    )
+    parameters = tuple(first.attrs["sampler_info"]["optimized_parameters"])
+
+    reused = sample_qubo(
+        _model(),
+        method="qaoa_statevector",
+        num_samples=8,
+        seed=5,
+        qaoa_restarts=1,
+        qaoa_parameters=parameters,
+    )
+
+    assert reused.attrs["sampler_info"]["parameters_reused"] is True
+    assert reused.attrs["sampler_info"]["parameter_source"] == "provided and reused"
+
+
+def test_path_mixer_is_connected_with_one_fewer_edge_than_ring() -> None:
+    assert _path_edges(1) == ()
+    assert _path_edges(4) == ((0, 1), (1, 2), (2, 3))
+
+
+@pytest.mark.parametrize("qubits", [1, 2, 3, 4])
+def test_linear_w_state_preparation_is_uniform_and_one_hot(qubits: int) -> None:
+    qiskit = pytest.importorskip("qiskit")
+    from qiskit.quantum_info import Statevector
+
+    circuit = qiskit.QuantumCircuit(qubits)
+    _append_linear_w_state(circuit, tuple(range(qubits)))
+    probabilities = np.abs(Statevector.from_instruction(circuit).data) ** 2
+    expected = np.zeros(2**qubits)
+    for state in range(2**qubits):
+        if state.bit_count() == 1:
+            expected[state] = 1.0 / qubits
+
+    assert np.allclose(probabilities, expected)
 
 
 def test_restricted_xy_mixer_matches_dense_two_qubit_circuit() -> None:

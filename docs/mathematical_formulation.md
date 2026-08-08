@@ -266,4 +266,4 @@ independent validator and objective evaluator pass.
 - minimum diversion fill; and
 - the complete business objective.
 
-Only validator-passed solutions enter comparisons or the planner copilot.
+Only validator-passed solutions enter comparisons, reports, or planner artifacts.

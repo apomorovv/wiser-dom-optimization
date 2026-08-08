@@ -69,3 +69,4 @@ def test_filter_removes_explicitly_ineligible_rows() -> None:
     )
     result = filter_feasible_candidates(candidates)
     assert list(result["candidate_id"]) == ["C1"]
+

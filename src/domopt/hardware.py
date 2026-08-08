@@ -236,3 +236,4 @@ def benchmark_qubo_batch_scoring(
                     }
                 )
     return pd.DataFrame(rows)
+

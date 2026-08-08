@@ -136,9 +136,10 @@ confirmed before a business deployment or external QPU experiment.
 
 ### U5. Physical QPU benchmark
 
-The repository provides adapters but has not sent the restricted QUBO to hardware.
-Any claim needs organizer approval, matched timing, transpilation statistics, repeated
-trials, and uncertainty intervals.
+The archived IBM study used a generated synthetic QUBO; restricted challenge data were
+not sent to hardware. The final path-mixer and linear-W circuit changes require a matched
+rerun with backend calibration, timing, transpilation statistics, repetitions, and
+uncertainty intervals before hardware claims are updated.
 
 ### U6. Operational candidate-DC authorization
 

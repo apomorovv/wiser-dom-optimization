@@ -99,3 +99,4 @@ def test_inventory_audit_checks_available_inventory_identity() -> None:
 
     with pytest.raises(PocDataError, match="inventory identity fails"):
         _validate_source_table("inventory", frame)
+
