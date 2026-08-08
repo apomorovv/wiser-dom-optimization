@@ -58,8 +58,7 @@ optional labeled scenarios.
 
 ### Minimum diversion improvement
 
-Let $F_o^{\mathrm{def}}$ be the default candidate's protected-ATP fill preview.
-The minimum non-default fill is
+Let $F_o^{\mathrm{def}}$ be the default candidate's protected-ATP fill preview. The minimum non-default fill is
 
 $$
 L_o^{\mathrm{div}}=
@@ -69,9 +68,9 @@ F_o^{\mathrm{def}}+
 \Bigr\},
 $$
 
-where the POC uses $\delta_o=0.05$ and $B_o=100$ cases. Thus diversion must
-improve by both five percentage points and 100 cases, unless demand itself caps the
-requirement.
+where the POC uses $\delta_o = 0.05$ and $B_o = 100$ cases. Thus diversion must improve by both five percentage points and 
+100 cases, unless demand itself caps the requirement.
+
 
 ## 3. Decision variables
 
