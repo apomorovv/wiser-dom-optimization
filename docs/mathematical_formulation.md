@@ -100,36 +100,34 @@ and loose cases. Thresholded penalty linearization adds:
 
 The independently recomputed business objective is
 
+The independently recomputed business objective is
+
 $$
-\boxed{
-\max J=
-\sum_{o,s,c\in\mathcal C_o}v_{os}f_{osc}
+\boxed{\max J = \sum_o \sum_{(s,c)\in \mathcal{C}_o} v_{os} f_{osc}
 -\sum_o P_o
--\sum_c c_cx_c
-}.
+-\sum_c c_c x_c
+}
 $$
 
 For the POC thresholded penalty:
 
 $$
-a_o=\mathbf 1\left[
-\sum_{s,c}f_{osc}<H_o
-\right],
+a_o = \mathbf{1}\bigl[\sum_{s,c} f_{osc} < H_o\bigr],
 $$
 
 $$
-R_o=a_oF_o+
-\sum_s\left(\pi_{os}q_{os}+K_oh_{os}\right),
+R_o = a_o F_o + \sum_s \left(\pi_{os} q_{os} + K_o h_{os}\right),
 $$
 
 $$
-P_o=
+P_o =
 \begin{cases}
-0,&a_o=0,\\
-\min\left(\max(R_o,m_o),M_o\right),&a_o=1\text{ and }M_o>0,\\
-\max(R_o,m_o),&a_o=1\text{ and }M_o=0.
+0, & a_o = 0, \\
+\min\bigl(\max(R_o, m_o), M_o\bigr), & a_o = 1 \text{ and } M_o > 0, \\
+\max(R_o, m_o), & a_o = 1 \text{ and } M_o = 0.
 \end{cases}
 $$
+
 
 The MILP uses standard big-M product, maximum, and minimum linearizations. Bounds
 come from each order's total demand and penalty parameters, avoiding an arbitrary
