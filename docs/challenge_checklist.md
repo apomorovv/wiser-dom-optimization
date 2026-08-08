@@ -2,8 +2,6 @@
 
 **Author:** Andrei Pomorov
 
-**Submission status:** Ready
-
 | Challenge requirement | Final implementation or artifact |
 |---|---|
 | Two-page business and technical summary | `reports/business_technical_summary.md` and `.pdf` |
