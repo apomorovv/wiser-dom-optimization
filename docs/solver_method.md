@@ -228,7 +228,7 @@ $$
 E_g=\{(0,1),(1,2),\ldots,(m_g-2,m_g-1)\},
 $$
 
-which requires \(m_g-1\) logical mixer edges for a group of \(m_g\) choices rather than
+which requires $(m_g-1)$ logical mixer edges for a group of \(m_g\) choices rather than
 the \(m_g\) edges of the earlier ring construction. The path remains connected, so all
 one-hot choices remain reachable while reducing two-qubit circuit burden. QAOA
 parameters are also optimized once for a QUBO/depth pair and reused across matched
