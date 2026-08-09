@@ -191,9 +191,7 @@ However, the assignment problem requires exactly one choice from each group. The
 of one-hot feasible assignments is therefore only
 
 $$
-N_{\mathrm{feasible}}
-=
-\prod_{g=1}^{G_{\mathrm{local}}}m_g.
+N_{\mathrm{feasible}}=\prod_{g=1}^{G_{\mathrm{local}}}m_g.
 $$
 
 For example, five local groups with three alternatives each require 15 binary variables.
