@@ -174,14 +174,14 @@ plans of a bounded conflict neighborhood. Continuous fulfillment quantities, cum
 inventory, and the complete business constraints remain outside the QUBO and are
 handled by exact recourse and independent validation.
 
-Suppose neighborhood group \(g\) retains \(m_g\) assignment choices. The number of QUBO
+Suppose neighborhood group $g$ retains $m_g$ assignment choices. The number of QUBO
 binary variables, and therefore logical qubits in the direct gate-model encoding, is
 
 $$
 n=\sum_{g=1}^{G_{\mathrm{local}}}m_g.
 $$
 
-An unconstrained \(n\)-qubit statevector has dimension
+An unconstrained $n$-qubit statevector has dimension
 
 $$
 2^n.
@@ -210,7 +210,7 @@ $$
 valid assignments.
 
 This reduction is substantial, but it does **not** eliminate exponential scaling:
-\(\prod_g m_g\) still grows exponentially with the number of active groups. The exact
+$\prod_g m_g$ still grows exponentially with the number of active groups. The exact
 feasible-subspace simulator therefore refuses to enumerate neighborhoods whose state
 count exceeds the configured `max_feasible_states`. Larger neighborhoods must instead
 be reduced, sampled, or handled by the classical LNS path.
@@ -228,8 +228,8 @@ $$
 E_g=\{(0,1),(1,2),\ldots,(m_g-2,m_g-1)\},
 $$
 
-which requires $m_(g-1)$ logical mixer edges for a group of \(m_g\) choices rather than
-the \(m_g\) edges of the earlier ring construction. The path remains connected, so all
+which requires $m_{g-1}$ logical mixer edges for a group of $m_g$ choices rather than
+the $m_g$ edges of the earlier ring construction. The path remains connected, so all
 one-hot choices remain reachable while reducing two-qubit circuit burden. QAOA
 parameters are also optimized once for a QUBO/depth pair and reused across matched
 hardware runs rather than repeatedly paying the classical tuning cost. 
