@@ -78,7 +78,7 @@ approval. A real-data QUBO must not be sent without separate data-owner authoriz
 ## Reproduction commands
 
 ```bash
-python -m pip install -e ".[notebook,dev]"
+python -m pip install -e ".[full]"
 python -m pytest
 python scripts/run_challenge_study.py \
   --bundle-dir data/raw/nestle_challenge \

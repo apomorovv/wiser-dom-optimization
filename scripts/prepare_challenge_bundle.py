@@ -6,10 +6,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from domopt.poc import prepare_poc_bundle
+from domopt.poc import PocDataError, prepare_poc_bundle
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Copy the five optimizer inputs to stable names and optionally retain "
@@ -23,21 +23,32 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Exclude the two optional recommendation-output CSVs.",
     )
-    return parser.parse_args()
+    return parser
 
 
-def main() -> None:
-    args = parse_args()
-    copied = prepare_poc_bundle(
-        args.source_dir,
-        args.output_dir,
-        include_reference_outputs=not args.runtime_only,
-    )
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    output_dir = args.output_dir.expanduser()
+    try:
+        copied = prepare_poc_bundle(
+            args.source_dir.expanduser(),
+            output_dir,
+            include_reference_outputs=not args.runtime_only,
+        )
+    except PocDataError as error:
+        parser.error(str(error))
     for role, path in sorted(copied.items()):
         print(f"{role:>14}  {path.name}  {path.stat().st_size} bytes")
-    print(f"Prepared {len(copied)} files in {args.output_dir.resolve()}")
+    prepared = output_dir.resolve()
+    print(f"Prepared {len(copied)} files in {prepared}")
+    print("Next:")
+    print(
+        "  python scripts/run_challenge_study.py "
+        f'--bundle-dir "{prepared}" --profile smoke'
+    )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
-
+    raise SystemExit(main())

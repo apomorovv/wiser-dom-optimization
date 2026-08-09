@@ -129,12 +129,12 @@ class PocConfig:
 
 
 def _paths(bundle_dir: str | Path) -> dict[str, Path]:
-    root = Path(bundle_dir)
+    root = Path(bundle_dir).expanduser()
     return {key: root / name for key, name in POC_INPUT_FILENAMES.items()}
 
 
 def _reference_paths(bundle_dir: str | Path) -> dict[str, Path]:
-    root = Path(bundle_dir)
+    root = Path(bundle_dir).expanduser()
     return {key: root / name for key, name in POC_REFERENCE_FILENAMES.items()}
 
 
@@ -157,8 +157,8 @@ def prepare_poc_bundle(
     intentionally excluded because they are not runtime model inputs.
     """
 
-    source = Path(source_dir)
-    destination = Path(output_dir)
+    source = Path(source_dir).expanduser()
+    destination = Path(output_dir).expanduser()
     if not source.is_dir():
         raise PocDataError(f"Source bundle directory does not exist: {source}")
     destination.mkdir(parents=True, exist_ok=True)
@@ -372,13 +372,23 @@ def audit_poc_bundle(
 ) -> pd.DataFrame:
     """Parse the five runtime CSVs and optional recommendation outputs."""
 
-    paths = _paths(bundle_dir)
+    root = Path(bundle_dir).expanduser()
+    if not root.is_dir():
+        raise PocDataError(
+            "Challenge bundle directory does not exist: "
+            f"{root}. Pass the directory created by prepare_challenge_bundle.py."
+        )
+    paths = _paths(root)
     if include_reference_outputs:
         paths.update(_reference_paths(bundle_dir))
     rows: list[dict[str, object]] = []
     for key, path in paths.items():
         if not path.is_file() or path.stat().st_size == 0:
-            raise PocDataError(f"Required challenge file is missing or empty: {path}")
+            expected = ", ".join(POC_INPUT_FILENAMES.values())
+            raise PocDataError(
+                f"Required challenge file is missing or empty: {path}. "
+                f"Expected runtime filenames: {expected}"
+            )
         suffix = path.suffix.lower()
         record: dict[str, object] = {
             "role": key,
@@ -1396,4 +1406,3 @@ def audit_poc_outputs(bundle_dir: str | Path, problem: ProblemData | None = None
             errors.append(abs(calculated - float(default_penalty.loc[str(order_id)])))
         result["default_penalty_max_abs_error"] = max(errors, default=0.0)
     return result
-

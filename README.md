@@ -140,7 +140,7 @@ platform-specific virtual environment commands below.
 ```bash
 python3 -m venv .venv
 ./.venv/bin/python -m pip install --upgrade pip
-./.venv/bin/python -m pip install -e ".[notebook,dev]"
+./.venv/bin/python -m pip install -e ".[full]"
 ./.venv/bin/python -m pytest
 ```
 
@@ -149,12 +149,19 @@ python3 -m venv .venv
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -e ".[notebook,dev]"
+.\.venv\Scripts\python.exe -m pip install -e ".[full]"
 .\.venv\Scripts\python.exe -m pytest
 ```
 
+The `full` extra is the one-command installation for the notebook, solver cockpit,
+native HiGHS and SCIP adapters, Gurobi adapter, IBM Runtime integration, development
+checks, and GPU batch scoring on supported Linux and Windows architectures. Package
+installation does not submit IBM jobs or require a Gurobi license; those backends remain
+runtime opt-ins. Unsupported GPU platforms skip CuPy through environment markers, so the
+same command is valid on Linux, macOS, and Windows.
+
 The commands call the environment's Python directly, so shell activation is optional.
-Conda users can instead run:
+Conda users can install the same `full` environment with:
 
 ```bash
 conda env create -f environment.yml
@@ -193,7 +200,6 @@ portable CPU and MILP controls, explains the sparse LNS stages, visualizes busin
 search telemetry, and exports a certified run bundle.
 
 ```bash
-python -m pip install -e ".[app]"
 streamlit run apps/solver_cockpit.py
 ```
 
@@ -211,6 +217,10 @@ python scripts/prepare_challenge_bundle.py \
   --source-dir /path/to/downloads \
   --output-dir data/raw/nestle_challenge
 ```
+
+The preparation command prints the exact follow-up command. Pass its `--output-dir` to
+the study; do not accidentally replace a home-relative path such as `~/Wiser/...` with
+the different root-relative path `/Wiser/...`.
 
 Run a fast reproducibility check:
 
@@ -247,7 +257,6 @@ adapters automatically respect the CPU budget visible to the process; `--threads
 apply a lower cap without assuming a particular machine.
 
 ```bash
-python -m pip install -e ".[open-source-solvers]"
 python scripts/benchmark_milp_backends.py \
   --bundle-dir data/raw/nestle_challenge \
   --backends scipy-highs highspy scip
@@ -262,26 +271,17 @@ contract being compared.
 
 Gurobi can be useful for comparing solve time and optimality progress on the same exact
 MILP, but it should not be the default because many reviewers will not have a license.
-
-```bash
-python -m pip install -e ".[gurobi]"
-```
-
-Configure a valid Gurobi license, then run the notebook's **Optional MILP-backend
-comparison** section. The notebook always runs SciPy/HiGHS, runs Gurobi only when
+It is included in `full`; configure a valid Gurobi license, then run the notebook's
+**Optional MILP-backend comparison** section. The notebook always runs SciPy/HiGHS,
+runs Gurobi only when
 available, validates both outputs, and asserts matching objectives when both complete.
 An unavailable package or license is recorded as a skip.
 
 ## Optional IBM hardware study
 
-Install the IBM dependencies:
-
-```bash
-python -m pip install -e ".[ibm]"
-```
-
-Configure IBM Quantum using the official Qiskit Runtime mechanism. Hardware execution
-is disabled unless `allow_remote=True` is explicit. The supplied study generates its
+The `full` installation includes the IBM dependencies. Configure IBM Quantum using the
+official Qiskit Runtime mechanism. Hardware execution is disabled unless
+`allow_remote=True` is explicit. The supplied study generates its
 own synthetic coordination instance and does not transmit restricted challenge tables.
 
 ```bash
@@ -296,13 +296,9 @@ depth and mitigation variants with exact and uniform-feasible controls.
 
 ## GPU support
 
-A GPU is not needed to solve the challenge. The optional `gpu` extra is isolated from
-`full` so macOS, Windows, and CPU-only Linux installations remain reliable. The current
-GPU extra targets Linux x86-64 with CUDA 12:
-
-```bash
-python -m pip install -e ".[gpu]"
-```
+A GPU is not needed to solve the challenge. The `full` installation includes CUDA 12
+CuPy on supported Linux x86-64 and Windows AMD64 systems and skips it on unsupported
+platforms. A CPU-only system still uses the same validated solver path.
 
 GPU acceleration applies only to large batches of QUBO energy scoring and does not
 replace the MILP or validator.
