@@ -129,8 +129,6 @@ and loose cases. Thresholded penalty linearization adds:
 
 The independently recomputed business objective is
 
-The independently recomputed business objective is
-
 $$
 \boxed{\max J = \sum_o \sum_{(s,c)\in \mathcal{C}_o} v_{os} f_{osc}
 -\sum_o P_o
