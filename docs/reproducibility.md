@@ -87,12 +87,3 @@ python scripts/run_challenge_study.py \
 
 After the smoke profile succeeds, replace `smoke` with `full`. The notebook is an
 equivalent execution surface and adds the optional Gurobi comparison and hardware cells.
-
-## Interpreting the reviewed evidence
-
-The published submission artifacts summarize an evidence bundle produced by commit
-`7d087161e7d40cc7603c04e92eac71f4dbdb12ee`. The underlying tables and manifests remain
-local-only. Their review covered feasibility, residuals, source state, and privacy. The
-current branch fixes notebook-source normalization and strengthens the QAOA circuit.
-Results from the earlier circuit implementation must not be attributed to the
-strengthened implementation without a new matched run.
