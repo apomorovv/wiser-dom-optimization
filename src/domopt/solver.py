@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from .baselines import solve_polished_greedy
@@ -28,6 +28,8 @@ class SolverConfig:
     fast_time_limit_seconds: float = 30.0
     fast_mip_relative_gap: float = 0.0
     fast_seed: int = 0
+    milp_backend: str = "scipy-highs"
+    thread_count: int | None = None
     exact_lns: ExactLNSConfig = field(default_factory=ExactLNSConfig)
     hybrid: HybridConfig = field(default_factory=HybridConfig)
 
@@ -38,6 +40,10 @@ class SolverConfig:
             raise ValueError("fast_time_limit_seconds must be positive")
         if not 0 <= self.fast_mip_relative_gap < 1:
             raise ValueError("fast_mip_relative_gap must be in [0, 1)")
+        if not self.milp_backend.strip():
+            raise ValueError("milp_backend must be nonempty")
+        if self.thread_count is not None and self.thread_count <= 0:
+            raise ValueError("thread_count must be positive when provided")
         self.exact_lns.validate()
         self.hybrid.validate()
 
@@ -59,16 +65,32 @@ def solve_dom(
     if settings.mode == "fast":
         solution = solve_polished_greedy(
             problem,
+            backend=settings.milp_backend,
             time_limit_seconds=settings.fast_time_limit_seconds,
             mip_relative_gap=settings.fast_mip_relative_gap,
             seed=settings.fast_seed,
+            thread_count=settings.thread_count,
         )
         role = "production-default"
     elif settings.mode == "quality":
-        solution = solve_exact_lns(problem, config=settings.exact_lns)
+        solution = solve_exact_lns(
+            problem,
+            config=replace(
+                settings.exact_lns,
+                milp_backend=settings.milp_backend,
+                thread_count=settings.thread_count,
+            ),
+        )
         role = "quality-escalation"
     else:
-        solution = solve_hybrid(problem, config=settings.hybrid)
+        solution = solve_hybrid(
+            problem,
+            config=replace(
+                settings.hybrid,
+                milp_backend=settings.milp_backend,
+                thread_count=settings.thread_count,
+            ),
+        )
         role = "experimental-hybrid-comparator"
 
     validation = validate_solution(problem, solution)

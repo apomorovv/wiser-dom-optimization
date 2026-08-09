@@ -185,6 +185,21 @@ print(solution.assignments)
 `solve_dom` refuses to return an invalid incumbent. The `fast`, `quality`, and `hybrid`
 modes correspond to the hierarchy described above.
 
+## Interactive solver cockpit
+
+The optional Streamlit cockpit runs the same validated solver facade; it is not a
+separate demonstration model. It audits the five canonical challenge inputs, exposes
+portable CPU and MILP controls, explains the sparse LNS stages, visualizes business and
+search telemetry, and exports a certified run bundle.
+
+```bash
+python -m pip install -e ".[app]"
+streamlit run apps/solver_cockpit.py
+```
+
+Set `DOMOPT_BUNDLE_DIR` to prefill the local bundle path. The app preserves the existing
+input contract and never uploads challenge rows to a hosted service.
+
 ## Running the challenge study
 
 Place the authorized five runtime tables under a local directory that is not committed.
@@ -224,7 +239,26 @@ solver comparison, real and synthetic scaling, candidate and penalty sensitivity
 inventory shocks, noise proxies, pruning and batching ablations, sampler controls, an
 optional MILP-backend comparison, and an optional IBM hardware matrix.
 
-## Optional Gurobi comparison
+## Optional exact-solver comparisons
+
+The portable default remains SciPy/HiGHS. Two opt-in, open-source adapters make it
+possible to compare the identical compiled MILP through native HiGHS and SCIP. Native
+adapters automatically respect the CPU budget visible to the process; `--threads` can
+apply a lower cap without assuming a particular machine.
+
+```bash
+python -m pip install -e ".[open-source-solvers]"
+python scripts/benchmark_milp_backends.py \
+  --bundle-dir data/raw/nestle_challenge \
+  --backends scipy-highs highspy scip
+```
+
+The benchmark writes no output unless `--output` is provided. OR-Tools CP-SAT is not an
+exact drop-in comparator here because its model interface requires integer coefficients;
+scaling currency and continuous resource coefficients would change the numerical
+contract being compared.
+
+### Optional Gurobi adapter
 
 Gurobi can be useful for comparing solve time and optimality progress on the same exact
 MILP, but it should not be the default because many reviewers will not have a license.
