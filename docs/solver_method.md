@@ -157,9 +157,9 @@ This makes the method an **anytime hierarchy**:
 
 $$
 \text{fast feasible solution}
-\;\rightarrow\;
+\rightarrow
 \text{exact local improvement}
-\;\rightarrow\;
+\rightarrow
 \text{full certificate when tractable}.
 $$
 
