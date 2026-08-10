@@ -7,6 +7,12 @@ grid with repeated real and synthetic scaling, sensitivity studies, robustness t
 sampler ablations, and the coordination control. IBM hardware has separate `quick` and
 `presentation` profiles because QPU access is optional and remote.
 
+The reviewed `full` profile uses a 100-order common comparison, reaches all 372 real
+assignment groups, scales generated greedy and exact-LNS workloads to 100,000 orders,
+and scales the hybrid workflow to 20,000 generated orders. The final `presentation`
+hardware profile contains 18 jobs at 8,192 shots each. The notebook records those final
+settings while leaving remote submission disabled by default.
+
 ## Fair comparison rules
 
 All compared solvers receive the same normalized problem, candidate universe, business
@@ -74,11 +80,13 @@ labeled and never represented as business impact.
 Remote IBM execution is disabled by default. The provided hardware study constructs an
 independent synthetic instance and sends only its compiled circuit after explicit
 approval. A real-data QUBO must not be sent without separate data-owner authorization.
+In Qiskit, an IBM `backend` names the quantum processor/execution target; QAOA is the
+optimization proposal method.
 
 ## Reproduction commands
 
 ```bash
-python -m pip install -e ".[notebook,dev]"
+python -m pip install -e ".[full]"
 python -m pytest
 python scripts/run_challenge_study.py \
   --bundle-dir data/raw/nestle_challenge \
@@ -87,3 +95,5 @@ python scripts/run_challenge_study.py \
 
 After the smoke profile succeeds, replace `smoke` with `full`. The notebook is an
 equivalent execution surface and adds the optional Gurobi comparison and hardware cells.
+Publication figures are regenerated from audited local table directories with
+`scripts/create_submission_figures.py`; the source tables remain outside the branch.

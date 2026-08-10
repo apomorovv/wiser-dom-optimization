@@ -24,11 +24,28 @@ ibm = [
 ]
 
 gpu = [
-    "cupy-cuda12x>=13.0; platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "cupy-cuda12x>=13.0; (platform_system == 'Linux' and platform_machine == 'x86_64') or (platform_system == 'Windows' and platform_machine == 'AMD64')",
 ]
 
 gurobi = [
     "gurobipy>=11,<14",
+]
+
+highs = [
+    "highspy>=1.10,<2",
+]
+
+scip = [
+    "pyscipopt>=5.5,<6",
+]
+
+open-source-solvers = [
+    "highspy>=1.10,<2",
+    "pyscipopt>=5.5,<6",
+]
+
+app = [
+    "streamlit>=1.61,<2",
 ]
 
 notebook = [
@@ -39,13 +56,19 @@ notebook = [
 ]
 
 dev = [
+    "matplotlib>=3.8",
     "pytest",
     "ruff",
 ]
 
 full = [
+    "cupy-cuda12x>=13.0; (platform_system == 'Linux' and platform_machine == 'x86_64') or (platform_system == 'Windows' and platform_machine == 'AMD64')",
+    "gurobipy>=11,<14",
+    "highspy>=1.10,<2",
+    "pyscipopt>=5.5,<6",
     "qiskit>=2.5,<3",
     "qiskit-ibm-runtime>=0.47,<1",
+    "streamlit>=1.61,<2",
     "ipykernel",
     "jupyterlab",
     "matplotlib>=3.8",
@@ -59,6 +82,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-q"
 
 [tool.ruff]

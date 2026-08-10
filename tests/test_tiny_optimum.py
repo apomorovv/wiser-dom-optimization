@@ -33,12 +33,25 @@ def test_milp_backend_discovery_keeps_portable_default_available() -> None:
     backends = available_milp_backends()
 
     assert backends["scipy-highs"] is True
+    assert isinstance(backends["highspy"], bool)
+    assert isinstance(backends["scip"], bool)
     assert isinstance(backends["gurobi"], bool)
 
 
 def test_unknown_milp_backend_has_actionable_error() -> None:
     with pytest.raises(ClassicalSolverError, match="scipy-highs"):
         solve_classical(make_tiny_problem_data(), backend="unknown")
+
+
+def test_objective_cutoff_preserves_a_known_incumbent() -> None:
+    problem = make_tiny_problem_data()
+    solution = solve_classical(problem, minimum_objective=126.0)
+
+    assert validate_solution(problem, solution).is_feasible
+    assert evaluate_solution(problem, solution).objective_value == pytest.approx(126.0)
+
+    with pytest.raises(ClassicalSolverError, match="no incumbent"):
+        solve_classical(problem, minimum_objective=126.01)
 
 
 @pytest.mark.skipif(
@@ -59,6 +72,27 @@ def test_optional_gurobi_backend_matches_highs_when_licensed() -> None:
     )
 
 
+@pytest.mark.parametrize("backend", ["highspy", "scip"])
+def test_optional_open_source_backends_match_portable_highs(backend: str) -> None:
+    if not available_milp_backends()[backend]:
+        pytest.skip(f"optional {backend} package is not installed")
+
+    problem = make_tiny_problem_data()
+    portable = solve_classical(problem, backend="scipy-highs")
+    comparison = solve_classical(
+        problem,
+        backend=backend,
+        thread_count=2,
+        seed=3,
+    )
+
+    assert validate_solution(problem, comparison).is_feasible
+    assert comparison.metadata["thread_count"] in {1, 2}
+    assert evaluate_solution(problem, comparison).objective_value == pytest.approx(
+        evaluate_solution(problem, portable).objective_value
+    )
+
+
 def test_classical_solver_cannot_use_inventory_after_last_checkpoint() -> None:
     problem = make_tiny_problem_data()
     inventory = problem.inventory.copy()
@@ -76,4 +110,3 @@ def test_classical_solver_cannot_use_inventory_after_last_checkpoint() -> None:
         & (pd.to_datetime(solution.fulfillment["selected_pgi_date"]) > "2026-07-13")
     ]
     assert (uncovered["fulfilled_cases"] == 0).all()
-

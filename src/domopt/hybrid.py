@@ -17,17 +17,16 @@ import numpy as np
 import pandas as pd
 
 from .baselines import (
-    _assignment_units,
     _CapacityState,
     _feasible_decisions,
     _InventoryState,
+    _make_baseline_cache,
     solve_default_baseline,
     solve_greedy_baseline,
 )
 from .classical import ClassicalSolverError, solve_classical
 from .data import normalize_problem_data
 from .objective import evaluate_solution
-from .penalties import order_penalty
 from .quantum import IBM_MITIGATION_STRATEGIES, sample_qubo
 from .qubo import build_candidate_qubo, perturb_qubo, qubo_energy
 from .repair import repair_one_hot
@@ -55,6 +54,8 @@ class HybridConfig:
     sweeps: int = 200
     top_k_recourse: int = 6
     recourse_time_limit_seconds: float = 10.0
+    milp_backend: str = "scipy-highs"
+    thread_count: int | None = None
     one_hot_penalty_multiplier: float = 1.25
     pair_penalty_multiplier: float = 1.0
     initial_method: str = "greedy"
@@ -92,6 +93,10 @@ class HybridConfig:
             raise ValueError("sampling and recourse counts must be positive")
         if self.recourse_time_limit_seconds <= 0:
             raise ValueError("recourse_time_limit_seconds must be positive")
+        if not self.milp_backend.strip():
+            raise ValueError("milp_backend must be nonempty")
+        if self.thread_count is not None and self.thread_count <= 0:
+            raise ValueError("thread_count must be positive when provided")
         if self.one_hot_penalty_multiplier <= 1.0:
             raise ValueError("one_hot_penalty_multiplier must be greater than one")
         if self.pair_penalty_multiplier < 0:
@@ -109,16 +114,11 @@ class HybridConfig:
         if self.qaoa_parameters is not None and len(self.qaoa_parameters) != 2 * self.qaoa_layers:
             raise ValueError("qaoa_parameters must contain two values per QAOA layer")
         if not 0 <= self.qaoa_readout_bitflip_probability <= 1:
-            raise ValueError(
-                "qaoa_readout_bitflip_probability must be between zero and one"
-            )
+            raise ValueError("qaoa_readout_bitflip_probability must be between zero and one")
         if self.max_feasible_states <= 0:
             raise ValueError("max_feasible_states must be positive")
         if self.ibm_mitigation_strategy not in IBM_MITIGATION_STRATEGIES:
-            raise ValueError(
-                "ibm_mitigation_strategy must be one of "
-                f"{IBM_MITIGATION_STRATEGIES}"
-            )
+            raise ValueError(f"ibm_mitigation_strategy must be one of {IBM_MITIGATION_STRATEGIES}")
         if self.ibm_transpiler_optimization_level not in {0, 1, 2, 3}:
             raise ValueError("ibm_transpiler_optimization_level must be 0, 1, 2, or 3")
         if self.ibm_transpiler_trials <= 0:
@@ -144,6 +144,8 @@ class ExactLNSConfig:
     maximum_local_fulfillment_variables: int = 6_000
     local_time_limit_seconds: float = 8.0
     mip_relative_gap: float = 0.01
+    milp_backend: str = "scipy-highs"
+    thread_count: int | None = None
     diversification_interval: int = 3
     initial_method: str = "greedy"
     polish_initial_incumbent: bool = True
@@ -160,9 +162,7 @@ class ExactLNSConfig:
             <= self.initial_neighborhood_groups
             <= self.maximum_neighborhood_groups
         ):
-            raise ValueError(
-                "neighborhood group limits must satisfy minimum <= initial <= maximum"
-            )
+            raise ValueError("neighborhood group limits must satisfy minimum <= initial <= maximum")
         if self.maximum_neighborhood_orders <= 0:
             raise ValueError("maximum_neighborhood_orders must be positive")
         if self.maximum_local_fulfillment_variables <= 0:
@@ -171,6 +171,10 @@ class ExactLNSConfig:
             raise ValueError("local_time_limit_seconds must be positive")
         if not 0 <= self.mip_relative_gap < 1:
             raise ValueError("mip_relative_gap must be in [0, 1)")
+        if not self.milp_backend.strip():
+            raise ValueError("milp_backend must be nonempty")
+        if self.thread_count is not None and self.thread_count <= 0:
+            raise ValueError("thread_count must be positive when provided")
         if self.diversification_interval <= 0:
             raise ValueError("diversification_interval must be positive")
         if self.initial_method not in {"default", "greedy"}:
@@ -179,12 +183,20 @@ class ExactLNSConfig:
 
 @dataclass(frozen=True)
 class _NeighborhoodIndex:
-    """Problem-static assignment-group conflicts reused across iterations."""
+    """Sparse inverted resource index reused across search iterations.
+
+    Pairwise group conflicts are deliberately not materialized.  A bounded search
+    discovers the neighbors of only the units it visits by joining their resource
+    signatures through ``units_by_resource``.
+    """
 
     members_by_unit: dict[str, frozenset[str]]
-    adjacency: dict[str, frozenset[str]]
+    resources_by_unit: dict[str, frozenset[tuple[Any, ...]]]
+    units_by_resource: dict[tuple[Any, ...], frozenset[str]]
+    conflict_mass: dict[str, int]
     candidate_count: dict[str, int]
     fulfillment_variable_estimate: dict[str, int]
+    loss_weight_by_line: dict[tuple[str, str], float]
 
 
 def _solution_for_orders(solution: Solution, order_ids: set[str], method: str) -> Solution:
@@ -249,13 +261,10 @@ def residualize_problem(
     # MILP, producing thousands of coefficient-empty constraints.  Frozen use has
     # already been subtracted above, so this projection is lossless for the active
     # orders and benefits both sampler recourse and exact LNS.
-    eligible_local = local_candidates.loc[
-        local_candidates["eligible"].astype(bool)
-    ]
+    eligible_local = local_candidates.loc[local_candidates["eligible"].astype(bool)]
     reachable_inventory = (
         eligible_local[["order_id", "dc_id"]]
-        .merge(local_lines[["order_id", "sku_id"]], on="order_id", how="inner")
-        [["dc_id", "sku_id"]]
+        .merge(local_lines[["order_id", "sku_id"]], on="order_id", how="inner")[["dc_id", "sku_id"]]
         .drop_duplicates()
     )
     inventory = inventory.merge(
@@ -265,9 +274,7 @@ def residualize_problem(
         validate="many_to_one",
     )
     reachable_dates = (
-        eligible_local[["dc_id", "pgi_date"]]
-        .rename(columns={"pgi_date": "date"})
-        .drop_duplicates()
+        eligible_local[["dc_id", "pgi_date"]].rename(columns={"pgi_date": "date"}).drop_duplicates()
     )
     capacities = capacities.merge(
         reachable_dates,
@@ -299,14 +306,6 @@ def residualize_problem(
         },
     )
     return normalize_problem_data(local)
-
-
-def _unassigned_value(problem: ProblemData, order_id: str) -> float:
-    lines = problem.order_lines.loc[
-        problem.order_lines["order_id"].astype(str) == str(order_id)
-    ].copy()
-    lines["unfulfilled_cases"] = lines["demand_cases"]
-    return -order_penalty(problem, order_id, lines)
 
 
 def _plan_usage(
@@ -350,9 +349,8 @@ def _plan_usage(
 
     candidate = problem.candidates.set_index("candidate_id").loc[str(plan.candidate_id)]
     for capacity in problem.capacities.itertuples(index=False):
-        if (
-            str(capacity.dc_id) != str(plan.dc_id)
-            or pd.Timestamp(capacity.date) != pd.Timestamp(plan.pgi_date)
+        if str(capacity.dc_id) != str(plan.dc_id) or pd.Timestamp(capacity.date) != pd.Timestamp(
+            plan.pgi_date
         ):
             continue
         resource = str(capacity.resource)
@@ -371,9 +369,7 @@ def _plan_usage(
             )
             amount += variable
             if variable > 0:
-                case_gain = float(line["unit_value"]) + float(
-                    line["penalty_per_unfilled_case"]
-                )
+                case_gain = float(line["unit_value"]) + float(line["penalty_per_unfilled_case"])
                 marginal_candidates.append(case_gain * float(quantity) / variable)
         if amount > 0:
             usage[key] = amount
@@ -398,9 +394,7 @@ def _resource_pressure(
     fits independently. Detailed feasibility is still delegated to MILP recourse.
     """
 
-    maximum_by_order: defaultdict[
-        tuple[Any, ...], dict[str, float]
-    ] = defaultdict(dict)
+    maximum_by_order: defaultdict[tuple[Any, ...], dict[str, float]] = defaultdict(dict)
     for row in plans.itertuples(index=False):
         for key, amount in row.usage.items():
             order_id = str(row.order_id)
@@ -432,14 +426,13 @@ def build_neighborhood_qubo(
     resource_limits: dict[tuple[Any, ...], float] = {}
     inventory = _InventoryState(problem.inventory)
     capacities = _CapacityState(problem.capacities)
-    eligible = problem.candidates.loc[
-        problem.candidates["eligible"].astype(bool)
-    ].sort_values(["order_id", "pgi_date", "candidate_id"], kind="mergesort")
-    units = _assignment_units(problem)
-    incumbent_lookup = incumbent.assignments.set_index("order_id")
-    candidate_options = problem.candidates.set_index("candidate_id").get(
-        "group_option_id"
+    baseline_cache = _make_baseline_cache(problem)
+    eligible = problem.candidates.loc[problem.candidates["eligible"].astype(bool)].sort_values(
+        ["order_id", "pgi_date", "candidate_id"], kind="mergesort"
     )
+    units = baseline_cache.members_by_unit
+    incumbent_lookup = incumbent.assignments.set_index("order_id")
+    candidate_options = problem.candidates.set_index("candidate_id").get("group_option_id")
     incumbent_targets: dict[str, str] = {}
 
     for unit_id, members in sorted(units.items()):
@@ -450,7 +443,7 @@ def build_neighborhood_qubo(
                 "order_id": unit_id,
                 "candidate_id": None,
                 "value": sum(
-                    _unassigned_value(problem, order_id) for order_id in members
+                    baseline_cache.unassigned_score_by_order[order_id] for order_id in members
                 ),
                 "usage": {},
                 "loss": {},
@@ -476,9 +469,7 @@ def build_neighborhood_qubo(
                 chosen_options.add(option_id)
             if len(chosen_options) != 1:
                 raise ValueError(f"Incumbent splits assignment unit {unit_id!r}")
-            incumbent_targets[unit_id] = (
-                f"option::{unit_id}::{next(iter(chosen_options))}"
-            )
+            incumbent_targets[unit_id] = f"option::{unit_id}::{next(iter(chosen_options))}"
 
         decisions = _feasible_decisions(
             problem,
@@ -487,15 +478,14 @@ def build_neighborhood_qubo(
             eligible,
             inventory,
             capacities,
+            cache=baseline_cache,
         )
         for decision in decisions:
             usage: defaultdict[tuple[Any, ...], float] = defaultdict(float)
             loss: dict[tuple[Any, ...], float] = {}
             fixed_assignments: dict[str, str | None] = {}
             for member_plan in decision.member_plans:
-                member_usage, limits, member_loss = _plan_usage(
-                    problem, member_plan
-                )
+                member_usage, limits, member_loss = _plan_usage(problem, member_plan)
                 resource_limits.update(limits)
                 for key, amount in member_usage.items():
                     usage[key] += float(amount)
@@ -579,9 +569,7 @@ def build_neighborhood_qubo(
             if penalty > 0:
                 plan_a = str(left["plan_id"])
                 plan_b = str(right["plan_id"])
-                conflict_rows.append(
-                    {"plan_id_a": plan_a, "plan_id_b": plan_b, "penalty": penalty}
-                )
+                conflict_rows.append({"plan_id_a": plan_a, "plan_id_b": plan_b, "penalty": penalty})
                 incident_penalty[plan_a] += penalty
                 incident_penalty[plan_b] += penalty
 
@@ -591,9 +579,7 @@ def build_neighborhood_qubo(
     )
     maximum_value = float(plans["qubo_value"].max()) if not plans.empty else 0.0
     maximum_incident = max(incident_penalty.values(), default=0.0)
-    one_hot_penalty = one_hot_penalty_multiplier * (
-        maximum_value + maximum_incident + 1.0
-    )
+    one_hot_penalty = one_hot_penalty_multiplier * (maximum_value + maximum_incident + 1.0)
     qubo_plans = plans[["plan_id", "order_id", "qubo_value"]].rename(
         columns={"qubo_value": "value"}
     )
@@ -626,9 +612,9 @@ def _resource_signatures(problem: ProblemData) -> dict[str, set[tuple[Any, ...]]
         for order_id, group in problem.order_lines.groupby("order_id", sort=False)
     }
     resources = set(problem.capacities.get("resource", pd.Series(dtype=str)).astype(str))
-    for candidate in problem.candidates.loc[
-        problem.candidates["eligible"].astype(bool)
-    ].itertuples(index=False):
+    for candidate in problem.candidates.loc[problem.candidates["eligible"].astype(bool)].itertuples(
+        index=False
+    ):
         order_id = str(candidate.order_id)
         dc_id = str(candidate.dc_id)
         date = pd.Timestamp(candidate.pgi_date)
@@ -640,7 +626,7 @@ def _resource_signatures(problem: ProblemData) -> dict[str, set[tuple[Any, ...]]
 
 
 def _build_neighborhood_index(problem: ProblemData) -> _NeighborhoodIndex:
-    """Build the static conflict graph once for a complete search run."""
+    """Build a linear-size resource-to-unit index for a complete search run."""
 
     signatures = _resource_signatures(problem)
     if bool(problem.metadata.get("enforce_assignment_group", False)):
@@ -649,14 +635,11 @@ def _build_neighborhood_index(problem: ProblemData) -> _NeighborhoodIndex:
         if "group_option_id" not in problem.candidates.columns:
             raise ValueError("Group cohesion requires candidates.group_option_id")
         unit_for_order = (
-            problem.orders.set_index("order_id")["assignment_group"]
-            .astype(str)
-            .to_dict()
+            problem.orders.set_index("order_id")["assignment_group"].astype(str).to_dict()
         )
     else:
         unit_for_order = {
-            str(order_id): str(order_id)
-            for order_id in problem.orders["order_id"].astype(str)
+            str(order_id): str(order_id) for order_id in problem.orders["order_id"].astype(str)
         }
 
     members_by_unit: defaultdict[str, set[str]] = defaultdict(set)
@@ -670,56 +653,63 @@ def _build_neighborhood_index(problem: ProblemData) -> _NeighborhoodIndex:
     for unit, keys in unit_signatures.items():
         for key in keys:
             inverted[key].add(unit)
-    adjacency: defaultdict[str, set[str]] = defaultdict(set)
-    for units in inverted.values():
-        for unit in units:
-            adjacency[unit].update(units - {unit})
+    conflict_mass = {
+        unit: sum(max(0, len(inverted[key]) - 1) for key in keys)
+        for unit, keys in unit_signatures.items()
+    }
 
-    eligible = problem.candidates.loc[
-        problem.candidates["eligible"].astype(bool)
-    ].copy()
+    eligible = problem.candidates.loc[problem.candidates["eligible"].astype(bool)].copy()
     if bool(problem.metadata.get("enforce_assignment_group", False)):
-        eligible["decision_unit"] = eligible["order_id"].astype(str).map(
-            unit_for_order
-        )
-        candidate_count = (
-            eligible.groupby("decision_unit")["group_option_id"].nunique().to_dict()
-        )
+        eligible["decision_unit"] = eligible["order_id"].astype(str).map(unit_for_order)
+        candidate_count = eligible.groupby("decision_unit")["group_option_id"].nunique().to_dict()
     else:
         candidate_count = (
-            eligible.groupby(eligible["order_id"].astype(str))["candidate_id"]
-            .nunique()
-            .to_dict()
+            eligible.groupby(eligible["order_id"].astype(str))["candidate_id"].nunique().to_dict()
         )
 
-    line_count = problem.order_lines.groupby(
-        problem.order_lines["order_id"].astype(str)
-    ).size().to_dict()
-    candidates_per_order = eligible.groupby(
-        eligible["order_id"].astype(str)
-    )["candidate_id"].nunique().to_dict()
+    line_count = (
+        problem.order_lines.groupby(problem.order_lines["order_id"].astype(str)).size().to_dict()
+    )
+    candidates_per_order = (
+        eligible.groupby(eligible["order_id"].astype(str))["candidate_id"].nunique().to_dict()
+    )
     fulfillment_variable_estimate = {
         unit: sum(
-            int(line_count.get(order_id, 0))
-            * int(candidates_per_order.get(order_id, 0))
+            int(line_count.get(order_id, 0)) * int(candidates_per_order.get(order_id, 0))
             for order_id in members
         )
         for unit, members in members_by_unit.items()
     }
+    loss_weight_by_line = {
+        (str(row.order_id), str(row.sku_id)): (
+            float(row.unit_value) + float(row.penalty_per_unfilled_case)
+        )
+        for row in problem.order_lines.itertuples(index=False)
+    }
 
     return _NeighborhoodIndex(
-        members_by_unit={
-            unit: frozenset(members) for unit, members in members_by_unit.items()
+        members_by_unit={unit: frozenset(members) for unit, members in members_by_unit.items()},
+        resources_by_unit={
+            unit: frozenset(unit_signatures.get(unit, set())) for unit in members_by_unit
         },
-        adjacency={
-            unit: frozenset(adjacency.get(unit, set())) for unit in members_by_unit
-        },
+        units_by_resource={key: frozenset(units) for key, units in inverted.items()},
+        conflict_mass={str(unit): int(value) for unit, value in conflict_mass.items()},
         candidate_count={str(unit): int(count) for unit, count in candidate_count.items()},
         fulfillment_variable_estimate={
-            str(unit): int(count)
-            for unit, count in fulfillment_variable_estimate.items()
+            str(unit): int(count) for unit, count in fulfillment_variable_estimate.items()
         },
+        loss_weight_by_line=loss_weight_by_line,
     )
+
+
+def _lazy_neighbors(index: _NeighborhoodIndex, unit: str) -> set[str]:
+    """Discover one unit's neighbors from shared-resource posting lists."""
+
+    neighbors: set[str] = set()
+    for resource in index.resources_by_unit.get(unit, frozenset()):
+        neighbors.update(index.units_by_resource.get(resource, frozenset()))
+    neighbors.discard(unit)
+    return neighbors
 
 
 def _unit_priority(
@@ -729,21 +719,12 @@ def _unit_priority(
 ) -> tuple[list[str], dict[str, float]]:
     """Rank atomic groups by approximate recoverable business loss and conflict."""
 
-    fulfillment = incumbent.fulfillment.merge(
-        problem.order_lines[
-            ["order_id", "sku_id", "unit_value", "penalty_per_unfilled_case"]
-        ],
-        on=["order_id", "sku_id"],
-        how="left",
-        validate="one_to_one",
-    )
-    fulfillment["weighted_unfilled"] = fulfillment["unfulfilled_cases"].astype(
-        float
-    ) * (
-        fulfillment["unit_value"].astype(float)
-        + fulfillment["penalty_per_unfilled_case"].astype(float)
-    )
-    by_order = fulfillment.groupby("order_id")["weighted_unfilled"].sum().to_dict()
+    by_order: defaultdict[str, float] = defaultdict(float)
+    for row in incumbent.fulfillment.itertuples(index=False):
+        key = (str(row.order_id), str(row.sku_id))
+        by_order[key[0]] += float(row.unfulfilled_cases) * float(
+            index.loss_weight_by_line.get(key, 0.0)
+        )
     loss_by_unit = {
         unit: sum(float(by_order.get(order_id, 0.0)) for order_id in members)
         for unit, members in index.members_by_unit.items()
@@ -752,7 +733,7 @@ def _unit_priority(
         index.members_by_unit,
         key=lambda unit: (
             -loss_by_unit.get(unit, 0.0),
-            -len(index.adjacency.get(unit, frozenset())),
+            -index.conflict_mass.get(unit, 0),
             -len(index.members_by_unit[unit]),
             unit,
         ),
@@ -770,7 +751,6 @@ def _select_neighborhood(
 ) -> set[str]:
     neighborhood_index = index or _build_neighborhood_index(problem)
     members_by_unit = neighborhood_index.members_by_unit
-    adjacency = neighborhood_index.adjacency
     ranked, unit_unfilled = _unit_priority(problem, incumbent, neighborhood_index)
     unit_variables = {
         unit: min(
@@ -791,7 +771,9 @@ def _select_neighborhood(
     variable_count = 0
     visited: set[str] = set()
 
-    while queue and sum(len(members_by_unit[u]) for u in selected_units) < config.neighborhood_orders:
+    while (
+        queue and sum(len(members_by_unit[u]) for u in selected_units) < config.neighborhood_orders
+    ):
         order_id = queue.popleft()
         if order_id in visited:
             continue
@@ -810,10 +792,10 @@ def _select_neighborhood(
         variable_count += order_variables
         if config.batch_strategy == "conflict":
             neighbors = sorted(
-                adjacency.get(order_id, set()),
+                _lazy_neighbors(neighborhood_index, order_id),
                 key=lambda neighbor: (
                     -unit_unfilled.get(neighbor, 0.0),
-                    -len(adjacency.get(neighbor, set())),
+                    -neighborhood_index.conflict_mass.get(neighbor, 0),
                     neighbor,
                 ),
             )
@@ -872,8 +854,7 @@ def _select_exact_lns_neighborhood(
         unit_variables = index.fulfillment_variable_estimate.get(unit, 0)
         if (
             active_order_count + member_count > config.maximum_neighborhood_orders
-            or fulfillment_variables + unit_variables
-            > config.maximum_local_fulfillment_variables
+            or fulfillment_variables + unit_variables > config.maximum_local_fulfillment_variables
         ):
             continue
         selected.append(unit)
@@ -881,10 +862,10 @@ def _select_exact_lns_neighborhood(
         fulfillment_variables += unit_variables
         if not diversify:
             neighbors = sorted(
-                index.adjacency.get(unit, frozenset()),
+                _lazy_neighbors(index, unit),
                 key=lambda neighbor: (
                     -unit_loss.get(neighbor, 0.0),
-                    -len(index.adjacency.get(neighbor, frozenset())),
+                    -index.conflict_mass.get(neighbor, 0),
                     neighbor,
                 ),
             )
@@ -899,8 +880,7 @@ def _select_exact_lns_neighborhood(
         unit_variables = index.fulfillment_variable_estimate.get(unit, 0)
         if (
             active_order_count + member_count > config.maximum_neighborhood_orders
-            or fulfillment_variables + unit_variables
-            > config.maximum_local_fulfillment_variables
+            or fulfillment_variables + unit_variables > config.maximum_local_fulfillment_variables
         ):
             continue
         selected.append(unit)
@@ -931,8 +911,7 @@ def _merge_local_solution(
         local.assignments.copy()
         if outside_assignments.empty
         else pd.DataFrame.from_records(
-            outside_assignments.to_dict("records")
-            + local.assignments.to_dict("records"),
+            outside_assignments.to_dict("records") + local.assignments.to_dict("records"),
             columns=incumbent.assignments.columns,
         )
     ).sort_values("order_id", kind="mergesort")
@@ -940,8 +919,7 @@ def _merge_local_solution(
         local.fulfillment.copy()
         if outside_fulfillment.empty
         else pd.DataFrame.from_records(
-            outside_fulfillment.to_dict("records")
-            + local.fulfillment.to_dict("records"),
+            outside_fulfillment.to_dict("records") + local.fulfillment.to_dict("records"),
             columns=incumbent.fulfillment.columns,
         )
     ).sort_values(["order_id", "sku_id"], kind="mergesort")
@@ -966,9 +944,7 @@ def _sample_to_fixed_assignments(
         if str(row.plan_id) in selected:
             fixed.update(
                 {
-                    str(order_id): (
-                        None if candidate_id is None else str(candidate_id)
-                    )
+                    str(order_id): (None if candidate_id is None else str(candidate_id))
                     for order_id, candidate_id in row.fixed_assignments.items()
                 }
             )
@@ -979,9 +955,7 @@ def _solution_fixed_assignments(solution: Solution) -> dict[str, str | None]:
     """Extract a complete assignment policy for exact quantity recourse."""
 
     return {
-        str(row.order_id): (
-            None if bool(row.is_unassigned) else str(row.candidate_id)
-        )
+        str(row.order_id): (None if bool(row.is_unassigned) else str(row.candidate_id))
         for row in solution.assignments.itertuples(index=False)
     }
 
@@ -1019,10 +993,13 @@ def solve_exact_lns(
         try:
             polished = solve_classical(
                 problem,
+                backend=settings.milp_backend,
                 time_limit_seconds=settings.local_time_limit_seconds,
                 mip_relative_gap=settings.mip_relative_gap,
                 seed=settings.seed,
+                thread_count=settings.thread_count,
                 fixed_assignments=_solution_fixed_assignments(raw_incumbent),
+                minimum_objective=raw_initial_value,
             )
             polished_value = evaluate_solution(problem, polished).objective_value
             if (
@@ -1072,12 +1049,8 @@ def solve_exact_lns(
 
         residual_start = perf_counter()
         local_problem = residualize_problem(problem, incumbent, active_orders)
-        local_incumbent = _solution_for_orders(
-            incumbent, active_orders, "exact_lns_incumbent"
-        )
-        local_incumbent_value = evaluate_solution(
-            local_problem, local_incumbent
-        ).objective_value
+        local_incumbent = _solution_for_orders(incumbent, active_orders, "exact_lns_incumbent")
+        local_incumbent_value = evaluate_solution(local_problem, local_incumbent).objective_value
         residualization_seconds += perf_counter() - residual_start
 
         solve_start = perf_counter()
@@ -1086,9 +1059,11 @@ def solve_exact_lns(
         try:
             local_solution = solve_classical(
                 local_problem,
+                backend=settings.milp_backend,
                 time_limit_seconds=settings.local_time_limit_seconds,
                 mip_relative_gap=settings.mip_relative_gap,
                 seed=settings.seed + iteration,
+                thread_count=settings.thread_count,
             )
             local_solves += 1
         except ClassicalSolverError as error:
@@ -1111,21 +1086,13 @@ def solve_exact_lns(
             local_variables = int(local_solution.metadata.get("n_variables", 0))
             local_constraints = int(local_solution.metadata.get("n_constraints", 0))
             bound_value = local_solution.metadata.get("best_bound")
-            local_best_bound = (
-                None if bound_value is None else float(bound_value)
-            )
+            local_best_bound = None if bound_value is None else float(bound_value)
             node_value = local_solution.metadata.get("mip_node_count")
             local_mip_nodes = 0 if node_value is None else int(node_value)
             maximum_local_variables = max(maximum_local_variables, local_variables)
-            maximum_local_constraints = max(
-                maximum_local_constraints, local_constraints
-            )
-            maximum_local_mip_nodes = max(
-                maximum_local_mip_nodes, local_mip_nodes
-            )
-            local_value = evaluate_solution(
-                local_problem, local_solution
-            ).objective_value
+            maximum_local_constraints = max(maximum_local_constraints, local_constraints)
+            maximum_local_mip_nodes = max(maximum_local_mip_nodes, local_mip_nodes)
+            local_value = evaluate_solution(local_problem, local_solution).objective_value
             local_delta = local_value - local_incumbent_value
             tolerance = 1e-9 * max(1.0, abs(local_incumbent_value))
 
@@ -1159,10 +1126,7 @@ def solve_exact_lns(
         expensive = (
             local_solution is None
             or solve_seconds >= 0.9 * settings.local_time_limit_seconds
-            or (
-                gap is not None
-                and gap > max(0.05, 2.0 * settings.mip_relative_gap)
-            )
+            or (gap is not None and gap > max(0.05, 2.0 * settings.mip_relative_gap))
         )
         if settings.adaptive:
             if expensive and target_groups > minimum_groups:
@@ -1199,9 +1163,7 @@ def solve_exact_lns(
     assignments = incumbent.assignments.copy()
     assignments["method"] = "exact_lns"
     initialization_seconds = (
-        baseline_initialization_seconds
-        + initial_polish_seconds
-        + neighborhood_index_seconds
+        baseline_initialization_seconds + initial_polish_seconds + neighborhood_index_seconds
     )
     return Solution(
         method="exact_lns",
@@ -1213,6 +1175,8 @@ def solve_exact_lns(
             "algorithm": "adaptive-exact-milp-large-neighborhood-search",
             "execution_class": "classical-matheuristic",
             "initial_method": settings.initial_method,
+            "milp_backend": settings.milp_backend,
+            "thread_count": settings.thread_count,
             "raw_initial_objective": raw_initial_value,
             "polished_initial_objective": polished_initial_value,
             "initial_objective": polished_initial_value,
@@ -1246,7 +1210,10 @@ def solve_exact_lns(
                 - global_validation_seconds,
             ),
             "history": history,
-            "claim": "No quantum advantage is inferred from this classical run.",
+            "claim": (
+                "Classical exact-LNS result; sampler quality is evaluated separately "
+                "under the common validator."
+            ),
         },
     )
 
@@ -1282,9 +1249,12 @@ def solve_hybrid(
         try:
             polished = solve_classical(
                 problem,
+                backend=settings.milp_backend,
                 time_limit_seconds=settings.recourse_time_limit_seconds,
                 seed=settings.seed,
+                thread_count=settings.thread_count,
                 fixed_assignments=_solution_fixed_assignments(raw_incumbent),
+                minimum_objective=raw_initial_value,
             )
             polished_value = evaluate_solution(problem, polished).objective_value
             if (
@@ -1361,15 +1331,11 @@ def solve_hybrid(
             qaoa_restarts=settings.qaoa_restarts,
             qaoa_mixer_topology=settings.qaoa_mixer_topology,
             qaoa_parameters=settings.qaoa_parameters,
-            qaoa_readout_bitflip_probability=(
-                settings.qaoa_readout_bitflip_probability
-            ),
+            qaoa_readout_bitflip_probability=(settings.qaoa_readout_bitflip_probability),
             max_feasible_states=settings.max_feasible_states,
             ibm_backend_name=settings.ibm_backend_name,
             ibm_mitigation_strategy=settings.ibm_mitigation_strategy,
-            ibm_transpiler_optimization_level=(
-                settings.ibm_transpiler_optimization_level
-            ),
+            ibm_transpiler_optimization_level=(settings.ibm_transpiler_optimization_level),
             ibm_transpiler_trials=settings.ibm_transpiler_trials,
             ibm_transpiler_seed=settings.ibm_transpiler_seed,
         )
@@ -1393,9 +1359,7 @@ def solve_hybrid(
             )
             raw_one_hot_samples += int(valid_one_hot)
             repaired = repair_one_hot(sample_map, plans)
-            selected = tuple(
-                sorted(plan_id for plan_id, value in repaired.items() if value == 1)
-            )
+            selected = tuple(sorted(plan_id for plan_id, value in repaired.items() if value == 1))
             if selected in seen_assignments:
                 continue
             seen_assignments.add(selected)
@@ -1419,8 +1383,10 @@ def solve_hybrid(
             try:
                 local_solution = solve_classical(
                     local_problem,
+                    backend=settings.milp_backend,
                     time_limit_seconds=settings.recourse_time_limit_seconds,
                     seed=settings.seed + iteration,
+                    thread_count=settings.thread_count,
                     fixed_assignments=fixed,
                 )
             except ClassicalSolverError:
@@ -1470,6 +1436,7 @@ def solve_hybrid(
         execution_class = "quantum-inspired-classical"
     else:
         execution_class = "classical-control"
+
     def hardware_values(key: str) -> list[float]:
         return [
             float(run[key])
@@ -1478,11 +1445,7 @@ def solve_hybrid(
         ]
 
     def hardware_text_values(key: str) -> list[str]:
-        return [
-            str(run[key])
-            for run in hardware_runs
-            if run.get(key) not in {None, ""}
-        ]
+        return [str(run[key]) for run in hardware_runs if run.get(key) not in {None, ""}]
 
     def sampler_values(key: str) -> list[float]:
         return [
@@ -1492,11 +1455,7 @@ def solve_hybrid(
         ]
 
     backend_names = sorted(
-        {
-            str(run["backend_name"])
-            for run in hardware_runs
-            if run.get("backend_name") is not None
-        }
+        {str(run["backend_name"]) for run in hardware_runs if run.get("backend_name") is not None}
     )
     mitigation_names = sorted(
         {
@@ -1506,6 +1465,7 @@ def solve_hybrid(
         }
     )
     hardware_present = bool(hardware_runs)
+
     def hardware_sum(key: str) -> float | None:
         values = hardware_values(key)
         return float(sum(values)) if values else None
@@ -1522,6 +1482,8 @@ def solve_hybrid(
             "execution_class": execution_class,
             "sampler": settings.sampler,
             "initial_method": settings.initial_method,
+            "milp_backend": settings.milp_backend,
+            "thread_count": settings.thread_count,
             "raw_initial_objective": raw_initial_value,
             "polished_initial_objective": polished_initial_value,
             # Backward-compatible name now means the incumbent at sampler entry.
@@ -1536,26 +1498,18 @@ def solve_hybrid(
             "iterations": settings.iterations,
             "accepted_moves": accepted_moves,
             "sampler_calls": sampler_calls,
-            "qpu_calls": (
-                sampler_calls if settings.sampler == "ibm-qpu" else 0
-            ),
+            "qpu_calls": (sampler_calls if settings.sampler == "ibm-qpu" else 0),
             "quantum_simulator_calls": (
                 sampler_calls if settings.sampler == "qaoa_statevector" else 0
             ),
             "qpu_access_time_microseconds": (
-                quantum_seconds * 1_000_000.0
-                if quantum_seconds is not None
-                else None
+                quantum_seconds * 1_000_000.0 if quantum_seconds is not None else None
             ),
             "hardware_backend": ",".join(backend_names) if backend_names else None,
             "hardware_job_ids": (
-                ",".join(hardware_text_values("job_id"))
-                if hardware_present
-                else None
+                ",".join(hardware_text_values("job_id")) if hardware_present else None
             ),
-            "hardware_created_at": (
-                min(hardware_text_values("hardware_created_at"), default=None)
-            ),
+            "hardware_created_at": (min(hardware_text_values("hardware_created_at"), default=None)),
             "hardware_finished_at": (
                 max(hardware_text_values("hardware_finished_at"), default=None)
             ),
@@ -1573,9 +1527,7 @@ def solve_hybrid(
                 else None
             ),
             "hardware_qiskit_ibm_runtime_versions": (
-                ",".join(
-                    sorted(set(hardware_text_values("qiskit_ibm_runtime_version")))
-                )
+                ",".join(sorted(set(hardware_text_values("qiskit_ibm_runtime_version"))))
                 if hardware_present
                 else None
             ),
@@ -1585,37 +1537,17 @@ def solve_hybrid(
             "hardware_mitigation_strategy": (
                 ",".join(mitigation_names) if mitigation_names else None
             ),
-            "hardware_wall_seconds": (
-                hardware_sum("hardware_wall_seconds")
-            ),
-            "hardware_queue_seconds": (
-                hardware_sum("hardware_queue_seconds")
-            ),
-            "hardware_execution_seconds": hardware_sum(
-                "hardware_execution_seconds"
-            ),
-            "hardware_turnaround_seconds": (
-                hardware_sum("hardware_turnaround_seconds")
-            ),
+            "hardware_wall_seconds": (hardware_sum("hardware_wall_seconds")),
+            "hardware_queue_seconds": (hardware_sum("hardware_queue_seconds")),
+            "hardware_execution_seconds": hardware_sum("hardware_execution_seconds"),
+            "hardware_turnaround_seconds": (hardware_sum("hardware_turnaround_seconds")),
             "hardware_quantum_seconds": quantum_seconds,
-            "hardware_angle_optimization_seconds": hardware_sum(
-                "angle_optimization_seconds"
-            ),
-            "hardware_circuit_construction_seconds": hardware_sum(
-                "circuit_construction_seconds"
-            ),
-            "hardware_backend_selection_seconds": hardware_sum(
-                "backend_selection_seconds"
-            ),
-            "hardware_transpilation_seconds": hardware_sum(
-                "transpilation_seconds"
-            ),
-            "hardware_primitive_submit_seconds": hardware_sum(
-                "primitive_submit_seconds"
-            ),
-            "hardware_primitive_wait_seconds": hardware_sum(
-                "primitive_wait_seconds"
-            ),
+            "hardware_angle_optimization_seconds": hardware_sum("angle_optimization_seconds"),
+            "hardware_circuit_construction_seconds": hardware_sum("circuit_construction_seconds"),
+            "hardware_backend_selection_seconds": hardware_sum("backend_selection_seconds"),
+            "hardware_transpilation_seconds": hardware_sum("transpilation_seconds"),
+            "hardware_primitive_submit_seconds": hardware_sum("primitive_submit_seconds"),
+            "hardware_primitive_wait_seconds": hardware_sum("primitive_wait_seconds"),
             "hardware_decode_seconds": hardware_sum("decode_seconds"),
             "hardware_angle_seeds": (
                 ",".join(sorted(set(hardware_text_values("angle_seed"))))
@@ -1623,16 +1555,12 @@ def solve_hybrid(
                 else None
             ),
             "hardware_transpiler_base_seeds": (
-                ",".join(
-                    sorted(set(hardware_text_values("transpiler_base_seed")))
-                )
+                ",".join(sorted(set(hardware_text_values("transpiler_base_seed"))))
                 if hardware_present
                 else None
             ),
             "hardware_selected_transpiler_seeds": (
-                ",".join(
-                    sorted(set(hardware_text_values("selected_transpiler_seed")))
-                )
+                ",".join(sorted(set(hardware_text_values("selected_transpiler_seed"))))
                 if hardware_present
                 else None
             ),
@@ -1640,19 +1568,11 @@ def solve_hybrid(
                 sum(hardware_values("returned_samples")) if hardware_present else None
             ),
             "hardware_feasible_shots": (
-                sum(hardware_values("hardware_feasible_shots"))
-                if hardware_present
-                else None
+                sum(hardware_values("hardware_feasible_shots")) if hardware_present else None
             ),
-            "hardware_backend_num_qubits": max(
-                hardware_values("backend_num_qubits"), default=None
-            ),
-            "hardware_logical_qubits": max(
-                hardware_values("logical_qubits"), default=None
-            ),
-            "hardware_transpiled_depth": max(
-                hardware_values("transpiled_depth"), default=None
-            ),
+            "hardware_backend_num_qubits": max(hardware_values("backend_num_qubits"), default=None),
+            "hardware_logical_qubits": max(hardware_values("logical_qubits"), default=None),
+            "hardware_transpiled_depth": max(hardware_values("transpiled_depth"), default=None),
             "hardware_two_qubit_gates": max(
                 hardware_values("transpiled_two_qubit_gates"), default=None
             ),
@@ -1665,20 +1585,12 @@ def solve_hybrid(
                 else None
             ),
             "hardware_qubo_near_optimal_1pct_rate": (
-                float(
-                    np.mean(
-                        hardware_values("hardware_qubo_near_optimal_1pct_rate")
-                    )
-                )
+                float(np.mean(hardware_values("hardware_qubo_near_optimal_1pct_rate")))
                 if hardware_values("hardware_qubo_near_optimal_1pct_rate")
                 else None
             ),
             "hardware_mean_feasible_normalized_gap": (
-                float(
-                    np.mean(
-                        hardware_values("hardware_mean_feasible_normalized_gap")
-                    )
-                )
+                float(np.mean(hardware_values("hardware_mean_feasible_normalized_gap")))
                 if hardware_values("hardware_mean_feasible_normalized_gap")
                 else None
             ),
@@ -1688,20 +1600,12 @@ def solve_hybrid(
                 else None
             ),
             "hardware_uniform_feasible_near_optimal_1pct_rate": (
-                float(
-                    np.mean(
-                        hardware_values("uniform_feasible_near_optimal_1pct_rate")
-                    )
-                )
+                float(np.mean(hardware_values("uniform_feasible_near_optimal_1pct_rate")))
                 if hardware_values("uniform_feasible_near_optimal_1pct_rate")
                 else None
             ),
             "hardware_uniform_feasible_mean_normalized_gap": (
-                float(
-                    np.mean(
-                        hardware_values("uniform_feasible_mean_normalized_gap")
-                    )
-                )
+                float(np.mean(hardware_values("uniform_feasible_mean_normalized_gap")))
                 if hardware_values("uniform_feasible_mean_normalized_gap")
                 else None
             ),
@@ -1710,16 +1614,8 @@ def solve_hybrid(
             ),
             "qaoa_mixer_topology": settings.qaoa_mixer_topology,
             "hardware_qubo_optimal_hit_rate_given_feasible": (
-                float(
-                    np.mean(
-                        hardware_values(
-                            "hardware_qubo_optimal_hit_rate_given_feasible"
-                        )
-                    )
-                )
-                if hardware_values(
-                    "hardware_qubo_optimal_hit_rate_given_feasible"
-                )
+                float(np.mean(hardware_values("hardware_qubo_optimal_hit_rate_given_feasible")))
+                if hardware_values("hardware_qubo_optimal_hit_rate_given_feasible")
                 else None
             ),
             "hardware_best_feasible_normalized_gap": min(
@@ -1770,12 +1666,13 @@ def solve_hybrid(
             ),
             "remote_enabled": settings.allow_remote,
             "qubo_noise_relative_sigma": settings.qubo_noise_relative_sigma,
-            "qaoa_readout_bitflip_probability": (
-                settings.qaoa_readout_bitflip_probability
-            ),
+            "qaoa_readout_bitflip_probability": (settings.qaoa_readout_bitflip_probability),
             "batch_strategy": settings.batch_strategy,
             "history": history,
             "hardware_runs": hardware_runs,
-            "claim": "No quantum advantage is inferred from this run.",
+            "claim": (
+                "Sampler-assisted proposal result; final feasibility and objective "
+                "come from exact recourse and independent validation."
+            ),
         },
     )

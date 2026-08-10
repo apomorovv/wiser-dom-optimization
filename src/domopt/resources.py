@@ -6,6 +6,7 @@ validator from silently using different definitions of dock, pallet, or case pic
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Mapping
 from math import floor
@@ -37,9 +38,7 @@ def split_pick_quantities(quantity: float, per_pallet: int) -> tuple[int, int]:
 
     cases = round(float(quantity))
     if cases < 0 or per_pallet <= 0:
-        raise ValueError(
-            "Pick decomposition requires nonnegative cases and a positive pallet size"
-        )
+        raise ValueError("Pick decomposition requires nonnegative cases and a positive pallet size")
     return divmod(cases, int(per_pallet))
 
 
@@ -69,9 +68,7 @@ def line_variable_consumption(
         per_pallet = cases_per_pallet(line)
         if split_picks:
             if per_pallet is None:
-                raise ValueError(
-                    f"Resource {resource!r} requires order_lines.cases_per_pallet"
-                )
+                raise ValueError(f"Resource {resource!r} requires order_lines.cases_per_pallet")
             pallets, loose = split_pick_quantities(cases, per_pallet)
             return float(loose if resource == "case_pick" else pallets)
         if resource == "pallet_pick":
@@ -116,19 +113,15 @@ def solution_capacity_usage(
         raise ValueError(f"Unsupported capacity resources: {sorted(unsupported)}")
 
     usage: defaultdict[tuple[str, pd.Timestamp, str], float] = defaultdict(float)
-    candidates = problem.candidates.set_index("candidate_id", drop=False)
-    assigned = solution.assignments.loc[
-        ~solution.assignments["is_unassigned"].astype(bool)
-    ]
+    candidates = {
+        str(row.candidate_id): row._asdict() for row in problem.candidates.itertuples(index=False)
+    }
+    assigned = solution.assignments.loc[~solution.assignments["is_unassigned"].astype(bool)]
     for row in assigned.itertuples(index=False):
         candidate_id = str(row.candidate_id)
-        if candidate_id not in candidates.index:
-            raise ValueError(
-                f"Cannot compute capacity for unknown candidate {candidate_id!r}"
-            )
-        candidate = candidates.loc[candidate_id]
-        if isinstance(candidate, pd.DataFrame):
-            candidate = candidate.iloc[0]
+        if candidate_id not in candidates:
+            raise ValueError(f"Cannot compute capacity for unknown candidate {candidate_id!r}")
+        candidate = candidates[candidate_id]
         dc_id = str(candidate["dc_id"])
         date = pd.Timestamp(candidate["pgi_date"])
         for resource in resources:
@@ -136,20 +129,24 @@ def solution_capacity_usage(
             if fixed:
                 usage[(dc_id, date, resource)] += fixed
 
-    lines = problem.order_lines.set_index(["order_id", "sku_id"], drop=False)
+    variable_resources = resources - {"dock"}
+    if not variable_resources:
+        return dict(usage)
+    lines = {
+        (str(row.order_id), str(row.sku_id)): row._asdict()
+        for row in problem.order_lines.itertuples(index=False)
+    }
     for row in solution.fulfillment.itertuples(index=False):
         quantity = round(float(row.fulfilled_cases))
         if quantity <= 0 or pd.isna(row.selected_dc) or pd.isna(row.selected_pgi_date):
             continue
         key = (str(row.order_id), str(row.sku_id))
-        if key not in lines.index:
+        if key not in lines:
             continue
-        line = lines.loc[key]
-        if isinstance(line, pd.DataFrame):
-            line = line.iloc[0]
+        line = lines[key]
         dc_id = str(row.selected_dc)
         date = pd.Timestamp(row.selected_pgi_date)
-        for resource in resources - {"dock"}:
+        for resource in variable_resources:
             usage[(dc_id, date, resource)] += line_variable_consumption(
                 line,
                 quantity,
@@ -166,10 +163,11 @@ def solution_inventory_usage(
     """Return consumption through every projected-ATP checkpoint."""
 
     result: defaultdict[tuple[str, str, pd.Timestamp], float] = defaultdict(float)
-    checkpoints = {
-        (str(dc), str(sku)): sorted(pd.Timestamp(date) for date in group["date"])
-        for (dc, sku), group in problem.inventory.groupby(["dc_id", "sku_id"], sort=False)
-    }
+    checkpoints: defaultdict[tuple[str, str], list[pd.Timestamp]] = defaultdict(list)
+    for row in problem.inventory.itertuples(index=False):
+        checkpoints[(str(row.dc_id), str(row.sku_id))].append(pd.Timestamp(row.date))
+    for dates in checkpoints.values():
+        dates.sort()
     for row in solution.fulfillment.itertuples(index=False):
         quantity = float(row.fulfilled_cases)
         if quantity <= 0 or pd.isna(row.selected_dc) or pd.isna(row.selected_pgi_date):
@@ -177,8 +175,7 @@ def solution_inventory_usage(
         dc_id = str(row.selected_dc)
         sku_id = str(row.sku_id)
         pgi_date = pd.Timestamp(row.selected_pgi_date)
-        for checkpoint in checkpoints.get((dc_id, sku_id), []):
-            if pgi_date <= checkpoint:
-                result[(dc_id, sku_id, checkpoint)] += quantity
+        dates = checkpoints.get((dc_id, sku_id), [])
+        for checkpoint in dates[bisect_left(dates, pgi_date) :]:
+            result[(dc_id, sku_id, checkpoint)] += quantity
     return dict(result)
-

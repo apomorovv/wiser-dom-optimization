@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
+from math import ceil
 from time import perf_counter
 
 import numpy as np
 import pandas as pd
 
-from .penalties import PenaltyContext, build_penalty_context, order_penalty
+from .penalties import PenaltyContext, build_penalty_context
 from .resources import (
-    candidate_fixed_consumption,
     split_pick_quantities,
     uses_split_pick_accounting,
 )
-from .rules import candidate_is_divert, minimum_divert_fulfillment
 from .schemas import ProblemData, Solution
 
 
@@ -43,32 +43,201 @@ class _DecisionPlan:
     incremental_score: float
 
 
+@dataclass(frozen=True, slots=True)
+class _LineData:
+    """Compact order-line record used in the baseline inner loop."""
+
+    sku_id: str
+    demand_cases: int
+    unit_value: float
+    penalty_per_unfilled_case: float
+    cases_per_pallet: int | None
+    unit_weight: float
+    unit_volume: float
+
+    @property
+    def marginal_value(self) -> float:
+        return self.unit_value + self.penalty_per_unfilled_case
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateData:
+    """Compact candidate record shared by every preview of one decision."""
+
+    candidate_id: str
+    order_id: str
+    dc_id: str
+    pgi_date: pd.Timestamp
+    is_default: bool
+    shipping_cost: float
+    dock_units: float
+
+
 @dataclass(frozen=True)
 class _BaselineCache:
-    """Problem-static lookups reused by every residual candidate preview."""
+    """Problem-static records reused by every residual candidate preview.
 
-    lines_by_order: dict[str, pd.DataFrame]
+    Pandas remains at the input/output boundary.  The planning loop reads compact
+    immutable records and direct dictionaries so its cost follows the retained
+    candidates and order lines instead of repeated DataFrame construction.
+    """
+
+    lines_by_order: dict[str, tuple[_LineData, ...]]
+    ranked_lines_by_order: dict[str, tuple[_LineData, ...]]
+    members_by_unit: dict[str, tuple[str, ...]]
+    options_by_unit: dict[
+        str,
+        tuple[tuple[str, tuple[_CandidateData, ...]], ...],
+    ]
     penalty_context: PenaltyContext
     unassigned_score_by_order: dict[str, float]
+    default_dc_by_order: dict[str, str]
+    minimum_divert_by_order: dict[str, int | None]
+    split_picks: bool
+
+
+def _optional_float(value: object, default: float = 0.0) -> float:
+    return default if value is None or pd.isna(value) else float(value)
+
+
+def _line_penalty(
+    lines: tuple[_LineData, ...],
+    quantities: dict[str, int],
+    order_id: str,
+    context: PenaltyContext,
+) -> float:
+    """Evaluate the authoritative penalty without allocating a DataFrame."""
+
+    unfulfilled = [line.demand_cases - int(quantities.get(line.sku_id, 0)) for line in lines]
+    linear = sum(
+        line.penalty_per_unfilled_case * unmet
+        for line, unmet in zip(lines, unfulfilled, strict=True)
+    )
+    if context.mode == "linear_unmet":
+        return float(linear)
+
+    fulfilled = sum(line.demand_cases for line in lines) - sum(unfulfilled)
+    if fulfilled >= context.activation_fill_by_order[order_id]:
+        return 0.0
+    parameters = context.parameters_by_order[order_id]
+    raw = (
+        float(linear)
+        + parameters["fixed"]
+        + parameters["per_cut_sku"] * sum(value > 0 for value in unfulfilled)
+    )
+    penalty = max(raw, parameters["minimum"])
+    if parameters["maximum"] > 0:
+        penalty = min(penalty, parameters["maximum"])
+    return float(penalty)
 
 
 def _make_baseline_cache(problem: ProblemData) -> _BaselineCache:
-    lines_by_order = {
-        str(order_id): group.copy()
-        for order_id, group in problem.order_lines.groupby("order_id", sort=False)
+    lines_by_order: defaultdict[str, list[_LineData]] = defaultdict(list)
+    for row in problem.order_lines.itertuples(index=False):
+        per_pallet = getattr(row, "cases_per_pallet", None)
+        lines_by_order[str(row.order_id)].append(
+            _LineData(
+                sku_id=str(row.sku_id),
+                demand_cases=int(row.demand_cases),
+                unit_value=float(row.unit_value),
+                penalty_per_unfilled_case=float(row.penalty_per_unfilled_case),
+                cases_per_pallet=(
+                    None if per_pallet is None or pd.isna(per_pallet) else int(per_pallet)
+                ),
+                unit_weight=_optional_float(getattr(row, "unit_weight", 0.0)),
+                unit_volume=_optional_float(getattr(row, "unit_volume", 0.0)),
+            )
+        )
+    compact_lines = {
+        order_id: tuple(sorted(records, key=lambda line: line.sku_id))
+        for order_id, records in lines_by_order.items()
+    }
+    ranked_lines = {
+        order_id: tuple(sorted(records, key=lambda line: (-line.marginal_value, line.sku_id)))
+        for order_id, records in compact_lines.items()
     }
     context = build_penalty_context(problem)
-    unassigned: dict[str, float] = {}
-    for order_id, lines in lines_by_order.items():
-        quantities = lines.copy()
-        quantities["unfulfilled_cases"] = quantities["demand_cases"]
-        unassigned[order_id] = -order_penalty(
-            problem,
-            order_id,
-            quantities,
-            context=context,
+    unassigned = {
+        order_id: -_line_penalty(lines, {}, order_id, context)
+        for order_id, lines in compact_lines.items()
+    }
+    default_dc = {
+        str(row.order_id): str(row.default_dc) for row in problem.orders.itertuples(index=False)
+    }
+
+    minimum_divert: dict[str, int | None] = {order_id: None for order_id in compact_lines}
+    if bool(problem.metadata.get("enforce_min_divert_improvement", False)):
+        minimum_cases = int(problem.metadata.get("min_divert_improvement_cases", 0))
+        for row in problem.orders.itertuples(index=False):
+            order_id = str(row.order_id)
+            default_fillable = getattr(row, "default_fillable_cases", None)
+            if default_fillable is None or pd.isna(default_fillable):
+                raise ValueError("The minimum-divert rule requires orders.default_fillable_cases")
+            fraction_value = getattr(row, "min_divert_improvement_fraction", None)
+            fraction = (
+                float(problem.metadata.get("min_divert_improvement_fraction", 0.05))
+                if fraction_value is None or pd.isna(fraction_value)
+                else float(fraction_value)
+            )
+            demand = sum(line.demand_cases for line in compact_lines[order_id])
+            improvement = max(ceil(fraction * demand - 1e-12), minimum_cases)
+            minimum_divert[order_id] = min(
+                demand,
+                int(default_fillable) + improvement,
+            )
+
+    members_by_unit = _assignment_units(problem)
+    unit_for_order = {
+        order_id: unit_id for unit_id, members in members_by_unit.items() for order_id in members
+    }
+    grouped = bool(problem.metadata.get("enforce_assignment_group", False))
+    option_records: defaultdict[
+        str,
+        defaultdict[str, list[_CandidateData]],
+    ] = defaultdict(lambda: defaultdict(list))
+    eligible = problem.candidates.loc[problem.candidates["eligible"].astype(bool)]
+    for row in eligible.itertuples(index=False):
+        order_id = str(row.order_id)
+        unit_id = unit_for_order[order_id]
+        option_id = str(row.group_option_id) if grouped else str(row.candidate_id)
+        dock_units = getattr(row, "dock_units", 1.0)
+        option_records[unit_id][option_id].append(
+            _CandidateData(
+                candidate_id=str(row.candidate_id),
+                order_id=order_id,
+                dc_id=str(row.dc_id),
+                pgi_date=pd.Timestamp(row.pgi_date),
+                is_default=bool(row.is_default),
+                shipping_cost=float(row.shipping_cost),
+                dock_units=(
+                    1.0 if dock_units is None or pd.isna(dock_units) else float(dock_units)
+                ),
+            )
         )
-    return _BaselineCache(lines_by_order, context, unassigned)
+    options_by_unit: dict[
+        str,
+        tuple[tuple[str, tuple[_CandidateData, ...]], ...],
+    ] = {}
+    for unit_id, members in members_by_unit.items():
+        expected = set(members)
+        options: list[tuple[str, tuple[_CandidateData, ...]]] = []
+        for option_id, records in option_records.get(unit_id, {}).items():
+            if {record.order_id for record in records} != expected:
+                continue
+            options.append((option_id, tuple(sorted(records, key=lambda record: record.order_id))))
+        options_by_unit[unit_id] = tuple(sorted(options, key=lambda item: item[0]))
+
+    return _BaselineCache(
+        lines_by_order=compact_lines,
+        ranked_lines_by_order=ranked_lines,
+        members_by_unit=members_by_unit,
+        options_by_unit=options_by_unit,
+        penalty_context=context,
+        unassigned_score_by_order=unassigned,
+        default_dc_by_order=default_dc,
+        minimum_divert_by_order=minimum_divert,
+        split_picks=uses_split_pick_accounting(problem),
+    )
 
 
 class _InventoryState:
@@ -76,9 +245,7 @@ class _InventoryState:
 
     def __init__(self, inventory: pd.DataFrame):
         grouped: dict[tuple[str, str], tuple[list[int], list[int]]] = {}
-        ordered = inventory.sort_values(
-            ["dc_id", "sku_id", "date"], kind="mergesort"
-        )
+        ordered = inventory.sort_values(["dc_id", "sku_id", "date"], kind="mergesort")
         for row in ordered.itertuples(index=False):
             key = (str(row.dc_id), str(row.sku_id))
             dates, amounts = grouped.setdefault(key, ([], []))
@@ -113,9 +280,7 @@ class _InventoryState:
         if quantity == 0:
             return
         if quantity > self.available(dc_id, sku_id, date):
-            raise ValueError(
-                f"Insufficient inventory for dc={dc_id}, sku={sku_id}, date={date}"
-            )
+            raise ValueError(f"Insufficient inventory for dc={dc_id}, sku={sku_id}, date={date}")
         key = (dc_id, sku_id)
         dates, base = self._rows[key]
         updated = self._remaining.get(key, base).copy()
@@ -156,55 +321,24 @@ class _CapacityState:
         return clone
 
 
-def _order_lines(
-    problem: ProblemData,
-    order_id: str,
-    cache: _BaselineCache | None = None,
-) -> pd.DataFrame:
-    if cache is not None:
-        return cache.lines_by_order[str(order_id)].copy()
-    return problem.order_lines.loc[problem.order_lines["order_id"] == order_id].copy()
-
-
-def _unassigned_score(
-    problem: ProblemData,
-    order_id: str,
-    lines: pd.DataFrame,
-    cache: _BaselineCache | None = None,
-) -> float:
-    if cache is not None:
-        return cache.unassigned_score_by_order[str(order_id)]
-    quantities = lines.copy()
-    quantities["unfulfilled_cases"] = quantities["demand_cases"]
-    return -order_penalty(problem, order_id, quantities)
-
-
 def _preview_candidate(
     problem: ProblemData,
-    candidate: pd.Series,
+    candidate: _CandidateData,
     inventory: _InventoryState,
     capacities: _CapacityState,
-    cache: _BaselineCache | None = None,
+    cache: _BaselineCache,
 ) -> _CandidatePlan | None:
-    order_id = str(candidate["order_id"])
-    dc_id = str(candidate["dc_id"])
-    pgi_date = pd.Timestamp(candidate["pgi_date"])
-    lines = _order_lines(problem, order_id, cache)
+    order_id = candidate.order_id
+    dc_id = candidate.dc_id
+    pgi_date = candidate.pgi_date
+    lines = cache.ranked_lines_by_order[order_id]
 
-    dock_units = candidate_fixed_consumption(candidate, "dock")
+    dock_units = candidate.dock_units
     if capacities.remaining(dc_id, pgi_date, "dock") < dock_units - 1e-9:
         return None
 
     # Allocate cases in descending marginal business value. This is a baseline,
     # not the exact optimizer; deterministic tie breaks keep results reproducible.
-    lines["marginal_value"] = (
-        lines["unit_value"].astype(float)
-        + lines["penalty_per_unfilled_case"].astype(float)
-    )
-    lines = lines.sort_values(
-        ["marginal_value", "sku_id"], ascending=[False, True], kind="mergesort"
-    )
-
     residual_resources = {
         resource: capacities.remaining(dc_id, pgi_date, resource)
         for resource in [
@@ -215,29 +349,27 @@ def _preview_candidate(
             "volume",
         ]
     }
-    split_picks = uses_split_pick_accounting(problem)
     quantities: dict[str, int] = {}
 
-    for row in lines.itertuples(index=False):
-        demand = int(row.demand_cases)
-        maximum = min(demand, inventory.available(dc_id, str(row.sku_id), pgi_date))
+    for line in lines:
+        maximum = min(
+            line.demand_cases,
+            inventory.available(dc_id, line.sku_id, pgi_date),
+        )
 
         if np.isfinite(residual_resources["throughput_cases"]):
             maximum = min(maximum, int(np.floor(residual_resources["throughput_cases"])))
-        unit_weight = float(getattr(row, "unit_weight", 0.0) or 0.0)
-        unit_volume = float(getattr(row, "unit_volume", 0.0) or 0.0)
+        unit_weight = line.unit_weight
+        unit_volume = line.unit_volume
         if unit_weight > 0 and np.isfinite(residual_resources["weight"]):
             maximum = min(maximum, int(np.floor(residual_resources["weight"] / unit_weight)))
         if unit_volume > 0 and np.isfinite(residual_resources["volume"]):
             maximum = min(maximum, int(np.floor(residual_resources["volume"] / unit_volume)))
 
-        if split_picks:
-            per_pallet_value = getattr(row, "cases_per_pallet", None)
-            if per_pallet_value is None or pd.isna(per_pallet_value):
-                raise ValueError(
-                    "Pallet/case-pick accounting requires cases_per_pallet"
-                )
-            per_pallet = int(per_pallet_value)
+        if cache.split_picks:
+            if line.cases_per_pallet is None:
+                raise ValueError("Pallet/case-pick accounting requires cases_per_pallet")
+            per_pallet = line.cases_per_pallet
             maximum_pallets = int(maximum) // per_pallet
             if np.isfinite(residual_resources["pallet_pick"]):
                 maximum_pallets = min(
@@ -263,42 +395,39 @@ def _preview_candidate(
             quantity = max(0, int(maximum))
             residual_resources["case_pick"] -= quantity
 
-        quantities[str(row.sku_id)] = quantity
+        quantities[line.sku_id] = quantity
         residual_resources["throughput_cases"] -= quantity
         if unit_weight > 0:
             residual_resources["weight"] -= quantity * unit_weight
         if unit_volume > 0:
             residual_resources["volume"] -= quantity * unit_volume
 
-    merged = _order_lines(problem, order_id, cache)
-    merged["fulfilled"] = merged["sku_id"].map(quantities).fillna(0).astype(int)
-    merged["unfulfilled"] = merged["demand_cases"] - merged["fulfilled"]
-    penalty_quantities = merged.rename(columns={"unfulfilled": "unfulfilled_cases"})
-    score = float(
-        (merged["unit_value"] * merged["fulfilled"]).sum()
-        - order_penalty(
-            problem,
+    canonical_lines = cache.lines_by_order[order_id]
+    score = (
+        sum(line.unit_value * int(quantities.get(line.sku_id, 0)) for line in canonical_lines)
+        - _line_penalty(
+            canonical_lines,
+            quantities,
             order_id,
-            penalty_quantities,
-            context=None if cache is None else cache.penalty_context,
+            cache.penalty_context,
         )
-        - float(candidate["shipping_cost"])
+        - candidate.shipping_cost
     )
-    unassigned = _unassigned_score(problem, order_id, merged, cache)
-    if candidate_is_divert(problem, candidate):
-        threshold = minimum_divert_fulfillment(problem, order_id)
-        if threshold is not None and int(merged["fulfilled"].sum()) < threshold:
+    unassigned = cache.unassigned_score_by_order[order_id]
+    if dc_id != cache.default_dc_by_order[order_id]:
+        threshold = cache.minimum_divert_by_order[order_id]
+        if threshold is not None and sum(quantities.values()) < threshold:
             return None
     return _CandidatePlan(
-        candidate_id=str(candidate["candidate_id"]),
+        candidate_id=candidate.candidate_id,
         order_id=order_id,
         dc_id=dc_id,
         pgi_date=pgi_date,
-        is_default=bool(candidate["is_default"]),
-        shipping_cost=float(candidate["shipping_cost"]),
+        is_default=candidate.is_default,
+        shipping_cost=candidate.shipping_cost,
         dock_units=dock_units,
         quantities=quantities,
-        score=score,
+        score=float(score),
         incremental_score=score - unassigned,
     )
 
@@ -308,29 +437,29 @@ def _commit_plan(
     plan: _CandidatePlan,
     inventory: _InventoryState,
     capacities: _CapacityState,
-    cache: _BaselineCache | None = None,
+    cache: _BaselineCache,
 ) -> None:
-    lines = _order_lines(problem, plan.order_id, cache).set_index("sku_id")
+    lines = {line.sku_id: line for line in cache.lines_by_order[plan.order_id]}
     total_cases = 0
     total_case_picks = 0
     total_pallet_picks = 0
     total_weight = 0.0
     total_volume = 0.0
-    split_picks = uses_split_pick_accounting(problem)
     for sku_id, quantity in plan.quantities.items():
         inventory.consume(plan.dc_id, sku_id, plan.pgi_date, int(quantity))
         total_cases += int(quantity)
-        if split_picks:
-            per_pallet = int(lines.loc[sku_id, "cases_per_pallet"])
+        line = lines[sku_id]
+        if cache.split_picks:
+            if line.cases_per_pallet is None:
+                raise ValueError("Pallet/case-pick accounting requires cases_per_pallet")
+            per_pallet = line.cases_per_pallet
             pallets, loose = split_pick_quantities(quantity, per_pallet)
             total_pallet_picks += pallets
             total_case_picks += loose
         else:
             total_case_picks += int(quantity)
-        if "unit_weight" in lines.columns and not pd.isna(lines.loc[sku_id, "unit_weight"]):
-            total_weight += int(quantity) * float(lines.loc[sku_id, "unit_weight"])
-        if "unit_volume" in lines.columns and not pd.isna(lines.loc[sku_id, "unit_volume"]):
-            total_volume += int(quantity) * float(lines.loc[sku_id, "unit_volume"])
+        total_weight += int(quantity) * line.unit_weight
+        total_volume += int(quantity) * line.unit_volume
 
     capacities.consume(plan.dc_id, plan.pgi_date, "dock", plan.dock_units)
     capacities.consume(plan.dc_id, plan.pgi_date, "throughput_cases", total_cases)
@@ -353,43 +482,27 @@ def _assignment_units(problem: ProblemData) -> dict[str, tuple[str, ...]]:
             raise ValueError("Group cohesion requires orders.assignment_group")
         return {
             str(group_id): tuple(sorted(group["order_id"].astype(str)))
-            for group_id, group in problem.orders.groupby(
-                "assignment_group", sort=False
-            )
+            for group_id, group in problem.orders.groupby("assignment_group", sort=False)
         }
-    return {
-        str(order_id): (str(order_id),)
-        for order_id in problem.orders["order_id"].astype(str)
-    }
+    return {str(order_id): (str(order_id),) for order_id in problem.orders["order_id"].astype(str)}
 
 
 def _candidate_options_for_unit(
     problem: ProblemData,
     eligible: pd.DataFrame,
+    unit_id: str,
     members: tuple[str, ...],
     *,
     default_only: bool = False,
-) -> list[tuple[str, pd.DataFrame]]:
-    rows = eligible.loc[eligible["order_id"].astype(str).isin(members)].copy()
+    cache: _BaselineCache,
+) -> list[tuple[str, tuple[_CandidateData, ...]]]:
+    if cache.members_by_unit.get(unit_id) != members:
+        raise ValueError(f"Unknown or mismatched decision unit {unit_id!r}")
+    options = list(cache.options_by_unit[unit_id])
     if default_only:
-        rows = rows.loc[rows["is_default"].astype(bool)]
-    grouped = bool(problem.metadata.get("enforce_assignment_group", False))
-    option_column = "group_option_id" if grouped else "candidate_id"
-    if option_column not in rows.columns:
-        raise ValueError(f"Candidate table requires {option_column!r}")
-
-    options: list[tuple[str, pd.DataFrame]] = []
-    expected = set(members)
-    for option_id, option_rows in rows.groupby(option_column, sort=False):
-        if set(option_rows["order_id"].astype(str)) != expected:
-            continue
-        options.append(
-            (
-                str(option_id),
-                option_rows.sort_values("order_id", kind="mergesort"),
-            )
-        )
-    options.sort(key=lambda item: item[0])
+        options = [
+            (option_id, rows) for option_id, rows in options if all(row.is_default for row in rows)
+        ]
     return options
 
 
@@ -397,10 +510,10 @@ def _preview_decision(
     problem: ProblemData,
     unit_id: str,
     option_id: str,
-    option_rows: pd.DataFrame,
+    option_rows: tuple[_CandidateData, ...],
     inventory: _InventoryState,
     capacities: _CapacityState,
-    cache: _BaselineCache | None = None,
+    cache: _BaselineCache,
 ) -> _DecisionPlan | None:
     """Preview all members against private residual states, then commit atomically."""
 
@@ -409,12 +522,11 @@ def _preview_decision(
     member_plans: list[_CandidatePlan] = []
     unassigned_score = 0.0
 
-    for candidate in option_rows.itertuples(index=False):
-        candidate_row = pd.Series(candidate._asdict())
-        order_id = str(candidate_row["order_id"])
+    for candidate in option_rows:
+        order_id = candidate.order_id
         plan = _preview_candidate(
             problem,
-            candidate_row,
+            candidate,
             trial_inventory,
             trial_capacities,
             cache,
@@ -423,8 +535,7 @@ def _preview_decision(
             return None
         _commit_plan(problem, plan, trial_inventory, trial_capacities, cache)
         member_plans.append(plan)
-        lines = _order_lines(problem, order_id, cache)
-        unassigned_score += _unassigned_score(problem, order_id, lines, cache)
+        unassigned_score += cache.unassigned_score_by_order[order_id]
 
     score = sum(plan.score for plan in member_plans)
     return _DecisionPlan(
@@ -447,12 +558,15 @@ def _feasible_decisions(
     default_only: bool = False,
     cache: _BaselineCache | None = None,
 ) -> list[_DecisionPlan]:
+    planning_cache = cache or _make_baseline_cache(problem)
     decisions: list[_DecisionPlan] = []
     for option_id, option_rows in _candidate_options_for_unit(
         problem,
         eligible,
+        unit_id,
         members,
         default_only=default_only,
+        cache=planning_cache,
     ):
         decision = _preview_decision(
             problem,
@@ -461,7 +575,7 @@ def _feasible_decisions(
             option_rows,
             inventory,
             capacities,
-            cache,
+            planning_cache,
         )
         if decision is not None:
             decisions.append(decision)
@@ -484,7 +598,7 @@ def _commit_decision(
     inventory: _InventoryState,
     capacities: _CapacityState,
     selected: dict[str, _CandidatePlan | None],
-    cache: _BaselineCache | None = None,
+    cache: _BaselineCache,
 ) -> None:
     for plan in decision.member_plans:
         _commit_plan(problem, plan, inventory, capacities, cache)
@@ -496,9 +610,9 @@ def _solution_from_plans(
     method: str,
     selected: dict[str, _CandidatePlan | None],
     runtime_seconds: float,
-    cache: _BaselineCache | None = None,
+    cache: _BaselineCache,
 ) -> Solution:
-    default_dc = problem.orders.set_index("order_id")["default_dc"].to_dict()
+    default_dc = cache.default_dc_by_order
     assignment_rows: list[dict[str, object]] = []
     fulfillment_rows: list[dict[str, object]] = []
 
@@ -529,18 +643,14 @@ def _solution_from_plans(
                 }
             )
 
-        for line in (
-            _order_lines(problem, order_id, cache)
-            .sort_values("sku_id")
-            .itertuples(index=False)
-        ):
-            fulfilled = 0 if plan is None else int(plan.quantities.get(str(line.sku_id), 0))
+        for line in cache.lines_by_order[order_id]:
+            fulfilled = 0 if plan is None else int(plan.quantities.get(line.sku_id, 0))
             fulfillment_rows.append(
                 {
                     "order_id": order_id,
-                    "sku_id": str(line.sku_id),
+                    "sku_id": line.sku_id,
                     "fulfilled_cases": fulfilled,
-                    "unfulfilled_cases": int(line.demand_cases) - fulfilled,
+                    "unfulfilled_cases": line.demand_cases - fulfilled,
                     "selected_dc": None if plan is None else plan.dc_id,
                     "selected_pgi_date": None if plan is None else plan.pgi_date,
                 }
@@ -568,7 +678,7 @@ def solve_default_baseline(problem: ProblemData) -> Solution:
     cache = _make_baseline_cache(problem)
 
     eligible = problem.candidates[problem.candidates["eligible"]].copy()
-    units = _assignment_units(problem)
+    units = cache.members_by_unit
     for unit_id, members in sorted(units.items()):
         decisions = _feasible_decisions(
             problem,
@@ -620,8 +730,8 @@ def solve_greedy_baseline(problem: ProblemData) -> Solution:
     capacities = _CapacityState(problem.capacities)
     selected: dict[str, _CandidatePlan | None] = {}
     eligible = problem.candidates[problem.candidates["eligible"]].copy()
-    units = _assignment_units(problem)
     cache = _make_baseline_cache(problem)
+    units = cache.members_by_unit
 
     # Establish one stable priority from the unconstrained initial previews. The
     # previous implementation rescanned every remaining order after every commit,
@@ -682,9 +792,11 @@ def solve_greedy_baseline(problem: ProblemData) -> Solution:
 def solve_polished_greedy(
     problem: ProblemData,
     *,
+    backend: str = "scipy-highs",
     time_limit_seconds: float = 30.0,
     mip_relative_gap: float = 0.0,
     seed: int | None = None,
+    thread_count: int | None = None,
 ) -> Solution:
     """Polish greedy quantities exactly while preserving its assignment policy.
 
@@ -704,9 +816,7 @@ def solve_polished_greedy(
     raw = solve_greedy_baseline(problem)
     raw_value = evaluate_solution(problem, raw).objective_value
     policy = {
-        str(row.order_id): (
-            None if bool(row.is_unassigned) else str(row.candidate_id)
-        )
+        str(row.order_id): (None if bool(row.is_unassigned) else str(row.candidate_id))
         for row in raw.assignments.itertuples(index=False)
     }
     polish_start = perf_counter()
@@ -717,17 +827,17 @@ def solve_polished_greedy(
     try:
         polished = solve_classical(
             problem,
+            backend=backend,
             time_limit_seconds=time_limit_seconds,
             mip_relative_gap=mip_relative_gap,
             seed=seed,
+            thread_count=thread_count,
             fixed_assignments=policy,
+            minimum_objective=raw_value,
         )
         recourse_metadata = dict(polished.metadata)
         polished_value = evaluate_solution(problem, polished).objective_value
-        if (
-            validate_solution(problem, polished).is_feasible
-            and polished_value >= raw_value - 1e-9
-        ):
+        if validate_solution(problem, polished).is_feasible and polished_value >= raw_value - 1e-9:
             best = polished
             best_value = polished_value
             succeeded = True
@@ -746,6 +856,8 @@ def solve_polished_greedy(
         metadata={
             "algorithm": "greedy-plus-exact-fixed-assignment-recourse",
             "execution_class": "classical-matheuristic",
+            "milp_backend": recourse_metadata.get("milp_backend", backend),
+            "thread_count": recourse_metadata.get("thread_count", thread_count),
             "raw_initial_objective": raw_value,
             "initial_objective": raw_value,
             "final_objective": best_value,
@@ -768,4 +880,3 @@ def solve_polished_greedy(
 
 def run_baselines(problem: ProblemData) -> list[Solution]:
     return [solve_default_baseline(problem), solve_greedy_baseline(problem)]
-

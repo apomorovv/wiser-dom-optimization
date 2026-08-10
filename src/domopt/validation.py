@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 import numpy as np
 import pandas as pd
 
@@ -114,27 +116,23 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
             try:
                 parsed.append(_strict_bool(value))
             except ValueError as error:
-                schema_violations.append(
-                    f"assignments row {index} column {column}: {error}"
-                )
+                schema_violations.append(f"assignments row {index} column {column}: {error}")
                 parsed.append(False)
         assignments[column] = parsed
 
     if assignments["order_id"].duplicated().any():
-        duplicates = assignments.loc[
-            assignments["order_id"].duplicated(keep=False), "order_id"
-        ].unique().tolist()
-        assignment_violations.append(
-            f"duplicate assignment rows for orders {duplicates[:5]}"
+        duplicates = (
+            assignments.loc[assignments["order_id"].duplicated(keep=False), "order_id"]
+            .unique()
+            .tolist()
         )
+        assignment_violations.append(f"duplicate assignment rows for orders {duplicates[:5]}")
 
     assignment_ids = set(assignments["order_id"].astype(str))
     missing_orders = sorted(order_ids - assignment_ids)
     extra_orders = sorted(assignment_ids - order_ids)
     if missing_orders:
-        assignment_violations.append(
-            f"orders missing assignment rows: {missing_orders[:5]}"
-        )
+        assignment_violations.append(f"orders missing assignment rows: {missing_orders[:5]}")
     if extra_orders:
         assignment_violations.append(
             f"assignment rows reference unknown orders: {extra_orders[:5]}"
@@ -167,14 +165,10 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
                     f"unassigned order {order_id} contains selected candidate/DC/date"
                 )
             if bool(row.is_divert):
-                assignment_violations.append(
-                    f"unassigned order {order_id} cannot be a divert"
-                )
+                assignment_violations.append(f"unassigned order {order_id} cannot be a divert")
         else:
             if candidate_id is None:
-                assignment_violations.append(
-                    f"assigned order {order_id} has no candidate_id"
-                )
+                assignment_violations.append(f"assigned order {order_id} has no candidate_id")
             elif candidate_id not in candidate_lookup.index:
                 eligibility_violations.append(
                     f"order {order_id} selects unknown candidate {candidate_id}"
@@ -196,19 +190,14 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
                     assignment_violations.append(
                         f"order {order_id} selected_dc does not match candidate {candidate_id}"
                     )
-                if (
-                    pd.isna(selected_date)
-                    or selected_date != pd.Timestamp(candidate["pgi_date"])
-                ):
+                if pd.isna(selected_date) or selected_date != pd.Timestamp(candidate["pgi_date"]):
                     assignment_violations.append(
                         f"order {order_id} selected_pgi_date does not match "
                         f"candidate {candidate_id}"
                     )
                 expected_divert = str(candidate["dc_id"]) != default_lookup.get(order_id)
                 if bool(row.is_divert) != expected_divert:
-                    assignment_violations.append(
-                        f"order {order_id} has incorrect is_divert flag"
-                    )
+                    assignment_violations.append(f"order {order_id} has incorrect is_divert flag")
 
         assignment_lookup[order_id] = {
             "is_unassigned": is_unassigned,
@@ -219,17 +208,10 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
 
     if bool(problem.metadata.get("enforce_assignment_group", False)):
         if "assignment_group" not in problem.orders.columns:
-            schema_violations.append(
-                "group cohesion requires orders.assignment_group"
-            )
+            schema_violations.append("group cohesion requires orders.assignment_group")
         else:
-            for group_id, group in problem.orders.groupby(
-                "assignment_group", sort=False
-            ):
-                members = [
-                    assignment_lookup.get(str(order_id))
-                    for order_id in group["order_id"]
-                ]
+            for group_id, group in problem.orders.groupby("assignment_group", sort=False):
+                members = [assignment_lookup.get(str(order_id)) for order_id in group["order_id"]]
                 members = [member for member in members if member is not None]
                 if len(members) <= 1:
                     continue
@@ -252,9 +234,7 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
     fulfillment_keys = set(
         map(
             tuple,
-            fulfillment[["order_id", "sku_id"]]
-            .astype(str)
-            .itertuples(index=False, name=None),
+            fulfillment[["order_id", "sku_id"]].astype(str).itertuples(index=False, name=None),
         )
     )
     missing_lines = sorted(line_keys - fulfillment_keys)
@@ -264,11 +244,11 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
     if extra_lines:
         demand_violations.append(f"unknown fulfillment rows: {extra_lines[:5]}")
 
-    demands = (
-        problem.order_lines.set_index(["order_id", "sku_id"])["demand_cases"]
-        .to_dict()
-    )
-    positive_usage: list[dict[str, object]] = []
+    demands = problem.order_lines.set_index(["order_id", "sku_id"])["demand_cases"].to_dict()
+    inventory_usage_by_key: defaultdict[
+        tuple[str, str],
+        defaultdict[int, float],
+    ] = defaultdict(lambda: defaultdict(float))
 
     for row in fulfillment.itertuples(index=False):
         key = (str(row.order_id), str(row.sku_id))
@@ -325,93 +305,92 @@ def validate_solution(problem: ProblemData, solution: Solution) -> ValidationRes
             if fulfilled > _TOL:
                 demand_violations.append(f"unassigned order {key[0]} has positive fulfillment")
             if row_dc is not None or not pd.isna(row_date):
-                demand_violations.append(
-                    f"unassigned order line {key} contains selected DC/date"
-                )
+                demand_violations.append(f"unassigned order line {key} contains selected DC/date")
         else:
             if row_dc != assignment["selected_dc"]:
                 demand_violations.append(f"selected DC mismatch for line {key}")
             if pd.isna(row_date) or row_date != assignment["selected_pgi_date"]:
                 demand_violations.append(f"selected date mismatch for line {key}")
             if fulfilled > _TOL:
-                positive_usage.append(
-                    {
-                        "order_id": key[0],
-                        "sku_id": key[1],
-                        "dc_id": row_dc,
-                        "date": row_date,
-                        "fulfilled_cases": fulfilled,
-                    }
+                inventory_usage_by_key[(str(row_dc), key[1])][row_date.value] += fulfilled
+
+    # Validate cumulative ATP using compact posting lists and only the resources
+    # touched by this solution.  Building thousands of tiny DataFrames here used
+    # to dominate validation on large but sparse planning windows.
+    if inventory_usage_by_key:
+        inventory_groups: defaultdict[
+            tuple[str, str],
+            list[tuple[int, float]],
+        ] = defaultdict(list)
+        for row in problem.inventory.itertuples(index=False):
+            inventory_groups[(str(row.dc_id), str(row.sku_id))].append(
+                (
+                    pd.Timestamp(row.date).value,
+                    float(row.cumulative_available_cases),
                 )
-
-    usage = pd.DataFrame(positive_usage)
-    inventory = problem.inventory.copy()
-    if not usage.empty:
-        usage["date"] = pd.to_datetime(usage["date"])
-        inventory["date"] = pd.to_datetime(inventory["date"])
-        usage_groups = {
-            (str(dc_id), str(sku_id)): group
-            for (dc_id, sku_id), group in usage.groupby(
-                ["dc_id", "sku_id"], sort=False
             )
-        }
-        inventory_groups = {
-            (str(dc_id), str(sku_id)): group.sort_values("date")
-            for (dc_id, sku_id), group in inventory.groupby(
-                ["dc_id", "sku_id"], sort=False
-            )
-        }
 
-        for key, group in usage_groups.items():
-            checkpoints = inventory_groups.get(key)
-            if checkpoints is None:
-                for date in group["date"]:
+        for key, daily_usage in inventory_usage_by_key.items():
+            checkpoints = sorted(inventory_groups.get(key, []))
+            if not checkpoints:
+                for date_value in sorted(daily_usage):
                     inventory_violations.append(
                         "no cumulative inventory checkpoint covers "
-                        f"dc={key[0]}, sku={key[1]}, date={pd.Timestamp(date).date()}"
+                        f"dc={key[0]}, sku={key[1]}, "
+                        f"date={pd.Timestamp(date_value).date()}"
                     )
                 continue
-            last_checkpoint = pd.Timestamp(checkpoints["date"].max())
-            for date in group.loc[group["date"] > last_checkpoint, "date"]:
-                inventory_violations.append(
-                    "no cumulative inventory checkpoint covers "
-                    f"dc={key[0]}, sku={key[1]}, date={pd.Timestamp(date).date()}"
-                )
 
-        # A shipment on date t consumes every cumulative checkpoint at t or later.
-        # Grouping and searchsorted replace the previous inventory-row-by-row scans.
-        for key, checkpoints in inventory_groups.items():
-            group = usage_groups.get(key)
-            if group is None:
-                continue
-            daily = (
-                group.groupby("date", as_index=False)["fulfilled_cases"]
-                .sum()
-                .sort_values("date")
+            last_checkpoint = checkpoints[-1][0]
+            for date_value in sorted(daily_usage):
+                if date_value > last_checkpoint:
+                    inventory_violations.append(
+                        "no cumulative inventory checkpoint covers "
+                        f"dc={key[0]}, sku={key[1]}, "
+                        f"date={pd.Timestamp(date_value).date()}"
+                    )
+
+            usage_dates = np.fromiter(sorted(daily_usage), dtype=np.int64)
+            daily_amounts = np.fromiter(
+                (daily_usage[value] for value in usage_dates),
+                dtype=float,
             )
-            usage_dates = daily["date"].to_numpy(dtype="datetime64[ns]")
-            cumulative = daily["fulfilled_cases"].to_numpy(dtype=float).cumsum()
-            checkpoint_dates = checkpoints["date"].to_numpy(dtype="datetime64[ns]")
-            positions = np.searchsorted(usage_dates, checkpoint_dates, side="right") - 1
-            consumed = np.where(positions >= 0, cumulative[np.maximum(positions, 0)], 0.0)
-            available = checkpoints["cumulative_available_cases"].to_numpy(dtype=float)
+            cumulative = daily_amounts.cumsum()
+            checkpoint_dates = np.fromiter(
+                (value[0] for value in checkpoints),
+                dtype=np.int64,
+            )
+            available = np.fromiter(
+                (value[1] for value in checkpoints),
+                dtype=float,
+            )
+            positions = (
+                np.searchsorted(
+                    usage_dates,
+                    checkpoint_dates,
+                    side="right",
+                )
+                - 1
+            )
+            consumed = np.where(
+                positions >= 0,
+                cumulative[np.maximum(positions, 0)],
+                0.0,
+            )
             diagnostics["maximum_inventory_excess_cases"] = max(
                 float(diagnostics["maximum_inventory_excess_cases"]),
                 float(np.maximum(consumed - available, 0.0).max(initial=0.0)),
             )
-            exceeded = np.flatnonzero(consumed > available + _TOL)
-            for index in exceeded:
-                row = checkpoints.iloc[int(index)]
+            for index in np.flatnonzero(consumed > available + _TOL):
                 inventory_violations.append(
                     f"inventory exceeded at dc={key[0]}, sku={key[1]}, "
-                    f"date={pd.Timestamp(row['date']).date()}: used={consumed[index]}, "
-                    f"available={row['cumulative_available_cases']}"
+                    f"date={pd.Timestamp(checkpoint_dates[index]).date()}: "
+                    f"used={consumed[index]}, available={available[index]}"
                 )
 
     fulfilled_by_order = fulfillment.groupby("order_id")["fulfilled_cases"].sum()
     for row in assignments.loc[
-        (~assignments["is_unassigned"].astype(bool))
-        & assignments["is_divert"].astype(bool)
+        (~assignments["is_unassigned"].astype(bool)) & assignments["is_divert"].astype(bool)
     ].itertuples(index=False):
         try:
             threshold = minimum_divert_fulfillment(problem, str(row.order_id))
