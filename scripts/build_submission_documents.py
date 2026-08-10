@@ -1,22 +1,29 @@
 """Build and style the final Word/PDF submission documents.
 
-Run with the Codex primary runtime because it owns the document dependencies:
+Run with the Codex primary runtime because it owns the document dependencies.
+Pandoc is also required so LaTeX expressions become native Word Office Math:
 
     "$CODEX_PRIMARY_RUNTIME_PYTHON" scripts/build_submission_documents.py
 """
 
 from __future__ import annotations
 
+import io
 import re
+import shutil
+import subprocess
+import zipfile
+from functools import cache
 from pathlib import Path
 
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
-from docx.oxml import OxmlElement
+from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
+from lxml import etree
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORTS = ROOT / "reports"
@@ -376,18 +383,71 @@ def _apply_num(paragraph, num_id: int) -> None:
     p_pr.append(num_pr)
 
 
-INLINE = re.compile(r"(\*\*.*?\*\*|`.*?`|\*.*?\*|<https?://[^>]+>)")
+INLINE = re.compile(r"(\$[^$\n]+\$|\*\*.*?\*\*|`.*?`|\*.*?\*|<https?://[^>]+>)")
+
+
+@cache
+def _latex_to_omml_xml(latex: str) -> bytes:
+    """Convert one LaTeX expression to native Word Office Math XML.
+
+    Pandoc's TeX reader and DOCX writer provide a deterministic, standards-based
+    conversion to OMML.  Keeping the cached representation as XML bytes ensures
+    that every insertion receives a fresh element with no shared parent.
+    """
+
+    expression = latex.strip()
+    if not expression:
+        raise ValueError("Cannot render an empty mathematical expression")
+
+    pandoc = shutil.which("pandoc")
+    if pandoc is None:
+        raise RuntimeError(
+            "Pandoc is required to render report equations as native Office Math. "
+            "Install pandoc and rerun scripts/build_submission_documents.py."
+        )
+
+    completed = subprocess.run(
+        [
+            pandoc,
+            "--from=markdown+tex_math_dollars",
+            "--to=docx",
+            "--output=-",
+        ],
+        input=f"${expression}$\n".encode(),
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        message = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"Pandoc could not render equation {expression!r}: {message}")
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(completed.stdout)) as archive:
+            document_xml = archive.read("word/document.xml")
+    except (KeyError, zipfile.BadZipFile) as exc:
+        raise RuntimeError(f"Pandoc returned an invalid DOCX for equation {expression!r}") from exc
+
+    document = parse_xml(document_xml)
+    equation = next(document.iter(qn("m:oMath")), None)
+    if equation is None:
+        raise RuntimeError(f"Pandoc returned no Office Math object for equation {expression!r}")
+    return etree.tostring(equation, encoding="utf-8")
+
+
+def _add_math(paragraph, latex: str) -> None:
+    paragraph._p.append(parse_xml(_latex_to_omml_xml(latex)))
 
 
 def _add_inline(paragraph, text: str, *, size: float | None = None, color: str = INK) -> None:
-    text = re.sub(r"\$([^$]+)\$", lambda match: _latex_to_text(match.group(1)), text)
     cursor = 0
     for match in INLINE.finditer(text):
         if match.start() > cursor:
             run = paragraph.add_run(text[cursor : match.start()])
             _set_run_font(run, size=size, color=color)
         token = match.group(0)
-        if token.startswith("**"):
+        if token.startswith("$"):
+            _add_math(paragraph, token[1:-1])
+        elif token.startswith("**"):
             run = paragraph.add_run(token[2:-2])
             _set_run_font(run, size=size, color=color, bold=True)
         elif token.startswith("`"):
@@ -403,46 +463,6 @@ def _add_inline(paragraph, text: str, *, size: float | None = None, color: str =
     if cursor < len(text):
         run = paragraph.add_run(text[cursor:])
         _set_run_font(run, size=size, color=color)
-
-
-def _latex_to_text(text: str) -> str:
-    if r"\sum_{o,s,c}" in text:
-        return "maximize J = Σ(o,s,c) v(o,s) f(o,s,c) − Σ(o) P(o) − Σ(c) C(c) x(c)"
-    if r"\sum_{c\in\mathcal C_o}x_c" in text:
-        return (
-            "Σ(c∈C(o)) x(c) + z(o) = 1;  "
-            "Σ(c∈C(o)) f(o,s,c) + u(o,s) = Q(o,s);  "
-            "0 ≤ f(o,s,c) ≤ Q(o,s)x(c)"
-        )
-    replacements = {
-        r"\max": "maximize",
-        r"\sum": "Σ",
-        r"\in": "∈",
-        r"\le": "≤",
-        r"\ge": "≥",
-        r"\qquad": "   ",
-        r"\cdot": "·",
-        r"\ldots": "…",
-    }
-    result = text
-    result = result.replace(r"\{", "⦃").replace(r"\}", "⦄")
-    result = result.replace(r"\mathbb Z_{\ge 0}", "ℤ≥0")
-    result = re.sub(r"\\text\{([^}]*)\}", r"\1", result)
-    result = re.sub(r"\\mathcal\s*\{([^}]*)\}", r"\1", result)
-    result = re.sub(r"\\mathcal\s+([A-Za-z])", r"\1", result)
-    result = re.sub(r"\\mathbb\s*\{([^}]*)\}", r"\1", result)
-    result = result.replace(r"\mathbb Z", "ℤ")
-    result = re.sub(r"\\begin\{[^}]+\}|\\end\{[^}]+\}", "", result)
-    result = re.sub(r"\\boxed\s*\{", "", result)
-    for old, new in replacements.items():
-        result = result.replace(old, new)
-    result = re.sub(r"_\{([^}]*)\}", r"_\1", result)
-    result = re.sub(r"\^\{([^}]*)\}", r"^\1", result)
-    result = result.replace("{", "").replace("}", "")
-    result = result.replace("⦃", "{").replace("⦄", "}")
-    result = result.replace("\\", "  ").replace("&", "")
-    result = re.sub(r"\s+", " ", result).strip()
-    return result.rstrip("}")
 
 
 def _add_table(doc: Document, rows: list[list[str]], *, compact: bool) -> None:
@@ -478,13 +498,21 @@ def _add_table(doc: Document, rows: list[list[str]], *, compact: bool) -> None:
     after.paragraph_format.space_after = Pt(1)
 
 
-def _add_figure(doc: Document, alt: str, path: Path, *, compact: bool) -> None:
+def _add_figure(
+    doc: Document,
+    alt: str,
+    path: Path,
+    *,
+    compact: bool,
+    width_inches: float | None = None,
+) -> None:
     paragraph = doc.add_paragraph()
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     paragraph.paragraph_format.space_before = Pt(4)
     paragraph.paragraph_format.space_after = Pt(2)
     run = paragraph.add_run()
-    shape = run.add_picture(str(path), width=Inches(5.65 if compact else 5.85))
+    width = width_inches if width_inches is not None else 5.65 if compact else 5.85
+    shape = run.add_picture(str(path), width=Inches(width))
     shape._inline.docPr.set("descr", alt)
     caption = doc.add_paragraph(style="Caption")
     _add_inline(caption, alt, size=8.5, color=MUTED)
@@ -497,7 +525,9 @@ def _parse_markdown(
     compact: bool,
     heading_shift: int = 0,
     skip_title_block: bool = True,
+    front_matter_until: str | None = None,
     forced_break_before: set[str] | None = None,
+    figure_width_inches: float | None = None,
 ) -> None:
     forced_break_before = forced_break_before or set()
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -515,7 +545,7 @@ def _parse_markdown(
         if in_equation:
             if stripped == "$$":
                 paragraph = doc.add_paragraph(style="Equation")
-                _add_inline(paragraph, _latex_to_text(" ".join(equation_lines)), size=10.5, color=NAVY)
+                _add_math(paragraph, " ".join(equation_lines))
                 equation_lines.clear()
                 in_equation = False
             else:
@@ -532,18 +562,28 @@ def _parse_markdown(
             index += 1
             continue
 
-        if front_matter and stripped.startswith("# "):
+        if front_matter_until and front_matter:
+            if stripped == f"## {front_matter_until}":
+                front_matter = False
+            else:
+                index += 1
+                continue
+        elif front_matter and stripped.startswith(("# ", "**")):
             index += 1
             continue
-        if front_matter and stripped.startswith("**"):
-            index += 1
-            continue
-        front_matter = False
+        else:
+            front_matter = False
 
         image = re.fullmatch(r"!\[([^]]+)]\(([^)]+)\)", stripped)
         if image:
             image_path = (path.parent / image.group(2)).resolve()
-            _add_figure(doc, image.group(1), image_path, compact=compact)
+            _add_figure(
+                doc,
+                image.group(1),
+                image_path,
+                compact=compact,
+                width_inches=figure_width_inches,
+            )
             index += 1
             continue
 
@@ -712,19 +752,70 @@ def build_report() -> Path:
     )
     _set_core_properties(
         doc,
-        title="A Safeguarded Hybrid Classical-Quantum Solver for Distributed Order Management",
+        title="A Scalable Safeguarded Hybrid Classical-Quantum Solver for Distributed Order Management",
         subject="Final research report",
     )
     _add_title_block(
         doc,
         kicker="Final research report",
-        title="A Safeguarded Hybrid Classical-Quantum Solver for Distributed Order Management",
-        subtitle="Validated distributed order allocation with exact recourse and bounded quantum proposals",
+        title="A Scalable Safeguarded Hybrid Classical-Quantum Solver for Distributed Order Management",
+        subtitle="Exact recourse, adaptive neighborhood search, and bounded quantum proposals",
         authors="Andrei Pomorov",
         compact=True,
     )
-    _parse_markdown(doc, REPORTS / "final_report.md", compact=True)
+    _parse_markdown(
+        doc,
+        REPORTS / "final_report.md",
+        compact=True,
+        front_matter_until="Abstract",
+    )
     output = REPORTS / "final_report.docx"
+    doc.save(output)
+    return output
+
+
+def build_challenge_report() -> Path:
+    doc = Document()
+    _setup_styles(doc, compact=True)
+    _configure_section(
+        doc.sections[0],
+        label="WISER DOM | Challenge Submission Report",
+        subtitle="Requirement-by-requirement technical evidence",
+        first_page=True,
+    )
+    section = doc.sections[0]
+    section.top_margin = Inches(0.78)
+    section.bottom_margin = Inches(1.1)
+    section.left_margin = Inches(0.78)
+    section.right_margin = Inches(0.78)
+    _set_core_properties(
+        doc,
+        title="WISER Quantum Challenge Submission Report",
+        subject="Six-to-ten-page challenge criteria report",
+    )
+    _add_title_block(
+        doc,
+        kicker="Challenge submission report",
+        title="Scalable, Safeguarded DOM Optimization",
+        subtitle="Business value, mathematical model, implementation, scaling, and hardware evidence",
+        authors="Andrei Pomorov",
+        compact=True,
+        minimal=True,
+    )
+    _parse_markdown(
+        doc,
+        REPORTS / "challenge_submission_report.md",
+        compact=True,
+        heading_shift=-1,
+        front_matter_until="Portal summary",
+        forced_break_before={
+            "6.2 Coordinated improvement control",
+            "7.4 IBM hardware and runtime correction",
+            "8. Recommendation, limitations, and submission map",
+        },
+        figure_width_inches=5.1,
+    )
+    output = REPORTS / "challenge_submission_report.docx"
     doc.save(output)
     return output
 
@@ -769,7 +860,7 @@ def build_planner() -> Path:
     doc = Document()
     _setup_styles(doc, compact=True)
     normal = doc.styles["Normal"]
-    normal.font.size = Pt(9)
+    normal.font.size = Pt(8.5)
     normal.paragraph_format.space_after = Pt(2)
     normal.paragraph_format.line_spacing = 1.0
     for name, size, before, after in (
@@ -789,7 +880,7 @@ def build_planner() -> Path:
     _configure_section(
         section,
         label="WISER DOM | Planner Decision View",
-        subtitle="Reviewed 20-group scope",
+        subtitle="Reviewed 100-group scope",
         first_page=False,
     )
     section.top_margin = Inches(0.45)
@@ -802,9 +893,10 @@ def build_planner() -> Path:
         kicker="Planner decision view",
         title="Release the polished-greedy plan",
         subtitle="Exact recourse completed · independent validation passed · quality escalation available",
-        authors="Andrei Pomorov | Reviewed scope: 20 assignment groups",
+        authors="Andrei Pomorov | Reviewed scope: 100 assignment groups",
         compact=True,
         minimal=True,
+        include_date=False,
     )
     _parse_markdown(doc, REPORTS / "planner_view.md", compact=True, heading_shift=-1)
     output = REPORTS / "planner_view.docx"
@@ -813,7 +905,7 @@ def build_planner() -> Path:
 
 
 def main() -> int:
-    for builder in (build_report, build_summary, build_planner):
+    for builder in (build_report, build_challenge_report, build_summary, build_planner):
         print(builder().relative_to(ROOT))
     return 0
 

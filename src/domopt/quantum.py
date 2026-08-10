@@ -3,7 +3,8 @@
 ``qaoa_statevector`` is a genuine gate-model algorithm simulation. It uses a
 weight-one Dicke (W) state for each assignment group and a connected XY mixer,
 so every ideal simulated state satisfies the one-hot assignment constraints.
-It is not a QPU run and no claim of quantum advantage follows from it.
+IBM hardware is exposed separately as an execution target for the same QAOA
+proposal method.
 """
 
 from __future__ import annotations
@@ -735,11 +736,13 @@ def _sample_ibm_qpu(
             status = backend.status()
             if not bool(getattr(status, "operational", False)):
                 raise QuantumSolverError(
-                    f"Requested IBM backend {backend_name!r} is not operational"
+                    f"Requested IBM processor target (Qiskit backend) {backend_name!r} "
+                    "is not operational"
                 )
             if int(getattr(backend, "num_qubits", 0)) < n:
                 raise QuantumSolverError(
-                    f"Requested IBM backend {backend_name!r} has fewer than {n} qubits"
+                    f"Requested IBM processor target (Qiskit backend) {backend_name!r} "
+                    f"has fewer than {n} qubits"
                 )
         else:
             backend = service.least_busy(
@@ -753,7 +756,8 @@ def _sample_ibm_qpu(
         raise
     except Exception as error:
         raise QuantumSolverError(
-            f"IBM backend selection failed: {type(error).__name__}: {error}"
+            "IBM processor-target selection through Qiskit failed: "
+            f"{type(error).__name__}: {error}"
         ) from error
     backend_selection_seconds = perf_counter() - backend_selection_start
 
@@ -943,9 +947,10 @@ def sample_qubo(
     """Return sampled bitstrings and energies using one common schema.
 
     Exact enumeration and simulated annealing are reproducible classical
-    validation backends. ``qaoa_statevector`` locally simulates a constraint-
-    preserving gate-model circuit. IBM hardware is an optional execution adapter;
-    none of these backends imply quantum advantage.
+    proposal methods. ``qaoa_statevector`` locally simulates a constraint-
+    preserving gate-model circuit. IBM hardware is an optional execution target;
+    the algorithm, execution target, and downstream exact validator are reported
+    separately.
     """
 
     n = len(model.variable_names)

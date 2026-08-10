@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -175,3 +177,12 @@ def test_ibm_presentation_figures_render(tmp_path, monkeypatch) -> None:
 
     assert queue_path.is_file() and queue_path.stat().st_size > 0
     assert study_path.is_file() and study_path.stat().st_size > 0
+
+
+def test_ibm_runtime_panel_uses_a_log_scale() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "src/domopt/visualization.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'axes[1, 2].set_yscale("log")' in source
+    assert "dots = individual jobs" in source

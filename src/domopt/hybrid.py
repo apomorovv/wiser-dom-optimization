@@ -1210,7 +1210,10 @@ def solve_exact_lns(
                 - global_validation_seconds,
             ),
             "history": history,
-            "claim": "No quantum advantage is inferred from this classical run.",
+            "claim": (
+                "Classical exact-LNS result; sampler quality is evaluated separately "
+                "under the common validator."
+            ),
         },
     )
 
@@ -1667,6 +1670,9 @@ def solve_hybrid(
             "batch_strategy": settings.batch_strategy,
             "history": history,
             "hardware_runs": hardware_runs,
-            "claim": "No quantum advantage is inferred from this run.",
+            "claim": (
+                "Sampler-assisted proposal result; final feasibility and objective "
+                "come from exact recourse and independent validation."
+            ),
         },
     )

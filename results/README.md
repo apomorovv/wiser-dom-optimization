@@ -17,9 +17,9 @@ charts that expose absolute commercial objective or cost totals are also exclude
 These private files are not needed to run the repository or review the submission
 narrative.
 
-The final paper, summary, planner view, and presentation contain screened aggregate
-metrics. Synthetic controls demonstrate the execution and validation workflow, not
-business impact or quantum advantage.
+The academic paper, challenge report, summary, planner view, and presentation contain
+screened aggregate metrics. Synthetic controls demonstrate the execution and validation
+workflow and are not represented as business impact.
 
 ## Reproducing or replacing evidence
 
@@ -31,6 +31,17 @@ python scripts/run_challenge_study.py \
   --profile smoke
 ```
 
-Then run `full`. Do not overwrite the published figures automatically. Review
-feasibility, residuals, manifests, privacy, source state, and figure consistency before
-promoting any new privacy-safe figures.
+Then run `full`. Review feasibility, residuals, manifests, privacy, source state, and
+figure consistency before promoting new privacy-safe figures. The publication command
+reads audited local tables but writes figures only:
+
+```bash
+python scripts/create_submission_figures.py \
+  --study-root results/challenge-study/notebook/full \
+  --ibm-root results/challenge-study/notebook/ibm-presentation
+```
+
+The final audited grid contains 516 rows: 513 validated plans and three intentionally
+infeasible frozen-routing controls at 60%, 65%, and 70% inventory reductions. The IBM
+hardware figure summarizes 18 synthetic-only QPU jobs at 8,192 shots each; its runtime
+panel uses a log axis and individual job dots to expose queue-time outliers.

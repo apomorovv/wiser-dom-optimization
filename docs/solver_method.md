@@ -10,9 +10,9 @@ The repository exposes three validated modes through `solve_dom`:
 | `quality` | Adaptive exact large-neighborhood search | Coupled or difficult planning windows |
 | `hybrid` | Sampler-assisted neighborhood search plus exact recourse | Research and controlled hardware studies |
 
-Full exact MILP is also available for small-instance certificates and backend
+Full MILP is also available for small-instance certificates and solver-engine
 comparisons. SciPy/HiGHS is the default; Gurobi is optional and must be selected
-explicitly.
+explicitly. A run is called exact only when its recorded optimality gap is zero.
 
 ## Fast mode
 
@@ -34,7 +34,8 @@ when the merged global solution is valid and improves the common objective.
 
 The hybrid method uses the same incumbent and conflict neighborhoods, but replaces the
 local joint-assignment MILP with a proposal QUBO. The sampler may be exact enumeration,
-random sampling, simulated annealing, local QAOA statevector simulation, or an IBM QPU.
+random sampling, simulated annealing, local QAOA statevector simulation, or QAOA
+executed on an IBM quantum processor.
 
 The proposal stage is deliberately separated from feasibility:
 
@@ -127,8 +128,9 @@ The number of variables grows roughly linearly with the number of retained candi
 columns, but the difficulty of the integer search can grow much faster because the
 solver must consider combinations of assignments that compete for the same resources.
 For this reason, the implementation does **not** rely on solving one unrestricted MILP
-over the entire network in production. Full exact MILP is retained primarily for small
-instances, benchmarking, and optimality certificates. 
+over the entire network in production. The unrestricted MILP is retained primarily for
+small-instance benchmarking; it is called exact only when the run closes its optimality
+gap. Time-limited incumbents are reported with their bound and gap.
 
 Candidate preprocessing is the first scaling layer. Invalid lanes, unavailable
 DC/SKU combinations, closed dates, late options, forecast-ineligible alternatives, and
@@ -228,7 +230,7 @@ $$
 E_g=\{(0,1),(1,2),\ldots,(m_g-2,m_g-1)\},
 $$
 
-which requires $m_{g-1}$ logical mixer edges for a group of $m_g$ choices rather than
+which requires $m_g-1$ logical mixer edges for a group of $m_g$ choices rather than
 the $m_g$ edges of the earlier ring construction. The path remains connected, so all
 one-hot choices remain reachable while reducing two-qubit circuit burden. QAOA
 parameters are also optimized once for a QUBO/depth pair and reused across matched
@@ -251,18 +253,18 @@ representation of the complete distribution network.
 
 ### Observed scaling
 
-The implementation was tested on progressively larger real-data subsets containing
-from 8 to 372 assignment groups and from 9 to 750 orders. Median greedy runtime
-increased from 0.21 s to 16.74 s, polished greedy from 0.52 s to 54.63 s, and exact
-LNS from 1.72 s to 74.03 s. Full exact MILP was intentionally restricted to at most
-20 groups, while the experimental hybrid search was limited to at most 50 groups.
+The final study covers real-data subsets from 8 to 372 assignment groups and up to 750
+orders. At all 372 groups, median runtime across three repetitions was 1.31 s for
+greedy, 4.82 s for polished greedy, 26.14 s for exact LNS, and 101.17 s for hybrid
+simulated annealing. Full MILP was restricted to the 100-group common comparison and
+finished with a nonzero gap; it is therefore reported as a time-limited comparator, not
+an exact certificate.
 
-
-Importantly, LNS continued to find improvements at larger sizes: relative to the
-polished incumbent, it improved the objective at 100, 250, and 372 assignment groups.
-This supports the intended design: inexpensive construction handles the full planning
-problem, while exact search effort is concentrated only where interactions make it
-worthwhile. 
+The independent generated study extends greedy and exact LNS to 100,000 orders and the
+hybrid workflow to 20,000 orders. The largest observed local hybrid QUBO was 32
+variables in that generated scaling study and 16 variables at full real scope. This
+supports the intended design: inexpensive construction handles the full planning
+problem, while coordinated search is concentrated where interactions make it useful.
 
 The resulting architecture does not remove the underlying combinatorial complexity of
 DOM, nor does it claim that the quantum subproblem scales polynomially. Instead, it

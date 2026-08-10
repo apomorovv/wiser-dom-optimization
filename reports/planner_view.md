@@ -1,21 +1,18 @@
 # Planner Decision View
 
 **Author:** Andrei Pomorov
-
-**Planning scope:** Reviewed 20-assignment-group comparison
-
+**Planning scope:** Reviewed 100-assignment-group comparison
 **Recommended plan:** Polished greedy with exact fulfillment recourse
-
-**Status:** Validated; use exact LNS only when the escalation trigger is met
+**Status:** Independently validated; exact LNS is the quality escalation
 
 ## Decision summary
 
 | Planning metric | Default routing | Recommended plan | Change |
 |---|---:|---:|---:|
-| Objective capture | 61.39% | 64.90% | +3.51 pp |
-| Case fill rate | 64.21% | 68.50% | +4.29 pp |
-| Reassigned orders | 0 | 4 | +4 |
-| Runtime | 0.30 s | 2.86 s | +2.56 s |
+| Objective capture | 74.96% | 76.83% | +1.87 pp |
+| Case fill | 78.29% | 79.91% | +1.62 pp |
+| Reassigned orders | 0 | 13 | +13 |
+| Runtime | 0.24 s | 2.05 s | +1.81 s |
 | Validation violations | 0 | 0 | No change |
 
 **Objective capture** is fulfilled value minus penalties and shipping, divided by total
@@ -24,32 +21,36 @@ cases. **pp** means percentage points.
 
 ## Planner actions
 
-1. Review the four reassignments for lane authorization and service rationale.
-2. Confirm calendar exceptions and any capacity event after the data snapshot.
-3. Release the plan when the candidate DCs are authorized.
-4. Trigger exact LNS for material conflicts or a failed approval threshold; re-optimize
-   after material inventory changes.
+1. Review the 13 reassignments for lane authorization and service rationale.
+2. Confirm calendar exceptions and capacity events after the data snapshot.
+3. Release only while the certification panel remains green.
+4. Re-optimize after a material inventory change; trigger exact LNS when conflicts or
+   penalty exposure are material.
 
-## What the solver guarantees
+## What the solver certifies
 
-- exact assignment, load cohesion, case balance, and integer quantities;
-- candidate eligibility, protected ATP, capacity, and diversion thresholds; and
-- independent objective recomputation plus rejection of invalid or non-improving moves.
+- one assignment outcome per order and cohesive routing for each load;
+- exact demand balance, nonnegative integral quantities, and eligible DC/date choices;
+- protected cumulative ATP, documented capacity, and diversion-improvement compliance;
+- independent objective recomputation and rejection of invalid or non-improving moves.
 
 ## Escalation guide
 
 | Signal | Action |
 |---|---|
-| Routine window; recommended plan passes review | Release polished-greedy plan |
-| Coupled inventory/dock conflict or high-value exception | Run exact LNS with a fixed time budget |
-| Small disputed subset needs a certificate | Run full exact MILP and inspect the bound |
-| Quantum experiment requested | Use only an approved bounded or synthetic neighborhood; retain exact recourse and validation |
+| Routine window; plan passes review | Release polished-greedy plan |
+| Coupled inventory/dock conflict, severe scarcity, or high penalty exposure | Run exact LNS with a fixed budget |
+| Small disputed subset needs a bound | Run full MILP and inspect incumbent plus gap |
+| Research proposal requested | Use an approved bounded/generated neighborhood; retain exact recourse and validation |
 
-## Known limitations
+## Evidence boundary
 
-This is one challenge snapshot. DC authorization, authoritative calendars, throughput
-maxima, customer service rules, and commercial approvals require owner confirmation.
-Quantum hardware remains experimental and has not shown a speed or quality advantage.
+All 513 returned plans in the final 516-row study pass validation; three frozen-routing
+controls are proven infeasible after 55% inventory reduction. At 70% reduction, adaptive
+methods remain feasible and exact LNS retains the strongest tested frontier. The study
+uses one supplied planning snapshot, so DC authorization, calendars, throughput maxima,
+customer rules, and commercial approvals still require owner confirmation.
 
 **Recommended decision:** approve the polished-greedy plan subject to planner review,
-retain exact LNS as the quality escalation, and treat quantum runs as controlled R&D.
+retain exact LNS as the quality escalation, and keep sampler-assisted runs behind the
+same certification gate.

@@ -1,454 +1,512 @@
-# A Safeguarded Hybrid Classical–Quantum Solver for Distributed Order Management
+# A Scalable Safeguarded Hybrid Classical-Quantum Solver for Distributed Order Management
+
+## Exact Recourse, Adaptive Neighborhood Search, and Bounded Quantum Proposals
 
 **Andrei Pomorov**
-
-**Nestlé WISER Quantum Challenge — Final Report**
 
 **August 2026**
 
 ## Abstract
 
-Distributed order management (DOM) must select a distribution center and ship date for
-each order while sharing time-phased inventory and operational capacity across many
-orders. The decision is combinatorial, but the delivered plan must also satisfy exact
-case balance, load cohesion, eligibility, and cumulative available-to-promise (ATP)
-constraints. We present a reproducible solver hierarchy that combines deterministic
-greedy construction, exact fixed-assignment recourse, adaptive mixed-integer
-large-neighborhood search (LNS), and an experimental sampler-assisted neighborhood
-search. The sampler may be classical, simulated annealing, local Quantum Approximate
-Optimization Algorithm (QAOA), or an IBM quantum processor; it can only propose bounded
-assignment moves. Deterministic one-hot repair, exact mixed-integer linear programming
-(MILP) recourse, and an independent validator retain authority over feasibility.
+Distributed order management (DOM) jointly chooses a distribution center and
+planned-goods-issue date for each order while allocating integer case quantities under
+shared, time-phased inventory and operational capacity. The resulting problem is
+combinatorial, but its output must also satisfy exact demand balance, load cohesion,
+eligibility, cumulative available-to-promise (ATP), capacity, diversion, and integrality
+requirements. We present a scalable, feasibility-first hierarchy consisting of
+deterministic load-atomic greedy construction, exact fixed-assignment recourse, adaptive
+mixed-integer large-neighborhood search (LNS), and an experimental sampler-assisted
+neighborhood search. The sampler may use exact enumeration, random sampling, simulated
+annealing, local constraint-preserving QAOA, or hardware-executed QAOA; it proposes only
+a bounded local assignment move. Deterministic one-hot repair, exact recourse, a strict
+improvement test, and an independent validator retain authority over the operational
+plan.
 
-The reviewed study contains 247 aggregate rows across 14 experiment families. Every row
-passed the independent validator, with zero maximum residual for demand balance,
-integrality, cumulative inventory, and enabled capacity constraints. On a common
-20-assignment-group real-data subset, default routing captured 61.39% of requested
-merchandise value in the business objective, while greedy routing reached 64.90%; exact
-polishing added only 0.004 percentage points. Polished greedy, exact LNS, and the full
-exact MILP agreed to the displayed precision, with runtimes of 2.86, 7.00, and 2.76
-seconds respectively. A deliberately coordinated synthetic control exposed a greedy
-trap: exact LNS, exact MILP, simulated annealing, and local QAOA improved the objective
-by 197.2 synthetic units. A 26-row hardware archive on IBM `ibm_marrakesh` showed that
-all final solutions were valid after recourse, but deeper QAOA sharply reduced native
-one-hot feasibility. These findings support a practical classical deployment path and
-a falsifiable quantum research program; they do not establish quantum advantage.
+The final study contains 516 aggregate rows across 14 experiment families. All 513
+returned solutions passed independent validation with zero recorded demand-balance,
+integrality, cumulative-inventory, and enabled-capacity residuals; three frozen-routing
+controls were correctly proven infeasible under inventory reductions of 60-70%. On a
+common 100-assignment-group real-data subset, greedy routing improved objective capture
+by 1.859 percentage points and case fill by 1.619 percentage points over default routing
+in 0.58 seconds. Exact quantity polishing added 0.0085 percentage points of objective
+capture. Exact LNS and hybrid search retained the strongest observed incumbent, while a
+time-limited full MILP returned a lower incumbent with a nonzero gap. At all 372 real
+assignment groups, median runtime was 1.31 seconds for greedy, 4.82 seconds for polished
+greedy, 26.14 seconds for exact LNS, and 101.17 seconds for hybrid search. On generated
+instances, greedy and exact LNS scaled to 100,000 orders in median times of 39.16 and
+276.71 seconds; hybrid search scaled to 20,000 orders while the local QUBO remained 32
+variables.
 
-**Keywords:** distributed order management; available to promise; mixed-integer linear
-programming; large-neighborhood search; QUBO; QAOA; hybrid quantum-classical
-optimization; feasibility repair
+An 18-job IBM study used 8,192 shots per job on the `ibm_marrakesh` quantum processor.
+Shallow $p=1$ QAOA compiled to median depth 43 with 40 two-qubit gates and achieved a
+65.34% median raw one-hot rate and 0.6836% median exact-optimum hit rate, compared with a
+0.3906% uniform-feasible null. At $p=2$, median depth increased to 448 with 373
+two-qubit gates, one-hot feasibility fell to 10.36%, and the optimum-hit median fell to
+0.0610%. All hardware-derived final plans nevertheless recovered the 197.2-unit
+coordinated synthetic improvement after exact recourse and validation. The evidence
+establishes a practical scalable solver and a falsifiable path for bounded quantum
+proposals.
 
-## 1. Introduction and related literature
+**Keywords:** distributed order management; available to promise; mixed-integer
+optimization; large-neighborhood search; QUBO; QAOA; hybrid quantum-classical
+optimization; exact recourse; feasibility validation
 
-An order allocator must decide more than where an order can ship. It must decide which
-eligible origin and planned-goods-issue (PGI) date should serve the order, how much of
-each stock-keeping unit (SKU) can be filled, and whether a reassignment is valuable
-enough to justify transport and operational disruption. These decisions interact
-through inventory checkpoints, dock limits, shared loads, and service penalties. A
-locally attractive reassignment may consume inventory needed by a more valuable order,
-and line-by-line routing can violate load cohesion. DOM is consequently a mixed
-discrete–continuous optimization problem in which feasibility is operationally more
-important than the score reported by any one solver.
+## 1. Introduction
 
-The classical foundation is well established. Available-to-promise allocation has been
-formulated as mixed-integer optimization to coordinate order acceptance and allocation
-[1]. Order-fulfillment models have jointly considered inventory, delivery commitments,
-and production or distribution decisions [2], while modern e-fulfillment research
-continues to use MILP to represent allocation, service, and logistics trade-offs [3].
-These formulations provide strong constraints and optimality bounds, but a full model
-can become expensive as every order–candidate–SKU combination is expanded.
+A DOM system must determine not only whether an order can ship, but which eligible
+origin and ship date should serve it, how many cases of every stock-keeping unit (SKU)
+should be fulfilled, and whether a reassignment is valuable enough to justify
+transportation and operational disruption. These choices interact through cumulative
+inventory checkpoints, dock and throughput capacity, common-load requirements, and
+thresholded service penalties. A locally attractive reassignment can consume inventory
+needed by another order, while order-by-order routing can split a load that must move
+atomically.
 
-Decomposition and neighborhood search address that scaling problem. Shaw introduced
-large-neighborhood search as repeated exact or heuristic re-optimization of a destroy
-and repair neighborhood [4]. Local branching defines a MILP neighborhood around an
-incumbent [5], and relaxation-induced neighborhood search uses information from the
-linear relaxation to focus a subproblem [6]. The common principle is useful here: keep
-the valid global incumbent, expose only a bounded set of interacting routing decisions,
-and solve quantities exactly after the local assignments are chosen.
+This structure produces a mixed discrete-continuous optimization problem. Assignment
+decisions are combinatorial; fulfillment quantities are integer; inventory is
+time-coupled; and the returned plan must remain valid under detailed operational rules.
+Classical ATP and order-fulfillment research therefore relies on mixed-integer
+formulations [1-3]. Full MILP provides strong modeling and bounds, but expanding every
+order-candidate-SKU combination can become expensive as the planning window grows.
 
-Quantum optimization introduces a different proposal mechanism. QAOA alternates a
-problem-cost operator and a mixer to sample low-cost binary states [7]. The Quantum
-Alternating Operator Ansatz generalized this framework to constraint-preserving mixers
-and feasible initial states [8]. For one-hot assignment groups, an XY mixer preserves
-the number of excitations, while deterministic Dicke-state constructions prepare a
-known feasible superposition [9,10]. Parameter initialization and concentration remain
-important because variational optimization itself can dominate runtime [11]; warm-start
-methods and quantum local search therefore place quantum routines inside a classical
-outer loop rather than asking a processor to solve a large operational model directly
-[12,13].
+Neighborhood methods address this difficulty by preserving an incumbent and exposing
+only a bounded subset of decisions. Large-neighborhood search, local branching, and
+relaxation-induced neighborhood search share this principle [4-6]. Quantum local search
+uses an analogous decomposition: a quantum routine proposes a move inside a classical
+outer loop rather than representing the complete operational system [13].
 
-Our contribution is an auditable integration of these ideas for the challenge data:
+The solver presented here is designed around that separation. A fast classical path
+produces a feasible incumbent. Exact recourse optimizes quantities for fixed
+assignments. Exact LNS reopens only interacting groups when additional quality is worth
+the latency. A QUBO/QAOA layer may replace the local proposal mechanism, but it cannot
+bypass repair, exact recourse, or independent global validation.
 
-1. a documented column-based MILP with exact demand, eligibility, protected ATP,
-   capacity, diversion, and thresholded-penalty rules;
-2. a portable hierarchy from greedy construction to exact LNS, with SciPy/HiGHS as the
-   license-free default and Gurobi as an optional comparison backend;
-3. a bounded QUBO proposal layer whose output cannot bypass deterministic repair, exact
-   recourse, or independent validation;
-4. a controlled evidence suite spanning common-method comparison, scaling, sensitivity,
-   robustness, ablation, synthetic coordination, and IBM hardware; and
-5. a stronger final QAOA implementation with linear W-state preparation, a connected
-   path mixer, reusable optimized parameters, and quality metrics relative to exact and
-   uniform-feasible controls.
+### 1.1 Contributions
 
-The practical conclusion is intentionally conservative. The current solver's primary
-advantage is the architecture: it is useful before, during, and after any quantum
-experiment because it always preserves a trusted feasible incumbent.
+This work makes six contributions:
 
-## 2. Problem definition and mathematical model
+1. A documented MILP for load-atomic assignment, partial fulfillment, thresholded
+   penalties, protected cumulative ATP, optional capacities, and minimum alternate-fill
+   improvement.
+2. A scalable hierarchy from deterministic construction to exact local
+   re-optimization, with a portable SciPy/HiGHS default and optional native HiGHS, SCIP,
+   and Gurobi solver engines.
+3. A bounded hybrid proposal layer in which local QUBO width is decoupled from the
+   number of global orders.
+4. A gate-model implementation using linear W-state preparation, a connected XY path
+   mixer, reusable optimized angles, exact feasible-state controls, and
+   uncertainty-aware sampling metrics.
+5. An independent validator and provenance system that recompute feasibility and the
+   objective instead of trusting solver status or sampler energy.
+6. A broad evidence suite with repeated real and generated scaling, robustness,
+   sensitivity, ablation, GPU scoring, local QAOA, and IBM hardware experiments.
 
-### 2.1 Data and decision unit
+## 2. Related work
 
-The challenge supplies five runtime tables covering orders, shipping alternatives,
-time-phased inventory, throughput observations, and remaining dock capacity. The
-adapter validates required identifiers, dates, domains, and numeric fields before
-constructing the optimization model. Restricted identifiers and raw commercial totals
-are not reproduced in this report.
+Optimization-based ATP coordinates order acceptance and allocation against multi-stage
+resource availability [1]. Distribution-network fulfillment models add logistics,
+inventory, and service decisions [2], while modern e-fulfillment formulations continue
+to use mixed-integer models for assignment, splitting, and delivery-window trade-offs
+[3]. These models motivate the exact constraint layer used here.
 
-Orders on the same source load form an **assignment group** and must select one common
-distribution-center/PGI option. A **candidate** is an eligible distribution center and
-ship-date option that passes lane, calendar, lead-time, SKU-presence, dock, and diversion
-filters. Each order may instead be explicitly unassigned. Assigned lines may be
-partially filled, but they cannot split across distribution centers.
+The scalable classical method is related to LNS [4], local branching [5], and
+relaxation-induced neighborhood search [6]. Unlike a generic destroy-and-repair
+procedure, the neighborhoods here are chosen from a sparse resource-conflict index,
+residualized against the incumbent, and solved with the same business formulation used
+for full MILP.
 
-### 2.2 Variables and objective
+QAOA alternates a cost unitary and mixer to sample low-energy binary states [7]. The
+Quantum Alternating Operator Ansatz generalizes QAOA to constraint-preserving initial
+states and mixers [8]. A one-hot assignment group can be represented by a weight-one
+Dicke state and an XY mixer [9,10]. Parameter choice and hardware depth remain central
+limitations [11]; warm starts and local-search embeddings seek to reduce that burden
+[12,13]. This study adopts the local-search interpretation and compares quantum
+proposals with exact and strong classical controls.
 
-Let $x_c\in\{0,1\}$ select candidate $c$, $z_o\in\{0,1\}$ select the unassigned outcome
-for order $o$, $f_{osc}\in\mathbb Z_{\ge 0}$ denote fulfilled cases of SKU $s$ under
-candidate $c$, and $u_{os}\in\mathbb Z_{\ge 0}$ denote unfulfilled cases. Additional
-bounded binary and continuous variables linearize the thresholded order penalty. The
-objective is
+## 3. Problem definition
+
+### 3.1 Sets and data
+
+Let $\mathcal O$ be orders, $\mathcal G$ assignment groups, $\mathcal S_o$ SKUs in order
+$o$, $\mathcal C_o$ eligible DC/PGI candidates, $\mathcal T$ inventory checkpoints, and
+$\mathcal R$ enabled resources. Orders in one source load belong to the same assignment
+group and must select one common outcome. A candidate includes distribution center
+$d(c)$, PGI date $\tau(c)$, shipping cost $C_c$, eligibility state, and fixed resource
+coefficients. Demand for order $o$ and SKU $s$ is $Q_{os}$, unit value is $v_{os}$, and
+protected cumulative ATP at $(d,s,t)$ is $A_{dst}$.
+
+The supplied model contains 750 modeled orders, 372 assignment groups, 20,869 order
+lines, and 2,182 unpruned candidate rows. A heuristic Pareto reduction removes 875
+candidate rows, but it remains opt-in because isolated dominance is not globally
+lossless under shared resources. Raw identifiers and commercial totals are excluded
+from the submission.
+
+### 3.2 Decision variables and objective
+
+For candidate $c$, let $x_c\in\{0,1\}$ indicate selection. Let
+$z_o\in\{0,1\}$ indicate that order $o$ is unassigned,
+$f_{osc}\in\mathbb Z_{\ge0}$ be fulfilled cases, and
+$u_{os}\in\mathbb Z_{\ge0}$ be unmet cases. Additional bounded variables linearize the
+thresholded order penalty $P_o$. The objective is
 
 $$
-\max J=
-\sum_{o,s,c} v_{os}f_{osc}
--\sum_o P_o
--\sum_c C_cx_c,
+\max J = \sum_{o,s,c} v_{os}f_{osc} - \sum_o P_o - \sum_c C_cx_c.
 $$
 
-where $v_{os}$ is merchandise value per fulfilled case, $P_o$ is the active unmet-demand
-penalty, and $C_c$ is shipping cost. To preserve confidentiality across experiments, we
-report **objective capture**, $J$ divided by total requested merchandise value, rather
-than raw real-data currency totals.
+Real-data results are reported primarily as objective capture, $J$ divided by total
+requested merchandise value, together with case fill, reassignment counts, and runtime.
 
-### 2.3 Core constraints
+### 3.3 Core constraints
 
-The exact model enforces:
+Each order selects exactly one modeled outcome:
 
 $$
-\sum_{c\in\mathcal C_o}x_c+z_o=1,
-\qquad
+\sum_{c\in\mathcal C_o}x_c+z_o=1 \qquad \forall o\in\mathcal O.
+$$
+
+Demand balance and assignment linking are
+
+$$
 \sum_{c\in\mathcal C_o}f_{osc}+u_{os}=Q_{os},
-\qquad
-0\le f_{osc}\le Q_{os}x_c.
+\qquad 0\le f_{osc}\le Q_{os}x_c.
 $$
 
-Group-linking equalities make all orders in a load choose the same option. For each
-distribution-center/SKU/date checkpoint, cumulative earlier fulfillment cannot exceed
-protected projected ATP. Resource rows constrain fixed dock use and any enabled
-case-dependent resources. A non-default assignment is valid only if its fill improves
-the protected default preview by both five percentage points and 100 cases, capped by
-demand. Exact pallet and loose-case variables are available when corresponding
-capacities are enabled. The complete linearization and assumptions are provided in
-`docs/mathematical_formulation.md` and `docs/assumptions.md`.
+Group-linking equalities force all members of one load to choose the same DC/date
+option or all remain unassigned. Projected ATP is cumulative:
 
-## 3. Solver architecture
+$$
+\sum_o\sum_{c\in\mathcal C_o:d(c)=d,\tau(c)\le t}f_{osc}\le A_{dst}
+\qquad \forall d,s,t.
+$$
 
-### 3.1 Classical hierarchy
+Exact-date capacity rows combine fixed candidate consumption and case-dependent
+consumption. Non-default assignments must meet the documented minimum improvement over
+the protected default preview. Pallet and loose-case variables are enabled when the
+corresponding capacities are available. The complete formulation is in
+`docs/mathematical_formulation.md`.
 
-The **default baseline** retains default routing and allocates feasible quantities. The
-**greedy baseline** orders whole assignment groups, evaluates eligible choices against
-current residual resources, commits the best deterministic incremental choice, and
-updates shared resources. **Polished greedy** fixes those assignments and lets the exact
-MILP re-optimize fulfillment and threshold penalties.
+## 4. Solver architecture
 
-The **exact LNS** solver starts from polished greedy, selects assignment groups near
-resource or inventory conflicts, residualizes the inactive network, and solves a
-bounded MILP over the active neighborhood. It adapts neighborhood size under limits on
-orders, variables, runtime, and MIP gap. A candidate replaces the incumbent only after
-global validation and a strict objective improvement.
+### 4.1 Fast construction and exact policy recourse
 
-The full exact MILP is retained for small-instance certificates and backend comparison.
-SciPy's `milp` interface to the open-source HiGHS solver [14] is the default on Windows,
-macOS, and Linux. The same compiled objective, bounds, integrality vector, and sparse
-constraint matrix can optionally be submitted to Gurobi [15]. Gurobi is never imported
-or selected by default because installation and license availability vary by reviewer.
+The default and greedy baselines make whole-group decisions and update residual
+inventory and capacity immediately. The implementation compiles immutable order-line
+and candidate records once, caches group options, and performs previews using compact
+arrays and dictionaries. Polished greedy fixes the routing policy and invokes the MILP
+for quantities and thresholded penalties. Structural presolve removes candidate columns
+that cannot be used under the fixed policy. If recourse fails or times out without a
+better valid plan, the feasible greedy incumbent is retained.
 
-### 3.2 Hybrid neighborhood search
+### 4.2 Adaptive exact LNS
 
-The hybrid solver changes only the local assignment proposal step:
+Exact LNS starts from polished greedy. A sparse inverted index maps resources to
+assignment groups, so pairwise global conflicts need not be materialized. Selected
+orders are residualized against frozen incumbent consumption, and the local MILP jointly
+re-optimizes assignment and fulfillment. Neighborhood size adapts under explicit limits
+on active groups, orders, fulfillment variables, runtime, and MIP gap. A local solution
+is merged only if it improves the residual objective and the resulting global plan
+passes independent validation.
 
-1. select interacting assignment groups around the incumbent;
-2. retain a bounded set of assignment plans for each group;
-3. construct a QUBO with plan value, one-hot penalties, and pairwise resource-conflict
-   surrogates;
-4. sample with exact feasible enumeration, random search, simulated annealing, local
-   QAOA, or an explicitly enabled IBM QPU;
-5. measure raw one-hot and energy quality, then repair one-hot violations;
-6. fix each retained assignment and solve exact fulfillment recourse;
-7. merge the neighborhood into the incumbent and validate the entire solution; and
-8. accept only a valid strict improvement.
+### 4.3 Sampler-assisted hybrid search
 
-This separation matters. QUBO penalties are useful for ranking local assignments, but
-they are not trusted as an exact representation of every business rule. Feasibility of
-the final plan is evidence for the recourse-and-validation pipeline, not proof that the
-raw sampler natively satisfied the constraints.
+The hybrid method changes only the local assignment proposal. If group $g$ retains
+$m_g$ plans, the QUBO width is
 
-### 3.3 Strengthened quantum proposal engine
+$$
+n_{\mathrm{QUBO}}=\sum_{g\in\mathcal G_{\mathrm{local}}}m_g\le n_{\max}.
+$$
 
-For group $g$ with $m_g$ choices, the gate-model implementation prepares a weight-one
-Dicke (W) state and uses an XY mixer that preserves one excitation. The final code uses
-a linear controlled-rotation W-state construction instead of a generic state-preparation
-instruction. It also changes the default mixer from a ring to the connected path
+The energy combines plan value, one-hot penalties, and pairwise resource-conflict
+surrogates. The feasible combinatorial subspace has
+
+$$
+N_{\mathrm{feasible}}=\prod_g m_g
+$$
+
+assignments instead of all $2^{n_{\mathrm{QUBO}}}$ strings, although it remains
+exponential in active groups.
+
+The safeguarded procedure is:
+
+1. start from a polished greedy incumbent;
+2. select a bounded conflict neighborhood and residualize frozen consumption;
+3. build a local QUBO and incumbent warm start;
+4. sample with exact enumeration, random sampling, simulated annealing, local QAOA, or
+   hardware-executed QAOA;
+5. measure raw one-hot and energy quality;
+6. repair one-hot violations and deduplicate proposals;
+7. solve exact fixed-assignment fulfillment recourse for the top proposals;
+8. merge and validate globally; and
+9. accept only a strict valid improvement.
+
+### 4.4 Constraint-preserving QAOA
+
+For $m_g$ choices, the implementation prepares the weight-one state
+
+$$
+\lvert W_{m_g}\rangle=\frac{1}{\sqrt{m_g}}\sum_{j=1}^{m_g}\lvert e_j\rangle.
+$$
+
+A connected XY path mixer uses
 
 $$
 E_g=\{(0,1),(1,2),\ldots,(m_g-2,m_g-1)\},
 $$
 
-reducing logical mixer edges from $m_g$ to $m_g-1$ when $m_g>2$ while retaining
-reachability within the one-hot subspace. QAOA angles are optimized using the exact
-feasible-subspace simulator, cached by QUBO and depth, and reused across matched
-hardware mitigation variants. This prevents repeated local angle optimization from
-being counted as distinct quantum work.
+requiring $m_g-1$ logical mixer edges rather than $m_g$ for a ring when $m_g>2$.
+QAOA angles are optimized in the exact feasible subspace, cached by QUBO and depth, and
+reused across matched hardware mitigation variants. Evaluation reports raw one-hot rate,
+exact-optimum hit rate and Wilson interval, conditional hit rate, near-optimal rate,
+normalized feasible gaps, and uniform-feasible controls.
 
-Sampler evaluation now reports raw one-hot rate, exact optimum hit rate with a 95%
-Wilson interval, optimum hit conditional on one-hot feasibility, rate within 1% of the
-feasible energy span, best and mean normalized feasible energy gaps, and corresponding
-uniform-feasible null values. These additions make rare-hit claims testable. The
-archived IBM run predates the path-mixer and linear-W changes, so its hardware outcomes
-are not attributed to the strengthened circuit until a matched rerun is completed.
+### 4.5 Method and execution terminology
 
-## 4. Experimental design
+QAOA is an optimization proposal method. In Qiskit, an IBM `backend` is the quantum
+processor or execution target; it is not an additional solver. Likewise, HiGHS, SCIP,
+and Gurobi are solver engines for the same MILP formulation, while exact LNS and full
+MILP are optimization methods. This distinction is maintained in code, figures, and
+interpretation.
 
-The full reviewed study contains 247 rows from 14 experiment families. The design
-includes a common six-method comparison; repeated real-size and synthetic-size scaling;
-candidate-universe, candidate-count, business-penalty, and QUBO-penalty sensitivity;
-inventory shocks; QUBO coefficient noise; a readout-error proxy; Pareto-pruning and
-batching ablations; sampler ablation; and a synthetic coordination control. A separate
-26-row archive contains two classical controls, six local-statevector controls, and 18
-IBM hardware trials.
+## 5. Experimental design
 
-Every experiment records configuration, data scope, runtime environment, source and
-problem hashes, method, objective decomposition, fill, reassignments, runtime, model or
-sampler diagnostics, and validator residuals. The validator independently recomputes
-assignment completeness, demand balance, group cohesion, candidate eligibility,
-inventory checkpoints, capacity, diversion thresholds, integrality, and the business
-objective. All methods are compared using this common evaluator.
+### 5.1 Evidence matrix and validation
 
-The real-data reports use normalized metrics and anonymized aggregates. Quantum
-hardware receives only a generated synthetic coordination instance. IBM trials used a
-16-logical-qubit QUBO, 512 shots per trial, QAOA depths $p=1$ and $p=2$, three mitigation
-settings, and three repetitions on the 156-qubit `ibm_marrakesh` backend. Exact feasible
-enumeration, a uniform-feasible null, greedy, exact MILP, and local statevector QAOA are
-the controls. Because the hardware matrix has only three repetitions per cell,
-differences are descriptive rather than statistically conclusive.
+The final notebook produces 516 aggregate rows across 14 families: common solver
+comparison; repeated real and generated scaling; candidate-universe and candidate-count
+sensitivity; business and QUBO penalty sensitivity; inventory shock; QUBO coefficient
+noise; a readout-noise proxy; Pareto and batching ablations; sampler comparison; and a
+coordinated synthetic trap. Of 516 rows, 513 returned solutions and all 513 passed the
+validator. The three remaining rows are frozen-routing models proven infeasible at 60%,
+65%, and 70% inventory reductions.
 
-## 5. Results
+The IBM matrix contains two depths, three mitigation strategies, and three repetitions:
+18 jobs at 8,192 shots each on `ibm_marrakesh`. The quantum processor receives an
+independently generated 16-variable coordination control, not challenge records.
+Controls include greedy, full MILP, exact feasible-state enumeration, uniform-feasible
+sampling, simulated annealing, and local statevector QAOA.
 
-### 5.1 Common solver comparison
+The validator independently recomputes assignment completeness, load cohesion, demand
+balance, integrality, candidate eligibility, cumulative ATP, enabled capacities,
+diversion thresholds, and the complete objective. All methods use this evaluator.
 
-| Method | Objective capture | Case fill | Reassigned orders | Runtime (s) | Interpretation |
+### 5.2 Reproducibility and privacy
+
+Local checkpoints record configuration, problem and source hashes, schema, environment,
+columns, row count, seeds, and content hashes. Raw challenge data, identifiers,
+commercial totals, evidence CSV/JSON, IBM job tables, queue snapshots, and manifests are
+not committed. Only screened aggregate, normalized, or synthetic figures are published.
+
+## 6. Results
+
+### 6.1 Common 100-group comparison
+
+| Method | Capture | Fill | Reassigned | Runtime | Search role |
 |---|---:|---:|---:|---:|---|
-| Default routing | 61.39% | 64.21% | 0 | 0.30 | Business baseline |
-| Greedy | 64.90% | 68.50% | 4 | 0.76 | Fast constructive solution |
-| Polished greedy | 64.90% | 68.50% | 4 | 2.86 | Recommended default |
-| Exact LNS | 64.90% | 68.50% | 4 | 7.00 | Quality escalation |
-| Full exact MILP | 64.90% | 68.50% | 4 | 2.76 | Zero-gap small-instance certificate |
-| Hybrid simulated annealing | 64.90% | 68.50% | 4 | 12.88 | Experimental comparator |
+| Default routing | 74.958% | 78.288% | 0 | 0.244 s | Business baseline |
+| Greedy | 76.817% | 79.907% | 13 | 0.583 s | Fast construction |
+| Polished greedy | 76.826% | 79.907% | 13 | 2.050 s | Exact policy recourse |
+| Exact LNS | 76.826% | 79.907% | 13 | 13.225 s | Quality escalation |
+| Full MILP, time-limited | 76.800% | 79.908% | 13 | 1.676 s | Bound-producing comparator |
+| Hybrid simulated annealing | 76.826% | 79.907% | 13 | 55.742 s | Proposal research path |
 
-Greedy increased objective capture by 3.51 percentage points and case fill by 4.29
-points relative to default routing. Exact fixed-assignment polishing added 119.44 raw
-objective units, only 0.004 percentage points of capture, and did not change fill.
-Exact LNS, full exact MILP, and hybrid search found no further accepted move on this
-subset. The result favors polished greedy as the routine default: it captures the
-verified quality plateau without paying the hybrid runtime. Full exact MILP remains
-valuable as a certificate at this size, not as the assumed full-scale production path.
+Greedy improves capture by 1.859 percentage points and case fill by 1.619 percentage
+points over default. Exact policy recourse adds 0.0085 capture points. Exact LNS makes
+only a negligible additional nominal move, and the hybrid accepts no post-polish move on
+this subset. The full MILP stops with a 0.0545% relative gap and a lower incumbent. This
+does not make the formulation weaker; it illustrates the value of preserving a strong
+anytime incumbent.
 
-![Privacy-safe solver comparison](../results/final/figures/submission_solver_summary.png)
+![Common solver comparison](../results/final/figures/submission_solver_summary.png)
 
-### 5.2 Scaling
+### 6.2 Repeated real scaling
 
-Repeated real subsets increased from 8 to 372 assignment groups and from 9 to 750
-orders. Median greedy runtime rose from 0.21 to 16.74 seconds; polished greedy rose from
-0.52 to 54.63 seconds; exact LNS rose from 1.72 to 74.03 seconds. The experimental
-hybrid was intentionally limited to at most 50 groups, where its median runtime was
-28.70 seconds. Full exact MILP was intentionally limited to at most 20 groups.
+Real subsets increase from 8 to all 372 assignment groups and from 9 to 750 orders. At
+372 groups, median runtime across three repetitions is 1.305 seconds for greedy, 4.816
+seconds for polished greedy, 26.143 seconds for exact LNS, and 101.169 seconds for
+hybrid search. Capture is 82.115% for greedy, 82.122% for exact LNS, and 82.115% for the
+hybrid at this full scope. The local hybrid QUBO reaches at most 16 variables.
 
-At 100, 250, and 372 groups, exact LNS improved the polished incumbent by 22.98, 277.14,
-and 12.48 raw objective units respectively. Those gains are small relative to the
-normalized objective, but they show why a bounded escalation layer remains useful when
-conflicts grow. The operational policy should therefore allocate a runtime budget: run
-polished greedy for every planning cycle, then invoke exact LNS only for difficult
-windows or when the value of a certificate exceeds the added latency.
+![Repeated real-data scaling](../results/final/figures/submission_scaling_summary.png)
 
-![Median real-data scaling](../results/final/figures/submission_scaling_summary.png)
+### 6.3 Generated scaling to 100,000 orders
 
-### 5.3 Coordination, robustness, and ablations
+Independent generated instances separate scale from real-subset composition. Greedy
+scales from a 0.357-second median at 1,000 orders to 39.163 seconds at 100,000. Exact LNS
+scales from 3.870 to 276.707 seconds. Hybrid search is evaluated through 20,000 orders,
+where median runtime is 155.935 seconds. Its maximum local QUBO remains exactly 32
+variables from 50 through 20,000 orders. Global order count therefore grows by three
+orders of magnitude without increasing the quantum-facing width.
 
-The synthetic coordination control was constructed so that independent greedy choices
-block a coordinated improvement. Greedy and polished greedy achieved 21.49% case fill
-and objective $-2745.6$. Exact LNS, full exact MILP, and the sampler-assisted hybrid
-reached 30.58% fill and objective $-2548.4$, a 197.2-unit improvement. Exact MILP needed
-0.05 seconds, exact LNS 0.26 seconds, and the simulated-annealing hybrid 3.40 seconds.
-This is evidence that the *neighborhood architecture* can represent coordinated moves;
-it is not quantum advantage because classical exact methods solved the control faster.
+| Generated orders | Greedy | Exact LNS | Hybrid | Max hybrid QUBO |
+|---:|---:|---:|---:|---:|
+| 1,000 | 0.357 s | 3.870 s | 75.779 s | 32 |
+| 5,000 | 1.876 s | 13.076 s | 157.100 s | 32 |
+| 10,000 | 3.727 s | 23.262 s | 106.698 s | 32 |
+| 20,000 | 7.657 s | 56.669 s | 155.935 s | 32 |
+| 50,000 | 19.377 s | 121.216 s | - | - |
+| 100,000 | 39.163 s | 276.707 s | - | - |
 
-Candidate-cap sensitivity showed the meaningful quality change between one retained
-candidate and two; larger caps were flat on the tested subset. Business penalty scaling
-changed the reported objective as expected but did not change routing or fill. All
-tested QUBO penalty combinations recovered the same synthetic optimum after recourse.
-Coefficient perturbations through 5% also preserved the final control solution.
+### 6.4 Inventory-shock frontier
 
-Under aggregate inventory shocks of 10%, 25%, and 40%, every method remained valid.
-Re-optimized routing consistently exceeded fixed-routing recourse: at the 40% shock,
-case fill was 69.66% versus 67.21%, and objective capture was 65.16% versus 63.42%.
-This demonstrates the main operational value of rerouting under changing availability.
-Pareto pruning preserved quality and was slightly faster in this study, but it remains
-opt-in because isolated dominance is not a proof under shared resources. Conflict-based
-batching was slightly faster than random batching without changing the common-subset
-outcome.
+Frozen nominal routing remains feasible through a 55% inventory reduction, then is
+proven infeasible at 60-70%. Adaptive methods remain feasible throughout. At 70%,
+greedy captures 72.162% with 76.560% fill, hybrid captures 72.204% with the same fill,
+and exact LNS captures 72.741% with 76.992% fill. Exact LNS therefore retains the
+strongest tested severe-scarcity frontier.
 
-Sampler ablation is also cautionary. Exact enumeration, random sampling, simulated
-annealing, and local statevector QAOA all recovered the coordinated synthetic move after
-repair and recourse. The random sampler's native one-hot rate was approximately 0.26%,
-whereas the constraint-preserving samplers were one-hot by construction. Identical final
-decisions therefore do not imply identical raw sample quality; downstream recourse can
-mask large sampler differences.
+![Inventory-shock robustness](../results/final/figures/submission_robustness_summary.png)
 
-## 6. Quantum hardware evidence
+### 6.5 Coordination, sensitivity, and ablation
 
-The IBM archive contains 18 QPU jobs and 512 shots per job. All QPU-derived final plans
-passed recourse and validation, and 16 of 18 recovered the best synthetic objective;
-the other two still improved on greedy. Across the 18 jobs, median native one-hot
-feasibility was 32.91%. Only a few shots hit the exact feasible QUBO optimum, as expected
-for a 256-state feasible space sampled 512 times per job.
+The coordinated synthetic control is constructed so independent greedy choices block a
+joint improvement. Greedy and polished greedy reach 21.49% fill. Exact LNS, full MILP,
+hybrid simulated annealing, and QAOA-derived proposals reach 30.58% fill and improve the
+synthetic objective by 197.2 units. Full MILP runs in 0.019 seconds, exact LNS in 0.129
+seconds, and hybrid simulated annealing in 27.873 seconds.
 
-Depth was the dominant signal. For $p=1$, the median transpiled circuit used 122
-two-qubit gates and depth 138; median raw one-hot feasibility by mitigation cell ranged
-from 50.78% to 58.98%. For $p=2$, the median circuit used 420 two-qubit gates and depth
-458; cell medians fell to 12.11%–15.23%, and no $p=2$ mitigation cell had a nonzero
-median exact-optimum hit rate. The deeper ideal statevector distribution had a better
-mean normalized gap than $p=1$ (0.283 versus 0.351 in matched 8,192-shot controls), but
-that theoretical improvement did not survive the hardware depth increase.
+![Synthetic coordination control](../results/final/figures/submission_coordination_summary.png)
 
-For $p=1$, measurement twirling plus dynamical decoupling had the largest observed
-median exact-hit rate, 0.3906%, while the unmitigated baseline had the strongest median
-one-hot feasibility, 58.98%. With only three trials per cell, neither difference supports
-a general mitigation claim. A uniformly sampled feasible state hits the unique optimum
-with probability $1/256=0.3906\%$ and has a mean normalized gap of 40.15%; this null
-context prevents overinterpreting a rare exact hit.
+Candidate-count sensitivity shows the dominant quality transition from one to two
+retained candidates: capture increases from about 75.01% to 76.83%; caps from two
+through six are flat. The local QUBO remains 16-17 variables. Under stronger unmet
+penalties, exact LNS shows its largest normalized separation from greedy at four times
+the base penalty; the hybrid adds only a negligible post-polish move on these cases.
 
-![Archived IBM depth trade-off](../results/final/figures/submission_ibm_depth_summary.png)
+Exact enumeration, random sampling, simulated annealing, and local statevector QAOA all
+recover the synthetic coordinated move after recourse. Their raw quality differs:
+random sampling is one-hot for only 0.352% of shots, while exact feasible sampling,
+simulated annealing, and the constraint-preserving QAOA control are one-hot by
+construction. Simulated annealing hits the exact optimum on 48.44% of shots; local QAOA
+does so on 1.21%; the uniform-feasible rate is 0.3906%. Identical final plans therefore
+do not imply identical proposal quality.
 
-The correct conclusion is that hardware is safely integrated but not competitive. The
-QPU did not improve solution quality or wall-clock time over exact MILP on the control.
-The experiment identified the next engineering target—two-qubit depth—while the exact
-recourse layer prevented noisy samples from becoming invalid plans.
+### 6.6 Noise and GPU controls
 
-## 7. Discussion: advantages of the hybrid design
+QUBO coefficient perturbations show a clear transition above roughly 10% relative
+noise; at 20%, median raw one-hot feasibility is about 29.4%. The independent QAOA
+readout-bit-flip proxy lowers one-hot feasibility to about 19.7% at a 10% flip
+probability. Exact repair and recourse recover the coordinated improvement in every
+noise row. These experiments are algorithmic proxies, not a physical hardware-noise
+model.
 
-The hybrid solver has five defensible strengths.
+GPU scoring helps only when batch arithmetic outweighs transfer. At 40 variables and
+4,096 samples, GPU compute is 15.1 times faster and end-to-end scoring is 6.2 times
+faster; at 16,384 samples the corresponding speedups are 49.0 and 17.2. At 256 variables
+and 16,384 samples the end-to-end speedup is about 11.1, while at 1,024 variables and
+131,072 samples it falls to about 1.17 because transfer dominates. GPU use is therefore
+optional and workload-dependent.
 
-First, **feasibility is solver-independent**. A separate validator recomputes all
-business constraints and objective terms. This catches adapter, heuristic, QUBO, and
-post-processing errors rather than trusting a solver status alone.
+## 7. IBM hardware evidence
 
-Second, **the hierarchy matches operational budgets**. Greedy construction supplies a
-fast plan, exact recourse improves quantities, exact LNS spends additional time only on
-interacting decisions, and full MILP is reserved for certificates. The architecture is
-valuable even if the quantum sampler is never enabled.
+The hardware study contains 18 successful QPU jobs, 8,192 shots each, on a 16-variable
+synthetic control. Across all $p=1$ variants, median raw one-hot feasibility is 65.34%,
+median exact-optimum hit rate is 0.6836%, transpiled depth is 43, two-qubit-gate count is
+40, and two-qubit depth is 10. For $p=2$, the corresponding medians are 10.36%, 0.0610%,
+448, 373, and 150. Shallow QAOA therefore preserves substantially more feasible-subspace
+structure and remains above the 0.3906% uniform-feasible exact-hit control.
 
-Third, **quantum scope is bounded and privacy-safe**. A local QUBO represents only a
-small active neighborhood, and the hardware study uses generated data. The approach
-avoids encoding the complete operational network into a prohibitive number of qubits or
-sending restricted tables to an external processor.
+![QAOA depth and raw quality](../results/final/figures/submission_ibm_depth_summary.png)
 
-Fourth, **samplers are interchangeable under one evaluator**. Exact, random, simulated,
-statevector, and QPU proposals are compared using the same QUBO, recourse model,
-validator, and metrics. This makes future quantum claims falsifiable against strong
-classical controls.
+All hardware-derived proposals recover the same 197.2-unit synthetic improvement after
+exact recourse and validation. Raw QPU quality and final plan quality must nevertheless
+be reported separately because recourse deliberately absorbs proposal failures.
 
-Fifth, **deployment does not depend on a license or operating system**. NumPy, pandas,
-SciPy/HiGHS, and PyYAML support the default workflow on Windows, macOS, and Linux.
-Gurobi, IBM Runtime, and CUDA scoring are isolated optional extras. The optional Gurobi
-experiment is worthwhile as a backend benchmark, but the final study should treat it as
-a follow-up because no matched licensed run is present in the archived evidence.
+End-to-end runtime includes local construction and optimization, IBM queueing,
+execution, and decoding. Median variant runtimes cluster near 42-54 seconds, but one
+$p=1$ baseline job waited about 11,926 seconds in the queue and reached 12,021 seconds
+end to end; one $p=2$ mitigation job reached about 349 seconds. A linear-scale bar chart
+would flatten every typical run. The corrected figure uses a logarithmic runtime axis,
+median labels, and individual-job dots.
 
-## 8. Limitations and future research
+![IBM hardware stress study with corrected runtime scale](../results/final/ibm/figures/ibm_hardware_stress.png)
 
-The real-data evidence comes from one supplied planning snapshot and selected nested
-subsets. It estimates algorithmic behavior, not future business impact. Candidate-DC
-authorization, enterprise working calendars, throughput maxima, customer-specific
-all-or-nothing rules, and commercial approval boundaries require owner confirmation.
-Full exact MILP was evaluated only at small scales, and all hardware claims come from a
-16-qubit synthetic control. The archived manifests also record a dirty worktree because
-Jupyter output autosaves changed a tracked notebook during the run; the final provenance
-implementation hashes normalized code-cell source separately, but old evidence is not
-retrospectively relabeled.
+## 8. Discussion
 
-The following research directions are prioritized:
+The evidence supports five advantages of the architecture.
 
-1. **Rerun the strengthened circuits.** Compare ring versus path mixers and generic
-   versus linear W-state preparation on the same backend calibration, shots, seeds, and
-   mitigation matrix. Report two-qubit depth and Wilson intervals before solution-level
-   metrics.
-2. **Adaptive depth and stopping.** Use shallow $p=1$ as the hardware baseline, stop a
-   variant whose one-hot interval or normalized gap is dominated, and increase depth
-   only when compiled resources remain within a calibrated error budget.
-3. **Warm starts and parameter transfer.** Transfer angles across related rolling
-   neighborhoods, evaluate warm-start QAOA, and separate classical optimization,
-   queueing, QPU execution, and end-to-end time.
-4. **Learning-guided neighborhoods.** Predict which inventory and dock conflicts are
-   most likely to admit a coordinated gain, while retaining exact LNS as the control and
-   validator as the acceptance gate.
-5. **Stochastic and rolling-horizon DOM.** Model forecast error, cancellations, lead-time
-   uncertainty, and repeated replanning with scenario or robust recourse rather than a
-   single deterministic snapshot.
-6. **Classical backend benchmark.** Run HiGHS and licensed Gurobi on the same compiled
-   models, time limits, machines, and seeds; compare incumbent quality, bounds, nodes,
-   and wall time. Solver agreement should be checked by independent validation, not
-   objective equality alone.
-7. **Operational pilot.** Add an explicit DC authorization table, working-day calendar,
-   capacity denominators, approval thresholds, and planner feedback. Measure accepted
-   recommendations and realized service, not only offline objective value.
+First, feasibility is method-independent. A separate validator recomputes every
+business rule and objective term, catching adapter, heuristic, QUBO, and post-processing
+errors.
 
-## 9. Conclusion
+Second, the hierarchy matches operational budgets. Greedy supplies a sub-second common
+incumbent, exact recourse improves fixed-policy quantities, and exact LNS concentrates
+additional search on interacting decisions. Full MILP remains useful for small-scope
+bounds but need not displace a stronger incumbent when time expires.
 
-This work delivers a complete, portable, and independently validated DOM optimization
-pipeline. On the common real-data subset, polished greedy reached the same displayed
-quality as exact LNS and full exact MILP in 2.86 seconds, making it the recommended
-default. Exact LNS remains a useful bounded escalation and demonstrated coordinated
-gains at larger scales and on a synthetic greedy trap. Quantum sampling is integrated
-as a replaceable local proposal engine behind deterministic repair, exact recourse, and
-global validation. IBM hardware results revealed a strong depth–feasibility trade-off
-and no quantum speed or quality advantage. The main result is therefore not a claim of
-quantum superiority; it is a safe experimental architecture in which a future quantum
-improvement can be measured without weakening the operational plan.
+Third, bounded neighborhoods decouple global planning scale from exact local model and
+QUBO width. Real scaling reaches the full 372 groups; generated classical scaling reaches
+100,000 orders; the hybrid reaches 20,000 with a 32-variable local QUBO.
+
+Fourth, samplers are interchangeable under one evaluator. Exact, random, annealing,
+statevector, and hardware proposals are measured against common recourse, validation,
+and uniform-feasible controls. This makes future comparisons falsifiable.
+
+Fifth, deployment is portable. NumPy, pandas, SciPy/HiGHS, and PyYAML support the
+default path on Windows, macOS, and Linux. Gurobi, IBM Runtime, and CUDA scoring are
+isolated opt-ins. Operational plan quality does not depend on any of them.
+
+## 9. Limitations and future research
+
+The real evidence comes from one supplied planning snapshot and selected nested subsets.
+It estimates algorithmic behavior, not realized business impact. Candidate-DC
+authorization, enterprise calendars, authoritative throughput maxima, customer rules,
+and approval boundaries require owner confirmation. The time-limited full MILP did not
+produce a zero-gap certificate at the 100-group common scope. Hardware evidence is a
+16-variable generated control, while large real and generated scaling use classical
+sampling. The experiment does not establish quantum advantage; it establishes safe
+integration, an above-uniform shallow-circuit signal, and measured depth and queue
+constraints.
+
+Priority next steps are:
+
+1. run a shadow-mode pilot across rolling historical windows and measure planner
+   acceptance and realized service;
+2. use exact LNS as the classical control for learning-guided conflict neighborhoods;
+3. add scenario-based inventory and lead-time uncertainty with expected-shortfall or
+   robust recourse;
+4. compare path-mixer depth, angle transfer, and calibrated error budgets across future
+   QPU generations;
+5. apply sequential stopping using Wilson intervals and normalized energy gaps; and
+6. benchmark HiGHS, SCIP, and licensed Gurobi on identical compiled matrices, budgets,
+   and hardware.
+
+## 10. Conclusion
+
+This work delivers a complete, portable, independently validated DOM solver. On the
+100-group common subset, greedy creates most of the improvement in 0.58 seconds and
+exact policy recourse reaches the strongest displayed nominal frontier in 2.05 seconds.
+Exact LNS is the stronger escalation under severe inventory shocks and high penalty
+weights. The solver reaches all 372 real groups and 100,000 generated orders, while the
+hybrid path reaches 20,000 generated orders without increasing its 32-variable local
+QUBO. Hardware-executed shallow QAOA produces an above-uniform exact-hit signal and all
+accepted proposals remain protected by exact recourse and validation. The central
+result is a solver architecture that delivers value now and provides a disciplined way
+to evaluate future proposal engines without weakening the operational plan.
 
 ## References
 
 [1] H. Zhao, M. O. Ball, and M. Kotake, “Optimization-based available-to-promise with
 multi-stage resource availability,” *Annals of Operations Research*, vol. 135, pp.
-65–85, 2005. <https://doi.org/10.1007/s10479-005-6235-7>
+65-85, 2005. <https://doi.org/10.1007/s10479-005-6235-7>
 
 [2] F. T. S. Chan, S. H. Chung, and K. L. Choy, “Optimization of order fulfillment in
 distribution network problems,” *Journal of Intelligent Manufacturing*, vol. 17, pp.
-307–319, 2006. <https://doi.org/10.1007/s10845-005-0003-z>
+307-319, 2006. <https://doi.org/10.1007/s10845-005-0003-z>
 
 [3] M. Vázquez-Noguerol, P. Comesaña-Benavides, A. Poler, and J. Prado-Prado, “An
 optimisation approach for the e-fulfilment problem with order splitting and delivery
 time windows,” *Central European Journal of Operations Research*, vol. 30, pp.
-1369–1402, 2022. <https://doi.org/10.1007/s10100-021-00778-x>
+1369-1402, 2022. <https://doi.org/10.1007/s10100-021-00778-x>
 
 [4] P. Shaw, “Using constraint programming and local search methods to solve vehicle
-routing problems,” in *Principles and Practice of Constraint Programming—CP98*, LNCS
-1520, pp. 417–431, 1998. <https://doi.org/10.1007/3-540-49481-2_30>
+routing problems,” in *Principles and Practice of Constraint Programming - CP98*, LNCS
+1520, pp. 417-431, 1998. <https://doi.org/10.1007/3-540-49481-2_30>
 
 [5] M. Fischetti and A. Lodi, “Local branching,” *Mathematical Programming*, vol. 98,
-pp. 23–47, 2003. <https://doi.org/10.1007/s10107-003-0395-5>
+pp. 23-47, 2003. <https://doi.org/10.1007/s10107-003-0395-5>
 
 [6] E. Danna, E. Rothberg, and C. Le Pape, “Exploring relaxation induced neighborhoods
-to improve MIP solutions,” *Mathematical Programming*, vol. 102, pp. 71–90, 2005.
+to improve MIP solutions,” *Mathematical Programming*, vol. 102, pp. 71-90, 2005.
 <https://doi.org/10.1007/s10107-004-0518-7>
 
 [7] E. Farhi, J. Goldstone, and S. Gutmann, “A quantum approximate optimization
@@ -459,7 +517,7 @@ Quantum Alternating Operator Ansatz,” *Algorithms*, vol. 12, no. 2, art. 34, 2
 <https://doi.org/10.3390/a12020034>
 
 [9] A. Bärtschi and S. Eidenbenz, “Deterministic preparation of Dicke states,” in
-*Fundamentals of Computation Theory*, LNCS 11651, pp. 126–139, 2019.
+*Fundamentals of Computation Theory*, LNCS 11651, pp. 126-139, 2019.
 <https://doi.org/10.1007/978-3-030-25027-0_9>
 
 [10] Z. Wang, N. C. Rubin, J. M. Dominy, and E. G. Rieffel, “XY mixers: analytical and
@@ -477,13 +535,3 @@ devices,” *Physical Review X*, vol. 10, art. 021067, 2020.
 [13] N. Tomesh, Z. H. Saleem, and M. Suchara, “Quantum local search with the quantum
 alternating operator ansatz,” *Quantum*, vol. 6, art. 781, 2022.
 <https://doi.org/10.22331/q-2022-08-22-781>
-
-[14] Q. Huangfu and J. A. J. Hall, “Parallelizing the dual revised simplex method,”
-*Mathematical Programming Computation*, vol. 10, pp. 119–142, 2018; HiGHS project
-documentation. <https://highs.dev/>
-
-[15] Gurobi Optimization, LLC, *Gurobi Optimizer Reference Manual*, 2026.
-<https://docs.gurobi.com/projects/optimizer/en/current/>
-
-[16] IBM Quantum, *Qiskit Runtime documentation*, 2026.
-<https://quantum.cloud.ibm.com/docs/en/guides>

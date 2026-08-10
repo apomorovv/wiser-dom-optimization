@@ -58,3 +58,21 @@ def test_each_notebook_experiment_explains_purpose_and_importance() -> None:
     for source in experiment_sections:
         assert "**Purpose.**" in source
         assert "**Why it matters.**" in source
+
+
+def test_notebook_defaults_match_the_final_submission_profile() -> None:
+    notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
+    setup = _source(code_cells[1])
+
+    for expected in [
+        'PROFILE = "full"',
+        "ENABLE_GPU_BENCHMARK = True",
+        "ENABLE_IBM_HARDWARE = False",
+        'IBM_HARDWARE_PROFILE = "presentation"',
+        "IBM_SHOTS = 8_192",
+        'IBM_BACKEND_NAME = "ibm_marrakesh"',
+    ]:
+        assert expected in setup
+
+    assert "QPU execution target, not an optimizer" in setup

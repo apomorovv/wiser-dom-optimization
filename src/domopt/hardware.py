@@ -88,7 +88,7 @@ def discover_ibm_backends(*, min_num_qubits: int = 1) -> pd.DataFrame:
         from qiskit_ibm_runtime import QiskitRuntimeService
     except ImportError as error:
         raise RuntimeError(
-            "IBM backend discovery requires the optional 'ibm' dependencies"
+            "IBM processor discovery through Qiskit requires the optional 'ibm' dependencies"
         ) from error
 
     service = QiskitRuntimeService()
@@ -236,4 +236,3 @@ def benchmark_qubo_batch_scoring(
                     }
                 )
     return pd.DataFrame(rows)
-

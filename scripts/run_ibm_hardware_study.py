@@ -25,7 +25,10 @@ from domopt.visualization import plot_ibm_backend_snapshot, plot_ibm_hardware_st
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", help="IBM backend name; default selects least busy")
+    parser.add_argument(
+        "--backend",
+        help="IBM processor target (Qiskit backend name); default selects least busy",
+    )
     parser.add_argument("--shots", type=int, default=512)
     parser.add_argument(
         "--profile",

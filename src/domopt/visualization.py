@@ -661,10 +661,10 @@ def plot_ibm_backend_snapshot(
 
     required = {"backend", "pending_jobs", "selected_least_busy"}
     if missing := required - set(backends.columns):
-        raise ValueError(f"IBM backend snapshot is missing {sorted(missing)}")
+        raise ValueError(f"IBM processor-target snapshot is missing {sorted(missing)}")
     data = backends.loc[backends["pending_jobs"] >= 0].copy()
     if data.empty:
-        raise ValueError("IBM backend snapshot has no usable queue values")
+        raise ValueError("IBM processor-target snapshot has no usable queue values")
     data = data.sort_values(["pending_jobs", "backend"], kind="mergesort")
     selection_column = (
         "selected_for_study" if "selected_for_study" in data else "selected_least_busy"
@@ -675,8 +675,8 @@ def plot_ibm_backend_snapshot(
     axis.invert_yaxis()
     axis.set(
         xlabel="Pending jobs at discovery",
-        ylabel="Accessible operational IBM backend",
-        title="IBM backend queue snapshot (green = study backend)",
+        ylabel="IBM quantum processor target",
+        title="IBM QPU queue snapshot (green = selected processor)",
     )
     axis.grid(axis="x", alpha=0.25)
     figure.tight_layout()
@@ -712,8 +712,8 @@ def plot_ibm_hardware_study(
     }
     summary["variant"] = summary.apply(
         lambda row: (
-            f"p={int(row['qaoa_layers'])} | "
-            f"{display_names.get(str(row['hardware_mitigation_strategy']), row['hardware_mitigation_strategy'])}"
+            f"p={int(row['qaoa_layers'])}\n"
+            f"{display_names.get(str(row['hardware_mitigation_strategy']), row['hardware_mitigation_strategy']).replace(' + measurement twirling', ' + twirling')}"
         ),
         axis=1,
     )
@@ -769,22 +769,64 @@ def plot_ibm_hardware_study(
         ),
         label="Execution",
     )
-    axes[1, 1].set(title="IBM job turnaround", ylabel="Seconds")
+    axes[1, 1].set(title="IBM Runtime job turnaround (median)", ylabel="Seconds")
     axes[1, 1].legend()
-    axes[1, 2].bar(
+    runtime_values = pd.to_numeric(
+        summary["runtime_seconds"], errors="coerce"
+    ).clip(lower=1e-3)
+    runtime_bars = axes[1, 2].bar(
         summary["variant"],
-        summary["runtime_seconds"],
+        runtime_values,
         yerr=asymmetric_error("runtime_seconds"),
         color=colors,
         capsize=4,
     )
-    axes[1, 2].set(title="End-to-end hybrid runtime", ylabel="Seconds")
+    qpu_rows = _feasible(
+        results.loc[results["sampler_backend"].astype(str).eq("ibm-qpu")]
+    ).copy()
+    qpu_rows["variant"] = qpu_rows.apply(
+        lambda row: (
+            f"p={int(row['qaoa_layers'])}\n"
+            f"{display_names.get(str(row['hardware_mitigation_strategy']), row['hardware_mitigation_strategy']).replace(' + measurement twirling', ' + twirling')}"
+        ),
+        axis=1,
+    )
+    variant_positions = {
+        variant: index for index, variant in enumerate(summary["variant"])
+    }
+    for variant, group in qpu_rows.groupby("variant", sort=False):
+        if variant not in variant_positions:
+            continue
+        runtimes = pd.to_numeric(group["runtime_seconds"], errors="coerce").dropna()
+        if runtimes.empty:
+            continue
+        offsets = np.linspace(-0.12, 0.12, len(runtimes)) if len(runtimes) > 1 else [0.0]
+        axes[1, 2].scatter(
+            variant_positions[variant] + offsets,
+            runtimes.clip(lower=1e-3),
+            color="#0f172a",
+            edgecolor="white",
+            linewidth=0.5,
+            s=22,
+            zorder=4,
+        )
+    axes[1, 2].set_yscale("log")
+    axes[1, 2].set(
+        title="End-to-end hybrid workflow runtime",
+        ylabel="Seconds (log scale; dots = individual jobs)",
+    )
+    axes[1, 2].bar_label(
+        runtime_bars,
+        labels=[f"{value:.1f}s" for value in runtime_values],
+        padding=3,
+        fontsize=7,
+    )
     for axis in axes.flat:
         axis.grid(axis="y", alpha=0.2)
-        axis.tick_params(axis="x", rotation=28, labelsize=8)
+        axis.tick_params(axis="x", rotation=0, labelsize=7)
     best = str(summary.iloc[0]["variant"])
     figure.suptitle(
-        f"IBM Dicke/XY-QAOA hardware stress test (green = best observed: {best})",
+        f"Dicke/XY-QAOA on IBM quantum hardware (green = best observed: {best})",
         fontsize=14,
     )
     figure.tight_layout()

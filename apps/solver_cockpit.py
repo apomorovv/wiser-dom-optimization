@@ -37,8 +37,31 @@ st.markdown(
     <style>
     :root { --ink: #11221c; --muted: #607168; --mint: #d8f3e5; --lime: #d6f36c; }
     .stApp { background: linear-gradient(145deg, #f7faf6 0%, #eef5ef 60%, #e8f0eb 100%); }
-    [data-testid="stSidebar"] { background: #10251d; }
-    [data-testid="stSidebar"] * { color: #f3f8f4; }
+    [data-testid="stSidebar"] { background: #10251d; color: #f3f8f4; }
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 { color: #f3f8f4; }
+    [data-testid="stSidebar"] [data-baseweb="input"] input,
+    [data-testid="stSidebar"] [data-baseweb="base-input"] input {
+      color: #11221c !important;
+      -webkit-text-fill-color: #11221c !important;
+      caret-color: #11221c !important;
+    }
+    [data-testid="stSidebar"] [data-baseweb="input"] input::placeholder,
+    [data-testid="stSidebar"] [data-baseweb="base-input"] input::placeholder {
+      color: #64766d !important;
+      -webkit-text-fill-color: #64766d !important;
+      opacity: 1;
+    }
+    [data-testid="stSidebar"] [data-baseweb="select"] > div,
+    [data-testid="stSidebar"] [data-baseweb="select"] span,
+    [data-testid="stSidebar"] [data-testid="stNumberInput"] button,
+    [data-testid="stSidebar"] [data-testid="stNumberInput"] button * {
+      color: #11221c !important;
+      -webkit-text-fill-color: #11221c !important;
+    }
     [data-testid="stMetric"] {
       background: rgba(255,255,255,.84); border: 1px solid #d9e4dc;
       padding: 1rem 1.1rem; border-radius: 16px; box-shadow: 0 8px 30px rgba(26,53,42,.05);
@@ -145,6 +168,11 @@ default_bundle = os.environ.get("DOMOPT_BUNDLE_DIR", "")
 
 with st.sidebar:
     st.subheader("Run configuration")
+    st.caption(
+        "Paste the local folder containing the five canonical CSV files, choose a "
+        "mode and compute budget, then click Run and certify. Entered values remain "
+        "visible as dark text in the white controls."
+    )
     bundle_text = st.text_input(
         "Challenge bundle directory",
         value=default_bundle,
