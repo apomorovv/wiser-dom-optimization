@@ -83,18 +83,6 @@ starts gate-model QAOA in the feasible one-hot subspace, and a connected XY path
 moves amplitude between candidates while preserving one excitation per group. The
 sampler proposes assignments; it never bypasses the detailed business constraints.
 
-## Optimization methods versus execution targets
-
-These terms are deliberately separated throughout the code and reports:
-
-| Term | Role |
-|---|---|
-| Greedy, polished greedy, exact LNS, full MILP | Classical optimization methods |
-| Simulated annealing, exact enumeration, random sampling, QAOA | Local QUBO proposal or control methods |
-| HiGHS, SCIP, Gurobi | MILP solver engines |
-| `ibm_marrakesh` / IBM `backend` | Quantum processor and Qiskit execution target, not a solver |
-| Exact recourse and validator | Feasibility and acceptance safeguards |
-
 The final synthetic-only hardware study contains 18 QPU jobs at 8,192 shots per job.
 For $p=1$, median raw one-hot feasibility is about 65.3% and the exact feasible-QUBO hit
 rate is about 0.684%, above the 0.391% uniform-feasible control. The $p=2$ circuit is
