@@ -19,9 +19,8 @@
 | Batching and decomposition | Conflict-based and random batch ablation |
 | Uncertainty or robustness | Inventory shocks, coefficient noise, readout proxy, and repeated runs |
 | Runnable notebook and repository | `notebooks/nestle_challenge_experiments.ipynb` and root README |
-| Six-to-ten-page challenge report | `reports/challenge_submission_report.md` and `.pdf` |
-| Full academic paper | `reports/final_report.md` and `.pdf` |
-| Five-to-seven-slide presentation | Seven-slide `reports/final_presentation.pdf` and `.pptx` |
+| Technical report | `reports/final_report.md` and `.pdf` |
+| Presentation | Seven-slide `reports/final_presentation.pdf` and `.pptx` |
 | One-page planner view | `reports/planner_view.md` and `.pdf` |
 | Planner-facing interactive copilot | `apps/solver_cockpit.py` plus README interaction guide |
 | Optional solver comparison | License-free HiGHS plus opt-in Gurobi notebook experiment |
