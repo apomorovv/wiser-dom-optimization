@@ -268,8 +268,7 @@ only screened figures.
 
 | Deliverable | Files |
 |---|---|
-| Academic research paper | `reports/final_report.md` and `.pdf` |
-| Challenge-criteria technical report, 6-10 pages | `reports/challenge_submission_report.md` and `.pdf` |
+| Technical report | `reports/final_report.md` and `.pdf` |
 | Two-page business/technical summary | `reports/business_technical_summary.md` and `.pdf` |
 | One-page planner view | `reports/planner_view.md` and `.pdf` |
 | Presentation | `reports/final_presentation.pptx` and `.pdf` |
@@ -304,6 +303,4 @@ Supporting documentation:
 - The evidence does not establish hardware superiority; it establishes a safe architecture,
   an above-uniform shallow-circuit signal, and measurable depth and queue constraints.
 
-See the [academic paper](reports/final_report.pdf) for the research treatment and the
-[challenge report](reports/challenge_submission_report.pdf) for the requirement-by-
-requirement submission narrative.
+See the [paper](reports/final_report.pdf) for the conducted research.
