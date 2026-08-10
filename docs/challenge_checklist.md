@@ -41,4 +41,3 @@
   or Qiskit execution target, not as a solver.
 - [x] The end-to-end hardware runtime figure uses a logarithmic scale, medians, and
   individual-job dots so queue outliers do not compress the comparison.
-- [x] The solver-cockpit sidebar keeps entered values visible in white fields.
