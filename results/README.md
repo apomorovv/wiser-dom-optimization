@@ -17,9 +17,9 @@ charts that expose absolute commercial objective or cost totals are also exclude
 These private files are not needed to run the repository or review the submission
 narrative.
 
-The academic paper, challenge report, summary, planner view, and presentation contain
-screened aggregate metrics. Synthetic controls demonstrate the execution and validation
-workflow and are not represented as business impact.
+The technical paper, summary, planner view, and presentation contain screened aggregate
+metrics. Synthetic controls demonstrate the execution and validation workflow and are
+not represented as business impact.
 
 ## Reproducing or replacing evidence
 

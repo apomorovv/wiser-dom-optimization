@@ -113,7 +113,7 @@ exact recourse and validation.
 | `tests/` | Unit, integration, privacy, notebook, UI, and validator regression tests |
 | `docs/` | Data guide, assumptions, formulation, method, reproducibility, and submission checklist |
 | `results/final/` | Screened normalized, aggregate, and synthetic figures only |
-| `reports/` | Academic paper, challenge report, two-page summary, planner view, and presentation |
+| `reports/` | Technical paper, two-page summary, planner view, and presentation |
 | `data/synthetic/` | Shareable generated examples; restricted challenge data are excluded |
 
 ## Install and validate

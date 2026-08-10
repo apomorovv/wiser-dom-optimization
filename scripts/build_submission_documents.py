@@ -774,52 +774,6 @@ def build_report() -> Path:
     return output
 
 
-def build_challenge_report() -> Path:
-    doc = Document()
-    _setup_styles(doc, compact=True)
-    _configure_section(
-        doc.sections[0],
-        label="WISER DOM | Challenge Submission Report",
-        subtitle="Requirement-by-requirement technical evidence",
-        first_page=True,
-    )
-    section = doc.sections[0]
-    section.top_margin = Inches(0.78)
-    section.bottom_margin = Inches(1.1)
-    section.left_margin = Inches(0.78)
-    section.right_margin = Inches(0.78)
-    _set_core_properties(
-        doc,
-        title="WISER Quantum Challenge Submission Report",
-        subject="Six-to-ten-page challenge criteria report",
-    )
-    _add_title_block(
-        doc,
-        kicker="Challenge submission report",
-        title="Scalable, Safeguarded DOM Optimization",
-        subtitle="Business value, mathematical model, implementation, scaling, and hardware evidence",
-        authors="Andrei Pomorov",
-        compact=True,
-        minimal=True,
-    )
-    _parse_markdown(
-        doc,
-        REPORTS / "challenge_submission_report.md",
-        compact=True,
-        heading_shift=-1,
-        front_matter_until="Portal summary",
-        forced_break_before={
-            "6.2 Coordinated improvement control",
-            "7.4 IBM hardware and runtime correction",
-            "8. Recommendation, limitations, and submission map",
-        },
-        figure_width_inches=5.1,
-    )
-    output = REPORTS / "challenge_submission_report.docx"
-    doc.save(output)
-    return output
-
-
 def build_summary() -> Path:
     doc = Document()
     _setup_styles(doc, compact=True)
@@ -905,7 +859,7 @@ def build_planner() -> Path:
 
 
 def main() -> int:
-    for builder in (build_report, build_challenge_report, build_summary, build_planner):
+    for builder in (build_report, build_summary, build_planner):
         print(builder().relative_to(ROOT))
     return 0
 
