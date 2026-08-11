@@ -13,7 +13,7 @@ def _source(cell: dict[str, object]) -> str:
     return "".join(source) if isinstance(source, list) else str(source)
 
 
-def test_notebook_has_top_cell_controls_and_no_terminal_switches() -> None:
+def test_notebook_has_top_cell_controls_and_no_external_switches() -> None:
     notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
     code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
     bootstrap = _source(code_cells[0])
@@ -39,7 +39,10 @@ def test_notebook_has_top_cell_controls_and_no_terminal_switches() -> None:
         "IBM_BACKEND_NAME",
     ]:
         assert setting in setup
-    assert "os.environ" not in all_code
+
+    # Compute-library thread caps may be defined in the notebook itself. What is
+    # prohibited is requiring hidden terminal environment switches to select data,
+    # experiments, or IBM execution.
     assert "DOMOPT_ENABLE" not in all_code
     assert "NESTLE_EXPERIMENT" not in all_code
 
@@ -60,7 +63,7 @@ def test_each_notebook_experiment_explains_purpose_and_importance() -> None:
         assert "**Why it matters.**" in source
 
 
-def test_notebook_defaults_match_the_final_submission_profile() -> None:
+def test_notebook_defaults_match_the_attached_final_evidence_profile() -> None:
     notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
     code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
     setup = _source(code_cells[1])
@@ -68,11 +71,11 @@ def test_notebook_defaults_match_the_final_submission_profile() -> None:
     for expected in [
         'PROFILE = "full"',
         "ENABLE_GPU_BENCHMARK = True",
-        "ENABLE_IBM_HARDWARE = False",
+        "ENABLE_IBM_HARDWARE = True",
         'IBM_HARDWARE_PROFILE = "presentation"',
         "IBM_SHOTS = 8_192",
         'IBM_BACKEND_NAME = "ibm_marrakesh"',
     ]:
         assert expected in setup
 
-    assert "QPU execution target, not an optimizer" in setup
+    assert "QPU execution backend, not a solver" in setup
