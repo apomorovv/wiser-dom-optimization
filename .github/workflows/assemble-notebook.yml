@@ -1,0 +1,74 @@
+name: Assemble corrected experiment notebook
+
+on:
+  push:
+    branches:
+      - notebook-fix-staging
+    paths:
+      - '.notebook_parts/**'
+      - '.github/workflows/assemble-notebook.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out staging branch
+        uses: actions/checkout@v4
+        with:
+          ref: notebook-fix-staging
+
+      - name: Assemble and validate notebook
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .notebook_parts/part*.b64 | tr -d '\n\r ' | base64 --decode > notebooks/nestle_challenge_experiments.ipynb
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('notebooks/nestle_challenge_experiments.ipynb')
+          with path.open(encoding='utf-8') as handle:
+              notebook = json.load(handle)
+
+          assert notebook['nbformat'] == 4
+          assert len(notebook['cells']) == 46, len(notebook['cells'])
+          assert notebook['cells'][0].get('id') == 'overview'
+          assert notebook['cells'][-1].get('id') == 's22'
+
+          for cell in notebook['cells']:
+              if cell.get('cell_type') == 'code':
+                  compile(''.join(cell.get('source', [])), f"<{cell.get('id')}>", 'exec')
+
+          text = path.read_text(encoding='utf-8')
+          required = [
+              '"scaling_repetitions":3',
+              '"base_orders":100',
+              '"hybrid_max_orders":20_000',
+              '"iterations":16',
+              'IBM_SHOTS = 8_192',
+              'IBM_BACKEND_NAME = "ibm_marrakesh"',
+              'proved=completed["optimality_gap"]',
+              'expected=(frame["experiment"].eq("inventory_shock")',
+              'for name,enabled in ENABLED_EXPERIMENTS.items()',
+          ]
+          missing = [value for value in required if value not in text]
+          assert not missing, missing
+          print(f'Validated {len(notebook["cells"])} cells in {path}')
+          PY
+
+      - name: Replace notebook and remove staging files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .notebook_parts
+          rm -f notebooks/_notebook_fix_readme.tmp
+          rm -f .github/workflows/assemble-notebook.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Restore full challenge notebook with final values and fixes'
+          git push origin HEAD:notebook-fix-staging
