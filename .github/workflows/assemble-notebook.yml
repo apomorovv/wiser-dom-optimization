@@ -7,6 +7,9 @@ on:
     paths:
       - '.notebook_parts/**'
       - '.github/workflows/assemble-notebook.yml'
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
