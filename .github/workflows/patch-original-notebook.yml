@@ -1,0 +1,445 @@
+name: Patch original challenge notebook
+
+on:
+  push:
+    branches:
+      - notebook-preserve-original-fix
+    paths:
+      - '.github/workflows/patch-original-notebook.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repair branch
+        uses: actions/checkout@v4
+        with:
+          ref: notebook-preserve-original-fix
+
+      - name: Apply requested notebook fixes without restructuring
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("notebooks/nestle_challenge_experiments.ipynb")
+          notebook = json.loads(path.read_text(encoding="utf-8"))
+          before_ids = [cell.get("id") for cell in notebook["cells"]]
+          cells = {cell.get("id"): cell for cell in notebook["cells"]}
+
+          required_ids = {
+              "setup",
+              "checkpoint-description",
+              "checkpoint-helper",
+              "milp-backend-description",
+              "milp-backend-run",
+              "graphics-description",
+              "graphics-run",
+              "qpu-description",
+          }
+          missing_ids = sorted(required_ids - set(cells))
+          if missing_ids:
+              raise RuntimeError(f"Missing notebook cells: {missing_ids}")
+
+          def source(cell_id: str) -> str:
+              return "".join(cells[cell_id]["source"])
+
+          def set_source(cell_id: str, text: str) -> None:
+              if not text.endswith("\n"):
+                  text += "\n"
+              cells[cell_id]["source"] = text.splitlines(keepends=True)
+
+          setup = source("setup")
+          setup = setup.replace(
+              "from dataclasses import asdict, replace\n",
+              "import os\nfrom dataclasses import asdict, replace\n",
+              1,
+          )
+          setup = setup.replace(
+              "from pathlib import Path\n\n",
+              "from pathlib import Path\n\n"
+              "# Avoid BLAS/solver oversubscription on the 16-core host.\n"
+              "os.environ[\"OMP_NUM_THREADS\"] = \"16\"\n"
+              "os.environ[\"OPENBLAS_NUM_THREADS\"] = \"16\"\n"
+              "os.environ[\"MKL_NUM_THREADS\"] = \"16\"\n"
+              "os.environ[\"NUMEXPR_NUM_THREADS\"] = \"16\"\n\n",
+              1,
+          )
+          setup = setup.replace(
+              "    benchmark_qubo_batch_scoring,\n",
+              "    benchmark_qubo_batch_scoring as _benchmark_qubo_batch_scoring,\n",
+              1,
+          )
+
+          profile_values = '''PROFILE_OVERRIDES: dict[str, object] = {
+              "sizes": (8, 20, 50, 100, 150, 200, 250, 300, 372),
+              "synthetic_sizes": (
+                  50, 100, 250, 500, 1_000, 2_000, 5_000,
+                  10_000, 20_000, 50_000, 100_000,
+              ),
+              "scaling_repetitions": 3,
+              "base_orders": 100,
+              "exact_max_orders": 100,
+              "hybrid_max_orders": 20_000,
+              "lns_max_orders": 372,
+              "inventory_shocks": (
+                  0.00, 0.10, 0.25, 0.40, 0.50,
+                  0.55, 0.60, 0.65, 0.70,
+              ),
+              "seeds": (3, 11, 29, 47, 71, 101, 131, 173),
+              "noise_levels": (
+                  0.000, 0.010, 0.030, 0.050,
+                  0.075, 0.100, 0.150, 0.200,
+              ),
+              "readout_noise_levels": (
+                  0.000, 0.005, 0.010, 0.020,
+                  0.030, 0.050, 0.075, 0.100,
+              ),
+              "penalty_scales": (0.25, 0.50, 1.00, 2.00, 4.00, 8.00),
+              "candidate_counts": (1, 2, 3, 4, 5, 6),
+              "qubo_one_hot_multipliers": (1.05, 1.15, 1.25, 1.50, 2.00),
+              "qubo_pair_multipliers": (0.0, 0.5, 1.0, 1.5, 2.0),
+          }'''
+          hybrid_values = '''HYBRID_OVERRIDES: dict[str, object] = {
+              "iterations": 10,
+              "neighborhood_orders": 8,
+              "max_qubo_variables": 40,
+              "max_candidates_per_order": 5,
+              "num_reads": 256,
+              "sweeps": 300,
+              "top_k_recourse": 8,
+              "recourse_time_limit_seconds": 20.0,
+              "one_hot_penalty_multiplier": 1.25,
+              "pair_penalty_multiplier": 1.0,
+              "batch_strategy": "conflict",
+              "polish_initial_incumbent": True,
+              "qaoa_layers": 1,
+              "qaoa_restarts": 16,
+              "qaoa_mixer_topology": "path",
+              "milp_backend": "scipy-highs",
+              "thread_count": None,
+              "seed": 11,
+          }'''
+          lns_values = '''EXACT_LNS_OVERRIDES: dict[str, object] = {
+              "iterations": 16,
+              "minimum_neighborhood_groups": 4,
+              "initial_neighborhood_groups": 12,
+              "maximum_neighborhood_groups": 32,
+              "maximum_neighborhood_orders": 120,
+              "maximum_local_fulfillment_variables": 25_000,
+              "local_time_limit_seconds": 30.0,
+              "mip_relative_gap": 0.001,
+              "diversification_interval": 3,
+              "adaptive": True,
+              "polish_initial_incumbent": True,
+              "milp_backend": "scipy-highs",
+              "thread_count": None,
+              "seed": 11,
+          }'''
+
+          setup = setup.replace(
+              'PROFILE_OVERRIDES: dict[str, object] = {}',
+              profile_values,
+              1,
+          )
+          setup = setup.replace(
+              'HYBRID_OVERRIDES: dict[str, object] = {}',
+              hybrid_values,
+              1,
+          )
+          setup = setup.replace(
+              'EXACT_LNS_OVERRIDES: dict[str, object] = {}',
+              lns_values,
+              1,
+          )
+
+          gpu_wrapper = '''ENABLE_GPU_BENCHMARK = True
+
+          def benchmark_qubo_batch_scoring(*, include_gpu=True, **kwargs):
+              return _benchmark_qubo_batch_scoring(
+                  variable_counts=(16, 32, 40, 64, 96, 128, 256, 512, 1_024),
+                  sample_counts=(256, 4_096, 16_384, 65_536, 131_072),
+                  repeats=7,
+                  seed=7,
+                  include_gpu=include_gpu,
+                  **kwargs,
+              )'''
+          setup = setup.replace(
+              'ENABLE_GPU_BENCHMARK = True',
+              gpu_wrapper,
+              1,
+          )
+          setup = setup.replace(
+              'ENABLE_IBM_HARDWARE = False  # True submits generated synthetic circuits to IBM Quantum',
+              'ENABLE_IBM_HARDWARE = True  # submits only the generated synthetic control',
+              1,
+          )
+          setup = setup.replace(
+              'IBM_BACKEND_NAME = "ibm_marrakesh"  # QPU execution target, not an optimizer',
+              'IBM_BACKEND_NAME = "ibm_marrakesh"  # QPU execution backend, not a solver',
+              1,
+          )
+          set_source("setup", setup)
+
+          checkpoint_description = source("checkpoint-description").replace(
+              "avoid opaque hash-directory proliferation. Infeasible rows are rejected before use.",
+              "avoid opaque hash-directory proliferation. Every infeasible row stops the notebook "
+              "except a genuine MILP infeasibility of the frozen-routing control under a severe "
+              "inventory shock; that case is retained as an experimental outcome.",
+          )
+          set_source("checkpoint-description", checkpoint_description)
+
+          helper = source("checkpoint-helper")
+          helper_start = helper.index(
+              "    invalid = frame.loc[~feasible_mask(frame)]\n"
+          )
+          helper_end = helper.index(
+              "    experiment_frames[name] = frame\n",
+              helper_start,
+          )
+          helper_block = '''    invalid_mask = ~feasible_mask(frame)
+
+              if invalid_mask.any():
+                  error_type = (
+                      frame["error_type"]
+                      if "error_type" in frame.columns
+                      else pd.Series("", index=frame.index, dtype=str)
+                  )
+                  error_message = (
+                      frame["error_message"]
+                      if "error_message" in frame.columns
+                      else pd.Series("", index=frame.index, dtype=str)
+                  )
+
+                  expected_fixed_policy_infeasible = (
+                      frame["experiment"].eq("inventory_shock")
+                      & frame["level"].str.contains(
+                          "fixed_routing_recourse",
+                          na=False,
+                      )
+                      & error_type.eq("ClassicalSolverError")
+                      & error_message.str.contains(
+                          r"status=2|infeasible",
+                          case=False,
+                          na=False,
+                          regex=True,
+                      )
+                  )
+
+                  unexpected_invalid = frame.loc[
+                      invalid_mask & ~expected_fixed_policy_infeasible
+                  ]
+
+                  if not unexpected_invalid.empty:
+                      diagnostic_columns = [
+                          "experiment",
+                          "level",
+                          "validation_categories",
+                          "validation_violation_count",
+                          "error_type",
+                          "error_message",
+                      ]
+                      columns = [
+                          column
+                          for column in diagnostic_columns
+                          if column in unexpected_invalid.columns
+                      ]
+                      raise RuntimeError(
+                          "Unexpected infeasible experiment rows: "
+                          f"{unexpected_invalid[columns].to_dict('records')}"
+                      )
+
+                  if expected_fixed_policy_infeasible.any():
+                      columns = ["level"]
+                      if "error_type" in frame.columns:
+                          columns.append("error_type")
+                      if "error_message" in frame.columns:
+                          columns.append("error_message")
+                      print(
+                          "Expected stress-test infeasibility:",
+                          frame.loc[
+                              expected_fixed_policy_infeasible,
+                              columns,
+                          ].to_dict("records"),
+                      )
+
+          '''
+          helper = (
+              helper[:helper_start]
+              + helper_block
+              + helper[helper_end:]
+          )
+          set_source("checkpoint-helper", helper)
+
+          backend_description = source("milp-backend-description").replace(
+              "a transparent skip rather than causing the notebook to fail.",
+              "a transparent skip rather than causing the notebook to fail. "
+              "Under a time limit or nonzero MIP gap, different feasible incumbents are valid; "
+              "objective equality is required only when all completed backends prove optimality.",
+          )
+          set_source("milp-backend-description", backend_description)
+
+          backend = source("milp-backend-run")
+          backend_start = backend.index(
+              "backend_comparison = pd.DataFrame(backend_rows)\n"
+          )
+          backend_end = backend.index(
+              "backend_comparison.to_csv(\n",
+              backend_start,
+          )
+          backend_block = '''backend_comparison = pd.DataFrame(backend_rows)
+          completed_backends = backend_comparison.loc[
+              backend_comparison["status"].eq("completed")
+          ].copy()
+
+          assert completed_backends["feasible"].all()
+
+          backend_comparison["objective_gap_to_best"] = pd.NA
+          backend_comparison["objective_gap_to_best_pct"] = pd.NA
+
+          if not completed_backends.empty:
+              best_objective = completed_backends["objective_value"].max()
+              objective_gaps = (
+                  best_objective
+                  - completed_backends["objective_value"]
+              )
+              backend_comparison.loc[
+                  completed_backends.index,
+                  "objective_gap_to_best",
+              ] = objective_gaps
+              backend_comparison.loc[
+                  completed_backends.index,
+                  "objective_gap_to_best_pct",
+              ] = (
+                  objective_gaps
+                  / max(1.0, abs(best_objective))
+                  * 100.0
+              )
+
+          proved_optimal = (
+              completed_backends["optimality_gap"]
+              .fillna(float("inf"))
+              .abs()
+              .le(1e-9)
+          )
+
+          if len(completed_backends) >= 2 and proved_optimal.all():
+              objective_spread = (
+                  completed_backends["objective_value"].max()
+                  - completed_backends["objective_value"].min()
+              )
+              assert abs(objective_spread) <= 1e-6 * max(
+                  1.0,
+                  completed_backends["objective_value"].abs().max(),
+              )
+
+          '''
+          backend = (
+              backend[:backend_start]
+              + backend_block
+              + backend[backend_end:]
+          )
+          set_source("milp-backend-run", backend)
+
+          graphics_description = source("graphics-description").replace(
+              "generation while preserving per-experiment checkpoints and aggregate-only privacy.",
+              "generation while preserving per-experiment checkpoints and aggregate-only privacy. "
+              "The aggregate is rebuilt from every enabled verified checkpoint, not only the "
+              "current in-memory dictionary.",
+          )
+          set_source("graphics-description", graphics_description)
+
+          graphics = source("graphics-run")
+          graphics_start = graphics.index("prepared_frames = [\n")
+          graphics_end = graphics.index(
+              "if prepared_frames:\n",
+              graphics_start,
+          )
+          graphics_prefix = '''prepared_frames: list[pd.DataFrame] = []
+
+          for experiment_name, enabled in ENABLED_EXPERIMENTS.items():
+              if not enabled:
+                  continue
+
+              frame = experiment_frames.get(experiment_name)
+              if frame is None:
+                  frame = run_or_load(experiment_name)
+
+              if frame is not None:
+                  prepared_frames.append(
+                      frame.dropna(axis=1, how="all")
+                  )
+
+          '''
+          graphics = (
+              graphics[:graphics_start]
+              + graphics_prefix
+              + graphics[graphics_end:]
+          )
+          set_source("graphics-run", graphics)
+
+          after_ids = [cell.get("id") for cell in notebook["cells"]]
+          assert before_ids == after_ids, "Notebook structure changed"
+
+          for cell in notebook["cells"]:
+              if cell.get("cell_type") == "code":
+                  compile(
+                      "".join(cell.get("source", [])),
+                      f"<{cell.get('id')}>",
+                      "exec",
+                  )
+
+          setup_check = source("setup")
+          helper_check = source("checkpoint-helper")
+          backend_check = source("milp-backend-run")
+          graphics_check = source("graphics-run")
+          qpu_check = source("qpu-description")
+
+          required_setup = [
+              '"scaling_repetitions": 3',
+              '"base_orders": 100',
+              '"hybrid_max_orders": 20_000',
+              '"iterations": 10',
+              '"iterations": 16',
+              'ENABLE_IBM_HARDWARE = True',
+              'IBM_SHOTS = 8_192',
+              'IBM_BACKEND_NAME = "ibm_marrakesh"',
+          ]
+          assert all(value in setup_check for value in required_setup)
+          assert "expected_fixed_policy_infeasible" in helper_check
+          assert "proved_optimal" in backend_check
+          assert "objective_gap_to_best_pct" in backend_check
+          assert (
+              "for experiment_name, enabled in ENABLED_EXPERIMENTS.items()"
+              in graphics_check
+          )
+          assert "QAOA is the optimization proposal method" in qpu_check
+          assert "it is not another solver" in qpu_check
+
+          path.write_text(
+              json.dumps(notebook, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          print(
+              f"Patched only the requested cells; preserved "
+              f"{len(before_ids)} cells and their order."
+          )
+          PY
+
+      - name: Commit corrected notebook only
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/patch-original-notebook.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add notebooks/nestle_challenge_experiments.ipynb
+          git add -u .github/workflows/patch-original-notebook.yml
+          git commit -m 'Fix original notebook while preserving its structure'
+          git push origin HEAD:notebook-preserve-original-fix
