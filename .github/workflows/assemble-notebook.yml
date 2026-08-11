@@ -46,7 +46,10 @@ jobs:
               if cell.get('cell_type') == 'code':
                   compile(''.join(cell.get('source', [])), f"<{cell.get('id')}>", 'exec')
 
-          text = path.read_text(encoding='utf-8')
+          source_text = '\n'.join(
+              ''.join(cell.get('source', []))
+              for cell in notebook['cells']
+          )
           required = [
               '"scaling_repetitions":3',
               '"base_orders":100',
@@ -58,7 +61,7 @@ jobs:
               'expected=(frame["experiment"].eq("inventory_shock")',
               'for name,enabled in ENABLED_EXPERIMENTS.items()',
           ]
-          missing = [value for value in required if value not in text]
+          missing = [value for value in required if value not in source_text]
           assert not missing, missing
           print(f'Validated {len(notebook["cells"])} cells in {path}')
           PY
