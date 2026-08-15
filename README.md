@@ -170,8 +170,7 @@ streamlit run apps/solver_cockpit.py
 In the browser:
 
 1. Paste the directory containing the five canonical CSV inputs into **Challenge bundle
-   directory**. The text in white entry fields is intentionally dark and remains
-   visible while you type.
+   directory**.
 2. Choose **Fast**, **Quality**, or **Hybrid**. Fast is the routine default; Quality
    adds exact LNS; Hybrid enables the bounded sampler-assisted path.
 3. Choose the **MILP backend** and CPU budget. Leave the portable SciPy/HiGHS defaults when
