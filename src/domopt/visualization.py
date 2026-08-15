@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.axes import Axes
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 
 from .experiments import rank_ibm_hardware_strategies
 
@@ -20,11 +23,24 @@ _METHOD_STYLES = {
 }
 
 
-def _save(figure: plt.Figure, output_path: str | Path) -> Path:
+def _subplots(
+    nrows: int = 1,
+    ncols: int = 1,
+    *,
+    figsize: tuple[float, float] | None = None,
+) -> tuple[Figure, Any]:
+    """Create a PNG-oriented figure without loading an interactive GUI backend."""
+
+    figure = Figure(figsize=figsize)
+    FigureCanvasAgg(figure)
+    return figure, figure.subplots(nrows=nrows, ncols=ncols)
+
+
+def _save(figure: Figure, output_path: str | Path) -> Path:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=180, bbox_inches="tight")
-    plt.close(figure)
+    figure.clear()
     return path
 
 
@@ -47,7 +63,7 @@ def plot_method_objectives(metrics: pd.DataFrame, output_path: str | Path) -> Pa
     if valid.empty:
         raise ValueError("There are no feasible methods to plot")
 
-    figure, axis = plt.subplots(figsize=(7, 4))
+    figure, axis = _subplots(figsize=(7, 4))
     axis.bar(valid["method"], valid["objective_value"], color="#2563eb")
     axis.set(xlabel="Method", ylabel="Validated objective", title="DOM objective by method")
     axis.grid(axis="y", alpha=0.25)
@@ -57,7 +73,7 @@ def plot_method_objectives(metrics: pd.DataFrame, output_path: str | Path) -> Pa
 
 def _solver_comparison(frame: pd.DataFrame, output: Path) -> Path:
     data = _feasible(frame).sort_values("objective_value", ascending=False)
-    figure, axes = plt.subplots(2, 2, figsize=(11, 8))
+    figure, axes = _subplots(2, 2, figsize=(11, 8))
     palette = ["#64748b", "#0ea5e9", "#14b8a6", "#16a34a", "#7c3aed", "#e11d48"]
     colors = [palette[index % len(palette)] for index in range(len(data))]
     axes[0, 0].bar(
@@ -100,7 +116,7 @@ def _solver_frontier(frame: pd.DataFrame, output: Path) -> Path:
     data["gap_basis_points"] = 10_000.0 * (
         best_capture - data["objective_capture_rate"].astype(float)
     )
-    figure, axis = plt.subplots(figsize=(8, 5))
+    figure, axis = _subplots(figsize=(8, 5))
     for row in data.itertuples(index=False):
         method = str(row.method)
         style = _METHOD_STYLES.get(method, {"marker": "o"})
@@ -154,7 +170,7 @@ def _size_scaling(frame: pd.DataFrame, output: Path) -> Path:
         .median(numeric_only=True)
         .sort_values(["method", x_column])
     )
-    figure, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+    figure, axes = _subplots(1, 3, figsize=(15, 4.5))
     for method, group in summary.groupby("method", sort=True):
         style = _METHOD_STYLES.get(method, {"marker": "o", "linestyle": "-"})
         raw = data.loc[data["method"] == method]
@@ -244,7 +260,7 @@ def _candidate_scope(frame: pd.DataFrame, output: Path) -> Path:
             "network_intersection": "Network intersection",
         }
     )
-    figure, axes = plt.subplots(1, 3, figsize=(14, 4.3))
+    figure, axes = _subplots(1, 3, figsize=(14, 4.3))
     measures = [
         ("candidate_count", "Candidate rows", 1.0),
         ("objective_capture_rate", "Objective capture (%)", 100.0),
@@ -276,7 +292,7 @@ def _line_sensitivity(
     title: str,
 ) -> Path:
     data = _feasible(frame)
-    figure, axes = plt.subplots(1, 3, figsize=(15, 4.3))
+    figure, axes = _subplots(1, 3, figsize=(15, 4.3))
     measures = [
         ("objective_capture_rate", "Objective capture (%)"),
         ("case_fill_rate", "Case fill rate"),
@@ -304,7 +320,7 @@ def _line_sensitivity(
 
 def _business_penalty(frame: pd.DataFrame, output: Path) -> Path:
     data = _feasible(frame)
-    figure, axes = plt.subplots(1, 3, figsize=(15, 4.3))
+    figure, axes = _subplots(1, 3, figsize=(15, 4.3))
     measures = [
         ("case_fill_rate", "Case fill rate", 100.0),
         ("penalty_cost", "Realized penalty cost", 1.0),
@@ -330,7 +346,7 @@ def _business_penalty(frame: pd.DataFrame, output: Path) -> Path:
 
 
 def _heatmap(
-    axis: plt.Axes,
+    axis: Axes,
     table: pd.DataFrame,
     *,
     title: str,
@@ -373,7 +389,7 @@ def _qubo_coefficient_noise(frame: pd.DataFrame, output: Path) -> Path:
         values="raw_one_hot_rate",
         aggfunc="mean",
     )
-    figure, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    figure, axes = _subplots(1, 2, figsize=(12, 4.5))
     _heatmap(
         axes[0],
         improvement,
@@ -410,7 +426,7 @@ def _qaoa_readout_noise(frame: pd.DataFrame, output: Path) -> Path:
         values="hybrid_improvement",
         aggfunc="mean",
     )
-    figure, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    figure, axes = _subplots(1, 2, figsize=(12, 4.5))
     _heatmap(
         axes[0],
         one_hot,
@@ -446,7 +462,7 @@ def _qubo_penalties(frame: pd.DataFrame, output: Path) -> Path:
         values="raw_one_hot_rate",
         aggfunc="mean",
     )
-    figure, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    figure, axes = _subplots(1, 2, figsize=(12, 4.5))
     _heatmap(
         axes[0],
         objective,
@@ -471,7 +487,7 @@ def _qubo_penalties(frame: pd.DataFrame, output: Path) -> Path:
 def _ablations(frame: pd.DataFrame, output: Path) -> Path:
     data = _feasible(frame).copy()
     data["label"] = data["experiment"].str.replace("_", " ") + "\n" + data["level"]
-    figure, axes = plt.subplots(1, 2, figsize=(13, max(4, 0.55 * len(data))))
+    figure, axes = _subplots(1, 2, figsize=(13, max(4, 0.55 * len(data))))
     improvement = data["hybrid_improvement"].fillna(0)
     axes[0].barh(data["label"], improvement, color="#7c3aed")
     axes[0].set(xlabel="Improvement over incumbent", title="Solution effect")
@@ -515,7 +531,7 @@ def _hybrid_timing(frame: pd.DataFrame, output: Path) -> Path:
         ("recourse_seconds", "Exact recourse", "#16a34a"),
         ("other_seconds", "Other", "#f59e0b"),
     ]
-    figure, axis = plt.subplots(figsize=(9, max(3.5, 0.6 * len(data))))
+    figure, axis = _subplots(figsize=(9, max(3.5, 0.6 * len(data))))
     left = np.zeros(len(data))
     for column, label, color in stages:
         values = pd.to_numeric(data.get(column, 0), errors="coerce").fillna(0).to_numpy()
@@ -639,7 +655,7 @@ def plot_hardware_benchmark(
         columns="backend",
         values="end_to_end_samples_per_second",
     )
-    figure, axis = plt.subplots(figsize=(10, max(4, 0.55 * len(pivot))))
+    figure, axis = _subplots(figsize=(10, max(4, 0.55 * len(pivot))))
     pivot.plot.barh(ax=axis)
     axis.set(
         xlabel="End-to-end QUBO samples scored per second",
@@ -670,7 +686,7 @@ def plot_ibm_backend_snapshot(
         "selected_for_study" if "selected_for_study" in data else "selected_least_busy"
     )
     colors = np.where(data[selection_column], "#16a34a", "#94a3b8")
-    figure, axis = plt.subplots(figsize=(9, max(4, 0.45 * len(data))))
+    figure, axis = _subplots(figsize=(9, max(4, 0.45 * len(data))))
     axis.barh(data["backend"], data["pending_jobs"], color=colors)
     axis.invert_yaxis()
     axis.set(
@@ -725,7 +741,7 @@ def plot_ibm_hardware_study(
         upper = summary[f"{measure}_q75"].to_numpy(dtype=float)
         return np.vstack([center - lower, upper - center])
 
-    figure, axes = plt.subplots(2, 3, figsize=(16, 8))
+    figure, axes = _subplots(2, 3, figsize=(16, 8))
     axes[0, 0].bar(
         summary["variant"],
         100 * summary["raw_one_hot_rate"],

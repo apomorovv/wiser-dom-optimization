@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from dataclasses import replace
 
 import pandas as pd
@@ -140,3 +143,27 @@ def test_scaling_visualization_aggregates_repetitions_and_new_methods(
     assert set(generated) == {"size_scaling"}
     assert generated["size_scaling"].is_file()
     assert generated["size_scaling"].stat().st_size > 0
+
+
+def test_visualization_import_does_not_load_a_gui_backend(tmp_path) -> None:
+    """File-only chart generation must not depend on Tk or another window system."""
+
+    environment = os.environ.copy()
+    environment["MPLCONFIGDIR"] = str(tmp_path / "matplotlib")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import domopt.visualization; "
+                "assert 'matplotlib.pyplot' not in sys.modules; "
+                "assert 'tkinter' not in sys.modules"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
